@@ -1,7 +1,7 @@
 import { select as inquirerSelect, confirm as inquirerConfirm } from '@inquirer/prompts';
 import type { Runner } from './exec.js';
-import { runAzJson, runAzRestJson } from './exec.js';
-import { gitConfigGet, gitConfigSet, getCache, teamContextCacheKey } from './config.js';
+import { runAzJson } from './exec.js';
+import { gitConfigGet, gitConfigSet } from './config.js';
 import { fetchWorkItem, fieldValue } from './work-items.js';
 import { NotFoundError, UserError } from './errors.js';
 
@@ -58,7 +58,7 @@ export const defaultPrompts: TeamResolverPrompts = {
  * Project resolution.
  * ------------------------------------------------------------------ */
 
-export type ProjectSource = 'flag' | 'global-override' | 'repo-local' | 'context';
+export type ProjectSource = 'flag' | 'repo-local' | 'context';
 
 export interface ResolveProjectResult {
   project: string;
@@ -66,9 +66,9 @@ export interface ResolveProjectResult {
 }
 
 /**
- * Resolution order: --project flag > `dova.project.override` (global) >
- * `dova.project` (repo-local) > the project already implied by context
- * resolution (git remote / az devops defaults).
+ * Resolution order: --project flag > `dova.project` (repo-local) > the
+ * project already implied by context resolution (git remote / az devops
+ * defaults).
  */
 export async function resolveProject(
   runner: Runner,
@@ -77,9 +77,6 @@ export async function resolveProject(
   opts: { cwd?: string } = {}
 ): Promise<ResolveProjectResult> {
   if (flags.project) return { project: flags.project, source: 'flag' };
-
-  const globalOverride = await gitConfigGet(runner, 'dova.project.override', { global: true });
-  if (globalOverride) return { project: globalOverride, source: 'global-override' };
 
   const repoLocal = await gitConfigGet(runner, 'dova.project', { cwd: opts.cwd });
   if (repoLocal) return { project: repoLocal, source: 'repo-local' };
@@ -95,7 +92,7 @@ export async function resolveProject(
  * Team resolution.
  * ------------------------------------------------------------------ */
 
-export type TeamSource = 'flag' | 'global-override' | 'repo-local' | 'interactive';
+export type TeamSource = 'flag' | 'repo-local' | 'interactive';
 
 export interface ResolveTeamResult {
   team: string;
@@ -105,15 +102,15 @@ export interface ResolveTeamResult {
 export interface ResolveTeamOptions {
   cwd?: string;
   prompts?: TeamResolverPrompts;
-  /** Skip the override/repo-local git config lookups and go straight to interactive resolution. */
+  /** Skip the repo-local git config lookup and go straight to interactive resolution. */
   reresolve?: boolean;
 }
 
 /**
- * Resolution order: --team flag > `dova.team.override` (global) >
- * `dova.team` (repo-local) > interactive picker over `az devops team list`
- * (auto-selected when the project has exactly one team). On interactive
- * resolution, offers to save the pick to repo-local git config.
+ * Resolution order: --team flag > `dova.team` (repo-local) > interactive
+ * picker over `az devops team list` (auto-selected when the project has
+ * exactly one team). On interactive resolution, offers to save the pick
+ * to repo-local git config.
  */
 export async function resolveTeam(
   runner: Runner,
@@ -129,9 +126,6 @@ export async function resolveTeam(
   }
 
   if (!opts.reresolve) {
-    const globalOverride = await gitConfigGet(runner, 'dova.team.override', { global: true });
-    if (globalOverride) return { team: globalOverride, source: 'global-override' };
-
     const repoLocal = await gitConfigGet(runner, 'dova.team', { cwd: opts.cwd });
     if (repoLocal) return { team: repoLocal, source: 'repo-local' };
   }
@@ -212,7 +206,10 @@ export async function resolveAreaPath(
 }
 
 /* ------------------------------------------------------------------ *
- * Iteration path resolution ("current sprint").
+ * Iteration path resolution ("current sprint"). dova only ever targets
+ * dev.azure.com, and the extension version that runs against it supports
+ * `--timeframe` (confirmed from source) — so this is one az call, no
+ * fallback for older extension versions that don't exist here.
  * ------------------------------------------------------------------ */
 
 export interface ResolvedIterationPath {
@@ -226,26 +223,13 @@ export async function resolveIterationPath(
   project: string,
   team: string
 ): Promise<ResolvedIterationPath> {
-  let current: AzTeamIteration[];
-  try {
-    current = await runAzJson<AzTeamIteration[]>(runner, [
-      'boards', 'iteration', 'team', 'list',
-      '--organization', orgUrl,
-      '--project', project,
-      '--team', team,
-      '--timeframe', 'current',
-    ]);
-  } catch (err) {
-    // Defensive fallback for azure-devops extension versions old enough not
-    // to support --timeframe (current versions do — verified against the
-    // extension's boards/iteration.py, which passes timeframe straight
-    // through to WorkClient.get_team_iterations).
-    if (err instanceof Error && /unrecognized arguments.*--timeframe/i.test(err.message)) {
-      current = await fetchCurrentIterationViaRest(runner, orgUrl, project, team);
-    } else {
-      throw err;
-    }
-  }
+  const current = await runAzJson<AzTeamIteration[]>(runner, [
+    'boards', 'iteration', 'team', 'list',
+    '--organization', orgUrl,
+    '--project', project,
+    '--team', team,
+    '--timeframe', 'current',
+  ]);
 
   const iteration = current[0];
   if (iteration?.path) {
@@ -261,108 +245,15 @@ export async function resolveIterationPath(
   };
 }
 
-async function fetchCurrentIterationViaRest(
-  runner: Runner,
-  orgUrl: string,
-  project: string,
-  team: string
-): Promise<AzTeamIteration[]> {
-  const uri = `${orgUrl}/${encodeURIComponent(project)}/${encodeURIComponent(team)}/_apis/work/teamsettings/iterations?%24timeframe=current&api-version=7.1`;
-  const result = await runAzRestJson<{ value: AzTeamIteration[] }>(runner, { method: 'get', uri });
-  return result.value ?? [];
-}
-
-/* ------------------------------------------------------------------ *
- * Full team context: team + area + iteration, cached in dova's own
- * config dir (not git config — sprints roll over independent of branch).
- * ------------------------------------------------------------------ */
-
-export interface ResolvedTeamContext {
-  team: string;
-  teamSource: TeamSource;
-  areaPath: string;
-  iterationPath: string;
-  warnings: string[];
-  fromCache: boolean;
-}
-
-export interface ResolveTeamContextOptions {
-  cwd?: string;
-  prompts?: TeamResolverPrompts;
-  reresolve?: boolean;
-}
-
-export async function resolveTeamContext(
-  runner: Runner,
-  org: string,
-  orgUrl: string,
-  project: string,
-  flags: { team?: string } = {},
-  opts: ResolveTeamContextOptions = {}
-): Promise<ResolvedTeamContext> {
-  const teamResult = await resolveTeam(runner, orgUrl, project, flags, opts);
-  const cache = getCache();
-  const key = teamContextCacheKey(org, project, teamResult.team);
-
-  if (!opts.reresolve) {
-    const cached = cache.get('teamContext')[key];
-    if (cached) {
-      return {
-        team: teamResult.team,
-        teamSource: teamResult.source,
-        areaPath: cached.areaPath,
-        iterationPath: cached.iterationPath,
-        warnings: cached.warning ? [cached.warning] : [],
-        fromCache: true,
-      };
-    }
-  }
-
-  const prompts = opts.prompts ?? defaultPrompts;
-  const [area, iteration] = [
-    await resolveAreaPath(runner, orgUrl, project, teamResult.team, prompts),
-    await resolveIterationPath(runner, orgUrl, project, teamResult.team),
-  ];
-  const warnings = [area.warning, iteration.warning].filter((w): w is string => Boolean(w));
-
-  const all = cache.get('teamContext');
-  cache.set('teamContext', {
-    ...all,
-    [key]: {
-      org,
-      project,
-      team: teamResult.team,
-      areaPath: area.areaPath,
-      iterationPath: iteration.iterationPath,
-      warning: warnings[0],
-      resolvedAt: new Date().toISOString(),
-    },
-  });
-
-  return {
-    team: teamResult.team,
-    teamSource: teamResult.source,
-    areaPath: area.areaPath,
-    iterationPath: iteration.iterationPath,
-    warnings,
-    fromCache: false,
-  };
-}
-
 /* ------------------------------------------------------------------ *
  * Create-context resolution: what --area/--iteration a *new* work item
- * should get. Layers two tiers on top of resolveTeamContext() that skip
- * team resolution entirely — team is only ever a means to an area/
- * iteration pair (`az boards work-item create` takes --area/--iteration,
- * not --team), so once area/iteration are already known there's no
- * reason to resolve, cache, or even ask about a team name.
- *
- * This matters when a repo's tickets aren't all the same team as the
- * repo's own default team (a shared-library repo, a bug that's actually
- * a different product area's territory), and it doubles as an escape
- * hatch from resolveTeam's interactive picker for a non-interactive/
- * agent caller that has a ticket id in hand but no TTY to answer a
- * prompt with.
+ * should get. Team is only ever a means to that pair (`az boards
+ * work-item create` takes --area/--iteration, not --team), so once
+ * they're known there's nothing left to resolve or ask about a team
+ * name for — and everything durable here lives in one place, repo-local
+ * git config, same as `dova.team`/`dova.project`. No separate cache
+ * dir: a repo only ever has one team's worth of tickets in it, so
+ * caching by team (rather than just by repo) bought nothing real.
  * ------------------------------------------------------------------ */
 
 export type CreateContextSource = 'like' | 'repo-local-area' | 'team';
@@ -377,7 +268,10 @@ export interface ResolvedCreateContext {
   source: CreateContextSource;
 }
 
-export interface ResolveCreateContextOptions extends ResolveTeamContextOptions {
+export interface ResolveCreateContextOptions {
+  cwd?: string;
+  prompts?: TeamResolverPrompts;
+  reresolve?: boolean;
   /** Work item id to copy area/iteration path from directly, bypassing team resolution entirely. */
   like?: string;
   /** Persist the --like ticket's area/iteration as this repo's default (requires `like`). */
@@ -385,17 +279,24 @@ export interface ResolveCreateContextOptions extends ResolveTeamContextOptions {
 }
 
 /**
- * Resolution order: `--like <id>` (copies area/iteration straight off an
- * existing work item — one `boards work-item show` call, no team
- * involved) > `dova.area`+`dova.iteration` repo-local git config (set by
- * a prior `--like ... --save`) > `resolveTeamContext()`'s team-based
- * path. Once `dova.area`/`dova.iteration` are saved they supersede
- * `dova.team` for future creates in this repo — that's intentional: a
- * saved example ticket is a more specific answer than a team name.
+ * Resolution order: `--like <id>` or `--team <name>` (both explicit,
+ * one-off overrides — `--like` copies area/iteration straight off an
+ * existing work item, one `boards work-item show` call, no team
+ * involved; `--team` skips straight to `resolveAreaPath()`/
+ * `resolveIterationPath()` for that team) > saved `dova.area`+
+ * `dova.iteration` repo-local git config > `resolveTeam()`'s normal
+ * fallback (repo-local `dova.team`, or an interactive pick) followed by
+ * the same area/iteration resolution.
+ *
+ * A fresh team-based resolution is saved to `dova.area`/`dova.iteration`
+ * afterward — but only when the team itself came from something durable
+ * (repo-local config, or a pick the user just confirmed saving), never
+ * from the one-off `--team` flag. That mirrors `--like` without
+ * `--save`: an explicit override for this one call shouldn't silently
+ * become the repo's new default.
  */
 export async function resolveCreateContext(
   runner: Runner,
-  org: string,
   orgUrl: string,
   project: string,
   flags: { team?: string } = {},
@@ -430,7 +331,10 @@ export async function resolveCreateContext(
     return { team: null, areaPath, iterationPath, warnings: [], fromCache: false, source: 'like' };
   }
 
-  if (!opts.reresolve) {
+  // --team is an explicit ad-hoc override too, same standing as --like —
+  // it must reach team-based resolution below rather than being silently
+  // shadowed by whatever's already saved for this repo.
+  if (!opts.reresolve && !flags.team) {
     const [savedArea, savedIteration] = await Promise.all([
       gitConfigGet(runner, 'dova.area', { cwd: opts.cwd }),
       gitConfigGet(runner, 'dova.iteration', { cwd: opts.cwd }),
@@ -440,13 +344,23 @@ export async function resolveCreateContext(
     }
   }
 
-  const teamContext = await resolveTeamContext(runner, org, orgUrl, project, flags, opts);
+  const prompts = opts.prompts ?? defaultPrompts;
+  const teamResult = await resolveTeam(runner, orgUrl, project, flags, opts);
+  const area = await resolveAreaPath(runner, orgUrl, project, teamResult.team, prompts);
+  const iteration = await resolveIterationPath(runner, orgUrl, project, teamResult.team);
+  const warnings = [area.warning, iteration.warning].filter((w): w is string => Boolean(w));
+
+  if (teamResult.source !== 'flag') {
+    await gitConfigSet(runner, 'dova.area', area.areaPath, { cwd: opts.cwd });
+    await gitConfigSet(runner, 'dova.iteration', iteration.iterationPath, { cwd: opts.cwd });
+  }
+
   return {
-    team: teamContext.team,
-    areaPath: teamContext.areaPath,
-    iterationPath: teamContext.iterationPath,
-    warnings: teamContext.warnings,
-    fromCache: teamContext.fromCache,
+    team: teamResult.team,
+    areaPath: area.areaPath,
+    iterationPath: iteration.iterationPath,
+    warnings,
+    fromCache: false,
     source: 'team',
   };
 }

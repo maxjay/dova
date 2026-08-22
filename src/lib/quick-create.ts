@@ -72,15 +72,15 @@ async function buildFoundInPermalink(runner: Runner, ctx: ResolvedContext, at: s
 
 /**
  * Shared guts of `dova bug` and `dova wi quick`: resolve team/area/
- * iteration (silently, using the cache in the common case), optionally
- * build a --at permalink, and file the item.
+ * iteration (silently, from saved repo-local git config in the common
+ * case — see resolveCreateContext()), optionally build a --at
+ * permalink, and file the item.
  */
 export async function quickCreateWorkItem(runner: Runner, opts: QuickCreateOptions): Promise<QuickCreateResult> {
   const ctx = await resolveContext(runner, { project: opts.project }, { cwd: opts.cwd });
   const projectResult = await resolveProject(runner, ctx.project, { project: opts.project }, { cwd: opts.cwd });
   const createContext = await resolveCreateContext(
     runner,
-    ctx.org,
     ctx.orgUrl,
     projectResult.project,
     { team: opts.team },

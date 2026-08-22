@@ -45,7 +45,6 @@ export function registerWiCreateCommand(wi: Command): void {
     const projectResult = await resolveProject(runner, ctx.project, { project: opts.project });
     const createContext = await resolveCreateContext(
       runner,
-      ctx.org,
       ctx.orgUrl,
       projectResult.project,
       { team: opts.team },
