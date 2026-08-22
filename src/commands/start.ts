@@ -1,25 +1,25 @@
 import type { Command } from 'commander';
-import { addContextOptions, addJsonOption, addTeamOptions, notImplemented } from '../lib/command-helpers.js';
+import { addContextOptions, addJsonOption, addTeamOptions, addNoColorOption } from '../lib/command-helpers.js';
+import { emit, getColor } from '../lib/output.js';
+import { runStart, renderStartHuman } from '../lib/start.js';
+
+interface StartFlags {
+  org?: string;
+  orgUrl?: string;
+  project?: string;
+  repo?: string;
+  team?: string;
+  reresolve?: boolean;
+  primary?: string;
+  assign?: boolean;
+  json?: string | boolean;
+  color: boolean;
+}
 
 /**
- * NOT YET IMPLEMENTED. Scaffolded so the command tree, --help, and shell
- * completions are complete; wire up the real logic against
- * lib/context.ts + lib/team-resolver.ts next.
- *
- * Planned behavior (see project brief):
- *   - Portfolio-level ids (Epic/Feature/etc, by state category not literal
- *     type name) expand to a multi-select of their non-completed children.
- *   - First id is primary unless --primary given; only the primary drives
- *     the branch name via the user's type->prefix map.
- *   - Checks branch.<name>.dova-workitems across local branches before
- *     creating a duplicate; best-effort remote-branch-name scan as a
- *     secondary check.
- *   - Transitions each item to its next InProgress-category state
- *     (resolved from process metadata, never a literal state string);
- *     skips + warns instead of regressing an item already past InProgress.
- *   - Offers to assign unassigned items to the current user.
- *   - Tracks the linked set via branch.<name>.dova-workitems /
- *     branch.<name>.dova-primary (local git config, never pushed).
+ * The daily entry point for beginning work: branch, transition state,
+ * assign, and track one or more work items. See lib/start.ts for the
+ * implementation — this file is just the commander wiring.
  */
 export function registerStartCommand(program: Command): void {
   const cmd = program
@@ -33,6 +33,24 @@ export function registerStartCommand(program: Command): void {
   addContextOptions(cmd);
   addTeamOptions(cmd);
   addJsonOption(cmd);
+  addNoColorOption(cmd);
 
-  cmd.action(() => notImplemented('dova start'));
+  cmd.action(async (ids: string[], opts: StartFlags) => {
+    const color = getColor(opts.color === false);
+    const result = await runStart({
+      ids,
+      primary: opts.primary,
+      assign: opts.assign,
+      org: opts.org,
+      orgUrl: opts.orgUrl,
+      project: opts.project,
+      repo: opts.repo,
+      team: opts.team,
+      reresolve: opts.reresolve,
+      json: opts.json,
+      color,
+    });
+
+    await emit(result, opts, () => renderStartHuman(result, color));
+  });
 }

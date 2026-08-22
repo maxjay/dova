@@ -43,19 +43,17 @@ export interface OutputFlags {
   jq?: string;
 }
 
-export function filterJsonFields(
-  data: Record<string, unknown>,
-  fields?: string[]
-): Record<string, unknown> {
-  if (!fields || fields.length === 0) return data;
+export function filterJsonFields(data: object, fields?: string[]): Record<string, unknown> {
+  const record = data as Record<string, unknown>;
+  if (!fields || fields.length === 0) return record;
   const out: Record<string, unknown> = {};
   for (const field of fields) {
-    if (!(field in data)) {
+    if (!(field in record)) {
       throw new UserError(`Unknown --json field "${field}".`, [
-        `Available fields: ${Object.keys(data).join(', ')}`,
+        `Available fields: ${Object.keys(record).join(', ')}`,
       ]);
     }
-    out[field] = data[field];
+    out[field] = record[field];
   }
   return out;
 }
@@ -83,11 +81,7 @@ export async function applyJq(data: jq.JqInput, expression: string): Promise<str
  * the full result object the command computed, from which --json fields
  * are selected.
  */
-export async function emit(
-  data: Record<string, unknown>,
-  flags: OutputFlags,
-  renderHuman: () => void
-): Promise<void> {
+export async function emit(data: object, flags: OutputFlags, renderHuman: () => void): Promise<void> {
   if (flags.jq !== undefined && flags.json === undefined) {
     throw new UserError('--jq requires --json.', ['Example: --json <fields> --jq <expr>']);
   }
