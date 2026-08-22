@@ -105,7 +105,7 @@ export async function postPrComment(
   prId: number,
   text: string
 ): Promise<AzCommentThread> {
-  const body = JSON.stringify({ comments: [{ parentCommentId: 0, content: text, commentType: 'text' }], status: 'active' });
+  const body = { comments: [{ parentCommentId: 0, content: text, commentType: 'text' }], status: 'active' };
   return runAzRestJson<AzCommentThread>(runner, {
     method: 'post',
     uri: threadsUri(orgUrl, project, repo, prId),
@@ -132,7 +132,7 @@ export async function replyToPrThread(
   const thread = await fetchThreadById(runner, orgUrl, project, repo, prId, threadId);
   const parentCommentId = thread.comments[thread.comments.length - 1]?.id ?? 1;
   const uri = threadCommentsUri(orgUrl, project, repo, prId, threadId);
-  const body = JSON.stringify({ content: text, commentType: 'text', parentCommentId });
+  const body = { content: text, commentType: 'text', parentCommentId };
   return runAzRestJson<AzComment>(runner, { method: 'post', uri, body, headers: ['Content-Type=application/json'] });
 }
 
@@ -178,8 +178,7 @@ export async function setPrThreadStatus(
   status: AzThreadStatusApi
 ): Promise<AzCommentThread> {
   const uri = threadUri(orgUrl, project, repo, prId, threadId);
-  const body = JSON.stringify({ status });
-  return runAzRestJson<AzCommentThread>(runner, { method: 'patch', uri, body, headers: ['Content-Type=application/json'] });
+  return runAzRestJson<AzCommentThread>(runner, { method: 'patch', uri, body: { status }, headers: ['Content-Type=application/json'] });
 }
 
 /* ------------------------------------------------------------------ *

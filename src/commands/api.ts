@@ -84,7 +84,10 @@ export function registerApiCommand(program: Command): void {
     const data = await runAzRestJson<unknown>(runner, {
       method: validateMethod(opts.method),
       uri: url,
-      body: opts.body,
+      // Passed straight through, not via `body`/toAsciiSafeJson: this is
+      // the user's own raw text, which may already use az's own
+      // @path/to/file.json syntax that must not be re-encoded.
+      rawBody: opts.body,
       resource: opts.resource,
     });
 

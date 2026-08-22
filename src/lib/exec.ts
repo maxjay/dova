@@ -120,10 +120,35 @@ export async function runAzJson<T>(runner: Runner, args: string[], opts?: { cwd?
  */
 export const AZURE_DEVOPS_AAD_RESOURCE = '499b84ac-1321-427f-aa17-267ca6975798';
 
+/**
+ * `JSON.stringify`, but every character outside printable ASCII is escaped
+ * to `\uXXXX`. `az rest --body` has a long-standing, still-open upstream
+ * bug (Azure/azure-cli#30366, #22616) where a body string containing a
+ * character outside Latin-1 — an em dash, a curly quote, plenty of
+ * ordinary non-English names — can throw `UnicodeEncodeError` while az
+ * sends it, regardless of az CLI version. `\uXXXX` escapes are plain
+ * ASCII and standard JSON syntax — Azure DevOps decodes them back to the
+ * real character on its end — so a body built this way can never contain
+ * a byte that bug can trip on, independent of whatever az does with it.
+ */
+export function toAsciiSafeJson(value: unknown): string {
+  // eslint-disable-next-line no-control-regex
+  return JSON.stringify(value).replace(/[^\x00-\x7E]/g, (ch) => `\\u${ch.charCodeAt(0).toString(16).padStart(4, '0')}`);
+}
+
 export interface AzRestOptions {
   method: 'get' | 'post' | 'patch' | 'put' | 'delete';
   uri: string;
-  body?: string;
+  /** A JSON-serializable value dova constructs — serialized via `toAsciiSafeJson`. Mutually exclusive with `rawBody`. */
+  body?: unknown;
+  /**
+   * A pre-formed string passed straight through as `--body`, untouched —
+   * for callers (namely `dova api`, the escape hatch) handing through a
+   * user-typed body that may already use az's own `@path/to/file.json`
+   * syntax, which `toAsciiSafeJson` must never be applied to. The caller
+   * owns avoiding the Latin-1 bug in this case. Mutually exclusive with `body`.
+   */
+  rawBody?: string;
   headers?: string[];
   /** Override the AAD resource `az rest` requests a token for. Defaults to Azure DevOps. */
   resource?: string;
@@ -133,7 +158,8 @@ export interface AzRestOptions {
 /** `runAzJson`, specialized for `az rest` against Azure DevOps — see `AZURE_DEVOPS_AAD_RESOURCE`. */
 export async function runAzRestJson<T>(runner: Runner, opts: AzRestOptions): Promise<T> {
   const args = ['rest', '--method', opts.method, '--uri', opts.uri, '--resource', opts.resource ?? AZURE_DEVOPS_AAD_RESOURCE];
-  if (opts.body !== undefined) args.push('--body', opts.body);
+  if (opts.body !== undefined) args.push('--body', toAsciiSafeJson(opts.body));
+  else if (opts.rawBody !== undefined) args.push('--body', opts.rawBody);
   for (const header of opts.headers ?? []) args.push('--headers', header);
   return runAzJson<T>(runner, args, { cwd: opts.cwd });
 }
