@@ -86,3 +86,10 @@ export interface AzComment {
   /** "text" | "codeChange" | "system" — system comments ("X created the PR") aren't real discussion. */
   commentType?: string;
 }
+
+/** GitRepository, from `az repos show` — only used for its `defaultBranch` (e.g. "refs/heads/main"). */
+export interface AzGitRepository {
+  id: string;
+  name: string;
+  defaultBranch?: string;
+}

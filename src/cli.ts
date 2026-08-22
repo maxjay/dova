@@ -1,6 +1,8 @@
 import { Command } from 'commander';
 import { registerStatusCommand } from './commands/status.js';
 import { registerLinkCommand } from './commands/link.js';
+import { registerListCommand } from './commands/list.js';
+import { registerSummarizeCommand } from './commands/summarize.js';
 import { registerBugCommand } from './commands/bug.js';
 import { registerViewCommand } from './commands/view.js';
 import { registerWiCommand } from './commands/wi/index.js';
@@ -29,6 +31,8 @@ export function buildProgram(): Command {
 
   registerStatusCommand(program);
   registerLinkCommand(program);
+  registerListCommand(program);
+  registerSummarizeCommand(program);
   registerBugCommand(program);
   registerViewCommand(program);
   registerWiCommand(program);

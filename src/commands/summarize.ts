@@ -1,0 +1,254 @@
+import type { Command } from 'commander';
+import { defaultRunner, runAzJson, tryGit, type Runner } from '../lib/exec.js';
+import { resolveContext, type ResolvedContext } from '../lib/context.js';
+import { gitConfigGet } from '../lib/config.js';
+import { fetchActivePrForBranch } from '../lib/pr.js';
+import { fetchWorkItemsByIds, fieldValue, stripHtml } from '../lib/work-items.js';
+import { addContextOptions, addJsonOption, addJqOption, addNoColorOption } from '../lib/command-helpers.js';
+import { emit, getColor } from '../lib/output.js';
+import { UserError } from '../lib/errors.js';
+import type { AzGitRepository, AzWorkItem } from '../types/azure-devops.js';
+
+export interface SummarizeFlags {
+  org?: string;
+  orgUrl?: string;
+  project?: string;
+  repo?: string;
+  base?: string;
+  json?: string | boolean;
+  jq?: string;
+  color: boolean;
+}
+
+export interface SummarizeWorkItem {
+  id: number;
+  type: string | null;
+  state: string | null;
+  title: string | null;
+  description: string | null;
+  primary: boolean;
+}
+
+export interface SummarizeCommit {
+  sha: string;
+  subject: string;
+}
+
+export type BaseSource = 'flag' | 'pr-target' | 'origin-head' | 'repo-default';
+
+export interface SummarizeResult {
+  branch: string;
+  /** The ref actually diffed/logged against, e.g. "origin/main". */
+  base: string;
+  baseSource: BaseSource;
+  workItems: SummarizeWorkItem[];
+  commits: SummarizeCommit[];
+  diffStat: string;
+  fullLog?: string;
+  fullDiff?: string;
+}
+
+const DESCRIPTION_TRUNCATE = 500;
+
+function truncate(text: string, n: number): { shown: string; truncated: boolean } {
+  if (text.length <= n) return { shown: text, truncated: false };
+  return { shown: text.slice(0, n).trimEnd() + '…', truncated: true };
+}
+
+/**
+ * What to diff/log the branch against: --base always wins; otherwise an
+ * active PR's own target branch is the authoritative answer when one
+ * exists; otherwise the repo's default branch, found for free from a
+ * locally-known `origin/HEAD` symref first, falling back to one
+ * `az repos show` call only if that's unset (a plain clone doesn't
+ * always populate it).
+ */
+export async function resolveBase(
+  runner: Runner,
+  ctx: ResolvedContext,
+  branch: string,
+  flagBase: string | undefined,
+  cwd: string | undefined
+): Promise<{ ref: string; source: BaseSource }> {
+  if (flagBase) return { ref: flagBase, source: 'flag' };
+
+  if (ctx.repo) {
+    const pr = await fetchActivePrForBranch(runner, ctx.orgUrl, ctx.project, ctx.repo, branch);
+    if (pr) {
+      return { ref: pr.targetRefName.replace(/^refs\/heads\//, ''), source: 'pr-target' };
+    }
+  }
+
+  const originHead = await tryGit(runner, ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'], { cwd });
+  if (originHead) {
+    return { ref: originHead.replace(/^origin\//, ''), source: 'origin-head' };
+  }
+
+  if (ctx.repo) {
+    const repository = await runAzJson<AzGitRepository>(runner, [
+      'repos', 'show',
+      '--repository', ctx.repo,
+      '--organization', ctx.orgUrl,
+      '--project', ctx.project,
+    ]);
+    if (repository.defaultBranch) {
+      return { ref: repository.defaultBranch.replace(/^refs\/heads\//, ''), source: 'repo-default' };
+    }
+  }
+
+  throw new UserError(`Could not determine what to compare "${branch}" against.`, [
+    'Pass --base <branch> explicitly.',
+  ]);
+}
+
+/** Prefers the up-to-date remote-tracking ref over a possibly-stale local one. */
+export async function resolveDiffableRef(runner: Runner, base: string, cwd: string | undefined): Promise<string> {
+  const remote = `origin/${base}`;
+  if (await tryGit(runner, ['rev-parse', '--verify', '--quiet', remote], { cwd })) return remote;
+  if (await tryGit(runner, ['rev-parse', '--verify', '--quiet', base], { cwd })) return base;
+  throw new UserError(`Neither "${remote}" nor "${base}" resolves to a ref dova can diff against.`, [
+    'Pass --base <branch> explicitly, or fetch first.',
+  ]);
+}
+
+function toSummarizeWorkItem(item: AzWorkItem, primaryId: number | undefined): SummarizeWorkItem {
+  const description = fieldValue(item, 'System.Description');
+  return {
+    id: item.id,
+    type: fieldValue(item, 'System.WorkItemType'),
+    state: fieldValue(item, 'System.State'),
+    title: fieldValue(item, 'System.Title'),
+    description: description ? stripHtml(description) : null,
+    primary: item.id === primaryId,
+  };
+}
+
+export interface GatherSummaryOptions {
+  cwd?: string;
+  full?: boolean;
+}
+
+/**
+ * `dova summarize` — a catch-up report for a branch: why it exists (its
+ * linked tickets' own descriptions), what's happened on it (the commit
+ * log since it diverged from its base), and how big the change is (a
+ * diff stat, not the full patch, by default — see `opts.full`).
+ */
+export async function gatherSummary(
+  runner: Runner,
+  branch: string,
+  flags: { org?: string; orgUrl?: string; project?: string; repo?: string; base?: string },
+  opts: GatherSummaryOptions = {}
+): Promise<SummarizeResult> {
+  const cwd = opts.cwd;
+
+  if (!(await tryGit(runner, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`], { cwd }))) {
+    throw new UserError(`No local branch named "${branch}".`);
+  }
+
+  const ctx = await resolveContext(runner, { org: flags.org, orgUrl: flags.orgUrl, project: flags.project, repo: flags.repo }, { cwd });
+
+  const [trackedIdsRaw, primaryRaw] = await Promise.all([
+    gitConfigGet(runner, `branch.${branch}.dova-workitems`, { cwd }),
+    gitConfigGet(runner, `branch.${branch}.dova-primary`, { cwd }),
+  ]);
+  const ids = (trackedIdsRaw ?? '').split(',').map((s) => Number(s.trim())).filter((n) => Number.isInteger(n) && n > 0);
+  const primaryId = primaryRaw ? Number(primaryRaw) : ids[0];
+
+  const [items, base] = await Promise.all([
+    ids.length > 0
+      ? fetchWorkItemsByIds(runner, ctx.orgUrl, ids, ['System.Id', 'System.Title', 'System.State', 'System.WorkItemType', 'System.Description'])
+      : Promise.resolve([]),
+    resolveBase(runner, ctx, branch, flags.base, cwd),
+  ]);
+
+  const diffable = await resolveDiffableRef(runner, base.ref, cwd);
+
+  const logRaw = (await tryGit(runner, ['log', '--pretty=format:%H%x09%s', `${diffable}..${branch}`], { cwd })) ?? '';
+  const commits: SummarizeCommit[] = logRaw
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => {
+      const [sha, subject] = line.split('\t');
+      return { sha: sha ?? '', subject: subject ?? '' };
+    });
+
+  const diffStat = (await tryGit(runner, ['diff', '--stat', `${diffable}...${branch}`], { cwd })) ?? '';
+
+  const result: SummarizeResult = {
+    branch,
+    base: diffable,
+    baseSource: base.source,
+    workItems: ids.map((id) => {
+      const item = items.find((i) => i.id === id);
+      return item ? toSummarizeWorkItem(item, primaryId) : { id, type: null, state: null, title: null, description: null, primary: id === primaryId };
+    }),
+    commits,
+    diffStat,
+  };
+
+  if (opts.full) {
+    result.fullLog = (await tryGit(runner, ['log', `${diffable}..${branch}`], { cwd })) ?? '';
+    result.fullDiff = (await tryGit(runner, ['diff', `${diffable}...${branch}`], { cwd })) ?? '';
+  }
+
+  return result;
+}
+
+function renderSummarizeHuman(result: SummarizeResult, full: boolean, color: ReturnType<typeof getColor>): void {
+  const lines: string[] = [color.bold(`Branch: ${result.branch}`), color.dim(`compared against ${result.base}`), ''];
+
+  if (result.workItems.length === 0) {
+    lines.push(color.dim('(no linked work items — see `dova link`)'), '');
+  } else {
+    for (const wi of result.workItems) {
+      const marker = wi.primary ? color.cyan(' (primary)') : '';
+      lines.push(color.bold(`#${wi.id} [${wi.type ?? '?'}/${wi.state ?? '?'}] ${wi.title ?? '(no title)'}${marker}`));
+      if (wi.description) {
+        const { shown, truncated } = full ? { shown: wi.description, truncated: false } : truncate(wi.description, DESCRIPTION_TRUNCATE);
+        lines.push(shown);
+        if (truncated) lines.push(color.dim('  … pass --full for the whole description'));
+      }
+      lines.push('');
+    }
+  }
+
+  lines.push(color.bold(`Commits (${result.commits.length} since ${result.base})`));
+  if (full && result.fullLog !== undefined) {
+    lines.push(result.fullLog || color.dim('  (none)'));
+  } else if (result.commits.length === 0) {
+    lines.push(color.dim('  (none — branch has no commits ahead of the base)'));
+  } else {
+    for (const c of result.commits) lines.push(`  ${color.dim(c.sha.slice(0, 7))} ${c.subject}`);
+  }
+  lines.push('');
+
+  lines.push(color.bold('Diff'));
+  if (full && result.fullDiff !== undefined) {
+    lines.push(result.fullDiff || color.dim('  (no changes)'));
+  } else {
+    lines.push(result.diffStat.trim() || color.dim('  (no changes)'));
+  }
+
+  process.stdout.write(`${lines.join('\n')}\n`);
+}
+
+export function registerSummarizeCommand(program: Command): void {
+  const cmd = program
+    .command('summarize <branch>')
+    .description("Catch up on a branch: its linked tickets' descriptions, commit log, and diff shape since it diverged")
+    .option('--base <ref>', 'compare against this branch instead of auto-detecting (PR target, then repo default)')
+    .option('--full', 'show full commit messages and the full diff, not just the compact form');
+
+  addContextOptions(cmd);
+  addJsonOption(cmd);
+  addJqOption(cmd);
+  addNoColorOption(cmd);
+
+  cmd.action(async (branch: string, opts: SummarizeFlags & { full?: boolean }) => {
+    const runner = defaultRunner;
+    const color = getColor(opts.color === false);
+    const result = await gatherSummary(runner, branch, opts, { full: opts.full });
+    await emit(result, opts, () => renderSummarizeHuman(result, Boolean(opts.full), color));
+  });
+}
