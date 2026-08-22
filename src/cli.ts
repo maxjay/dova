@@ -1,6 +1,6 @@
 import { Command } from 'commander';
 import { registerStatusCommand } from './commands/status.js';
-import { registerStartCommand } from './commands/start.js';
+import { registerLinkCommand } from './commands/link.js';
 import { registerBugCommand } from './commands/bug.js';
 import { registerViewCommand } from './commands/view.js';
 import { registerWiCommand } from './commands/wi/index.js';
@@ -28,7 +28,7 @@ export function buildProgram(): Command {
     .exitOverride();
 
   registerStatusCommand(program);
-  registerStartCommand(program);
+  registerLinkCommand(program);
   registerBugCommand(program);
   registerViewCommand(program);
   registerWiCommand(program);

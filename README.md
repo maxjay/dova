@@ -13,19 +13,18 @@ logic each command is built from:
 
 - `dova status` — current branch's active PR, linked work items, recent
   pipeline runs, comment threads. One screen, one `gatherStatus()` call.
-- `dova start <id...>` — the big one: any id with open children (whatever
-  it's called — no team/backlog-config lookup involved, just the item's
-  own hierarchy) expands into a multi-select of them, state-category-based
-  transitions (never a literal state name, never regresses an item),
-  assignment, local branch-naming, duplicate-branch detection, and
-  git-config tracking. See `src/lib/start.ts`'s doc comments for the full
-  flow.
-- `dova bug` / `dova wi quick` — fast filing, sharing `src/lib/quick-create.ts`.
+- `dova link <id...>` — associates the branch you're *already on* with
+  one or more work items, so `dova pr create` links them automatically.
+  Doesn't create, name, or check out a branch — see "Context linkage,
+  not workflow" below for why, and the full scenario this is built
+  around.
+- `dova bug` / `dova wi quick` — fast filing, sharing `src/lib/quick-create.ts`,
+  with `--link` to chain into `dova link` for the newly created id.
 - `dova wi create` — the fuller version, with `--assign-to`/`--parent`.
 - `dova wi view` / `dova wi search` — view shows the item's parent and
   *children* (e.g. a Feature's User Stories) in a table, generic across
   every work item type — the same "just look at the actual hierarchy"
-  approach `start`'s expansion uses; search builds WIQL from flags
+  approach `link`'s expansion uses; search builds WIQL from flags
   (`src/lib/wiql.ts`) so nobody has to write it by hand.
 - `dova view <id-or-url>` — the generic "read anything" entrypoint: given
   a work item or PR link, or a bare id, view its full detail. A link
@@ -48,32 +47,97 @@ underneath nearly all of this, and are the most heavily tested modules
 (`tests/context.test.ts`, `tests/team-resolver.test.ts`) since almost
 everything else depends on one or both.
 
-**On `dova start`'s call count:** the project brief's "no command makes
-more than 3-4 calls" guideline is met everywhere else, but `start`
-inherently doesn't fit it — transitioning and (optionally) assigning N
-work items is O(n) in however many ids you pass, by the nature of the
-command, not from over-fetching. Every *lookup* that doesn't have to
-scale with N is batched/cached instead (one call for the seed items
-regardless of count, one call for all their children combined, one
-state-category fetch per distinct work item *type* in the batch — reused
-for both the children-filtering step and the transition step, not
-fetched twice — one `git config --get-regexp` for the whole
-duplicate-branch scan instead of one per local branch). Flagging this
-per the brief's own instruction rather than quietly building past the
-guideline.
+## Context linkage, not workflow
 
-`start` originally resolved a team up front to look up the org's backlog
-configuration, purely to answer "is this id a portfolio type" before
-deciding whether to expand it — meaning every call paid for a team
-picker (and an unconditional "save to git config?" prompt) even for an
-ordinary Bug that never needed one. The work item it already fetches
-carries everything that expansion decision needs: its own children. So
-`start` now just queries `[System.Parent] = <id>` directly (the same
-data `wi view`'s children table is built from) and expands on that —
-faster, more general (works for any item with children, not just
-canonical portfolio types), and doesn't ask about team at all unless a
-work item is actually being *created* (`wi create`/`wi quick`/`bug`,
-where area/iteration genuinely are team-specific and unavoidable).
+This is the organizing principle behind `dova link`, and it's worth
+stating explicitly because the command went through two real redesigns
+to get here.
+
+**dova is not a replacement for git.** It works alongside it. The
+developer (or an agent acting for them) creates branches, names them,
+checks them out, commits — all of that is git's job, already done,
+using whatever convention they already use, before dova is ever
+invoked. dova's job is narrower and sits on either side of that: be a
+handy proxy for `az` (fetch a ticket, create a PR, post a comment), and
+record the *linkage* between local git state and Azure DevOps entities
+that git itself has no concept of — which branch corresponds to which
+ticket, so the next `az`-facing command doesn't need to be told again.
+
+### The scenario
+
+An agent is given a ticket and asked to start work on it:
+
+| # | Step | Command | Owner |
+|---|---|---|---|
+| 1 | Read the ticket | `dova wi view 4821 --json` | **dova** — `az` proxy, a plain read |
+| 2 | Create + check out the branch | `git checkout -b fix/4821-login-redirect` | **git** — the agent's own naming, dova never sees it |
+| 3 | Link the ticket to the branch just checked out | `dova link 4821` | **dova** — the one fact git has no concept of |
+| 4 | Do the work | edits, `git commit`, etc. | **git** / the agent's own tooling |
+| 5 | Open the PR | `dova pr create` | **dova** — reads the link back out and attaches it automatically, no flags needed |
+
+Steps 2 and 4 never touch dova. Steps 1, 3, 5 are each either a plain
+`az` read/write or a git-config read/write — nothing in the whole flow
+has dova creating or naming a branch.
+
+### Why `link`, not `start`
+
+The command used to be called `start` and did four things: create +
+name the branch, transition the ticket's state to InProgress, offer to
+assign it to you, and write the git-config link. Cut against "dova is a
+linkage layer alongside git," only the last of those is actually
+linkage:
+
+- **Branch creation/naming** is git's job, full stop — the developer or
+  agent already has their own convention, and dova imposing one (or
+  even offering to) is dova doing git's work for it.
+- **State transition** and **assignment** change something on the
+  Azure Boards side that has nothing to do with whether `pr create` can
+  find and link the ticket — a PR links by id regardless of the
+  ticket's state or assignee. They're workflow automation (mirroring
+  what a human does when they *begin* work), not context propagation.
+  (These were explicit in the original spec for this command — this is
+  a real reconsideration of that requirement, not cleanup of drift.)
+
+What's left once you cut those three is: fetch the ticket(s) (validates
+the id, and is where children-disambiguation still lives — see below),
+then write `branch.<current-branch>.dova-workitems`/`dova-primary` for
+whatever branch you're already standing on. There's no branch being
+created and nothing beginning — hence `link`, not `start`.
+
+`dova link` is also idempotent and additive: running it again on the
+same branch with another id merges it into the existing linked set
+(keeping whichever primary was already established) rather than
+clobbering it — exactly the shape "also link this related ticket to
+what I'm already working on" needs. If an id you're linking is already
+linked to a *different* branch, it offers to check that branch out
+instead of double-tracking the same ticket in two places — that's not
+branch lifecycle management (nothing is created or named), it's the
+same kind of navigation `gh pr checkout` does.
+
+Any id with open children (an Epic, a Feature, or just a Bug someone's
+been using as a checklist — whatever the process calls it) still
+expands into a multi-select of them, unchanged from before, and for the
+same reason work item type/state names are never hardcoded elsewhere in
+this codebase: it's driven by the ticket's actual `[System.Parent]`
+hierarchy, not by asking a team what its backlog levels are called. For
+an agent that's already run `wi view` on the ticket first (step 1
+above), this disambiguation is mostly moot — the agent already knows
+from that response whether the ticket has open children and can pass
+the correct leaf id(s) straight to `link`, at which point `link`
+degenerates to a pure git-config write with no extra `az` calls at all.
+The children-check is the safety net for a human (or an agent) linking
+an id cold, without having looked at it first.
+
+`link` never resolves a team. The old `start` did, up front, on every
+call, purely to look up the org's backlog configuration and answer "is
+this a portfolio type" — meaning an ordinary Bug paid for a team picker
+(and an unconditional "save to git config?" prompt with no flag to skip
+it) exactly as much as an actual Epic did. Team resolution
+(`team-resolver.ts`) is untouched and still exactly as necessary as
+before for `wi create`/`wi quick`/`bug`, where a *new* ticket genuinely
+needs an area path and iteration assigned and there's no other source
+for those — it just no longer has anything to do with linking a branch
+to a ticket that already exists.
 
 ## Why TypeScript, not a compiled binary
 
@@ -138,20 +202,19 @@ src/
     output.ts           --json / --jq / color / table rendering
     command-helpers.ts   shared flag-group builders (--org/--project/--repo, --json, --jq, --web, --no-color)
     completions/         tree -> {bash,zsh,fish,powershell} script generators
-    work-items.ts        fetch-by-id / batch-fetch-by-id / children / full detail+render, shared by wi/pr/start/view
-    work-item-types.ts   state -> category, and the "what should dova start transition into" decision
-    wiql.ts                small WIQL builder (wi search, batch id fetch, start's + view's children query)
+    work-items.ts        fetch-by-id / batch-fetch-by-id / children / full detail+render, shared by wi/pr/link/view
+    work-item-types.ts   state -> category (used to drop Completed/Removed children from link's expansion)
+    wiql.ts                small WIQL builder (wi search, batch id fetch, link's + view's children query)
     pr.ts                  PR fetch/threads/comment/reply/resolve/full detail+render, shared by status + pr * + view
     pipelines.ts            pipeline run fetch + web URL, shared by status + pipeline *
-    branch-naming.ts        slug/prefix/branch-name for `dova start`
     quick-create.ts          shared guts of `dova bug` / `dova wi quick`
-    start.ts                  `dova start`'s full implementation
+    link.ts                   `dova link`'s full implementation
     urls.ts                    work item / PR link parsing, for "give dova a link or an id"
   types/azure-devops.ts  minimal REST object shapes (PR, WorkItem, Build, CommentThread)
 tests/
   context.test.ts        parseAzureRepoRemoteUrl + resolveContext, fully mocked
   team-resolver.test.ts   resolveProject/resolveTeam/resolveAreaPath/resolveIterationPath/resolveTeamContext, fully mocked
-  wiql.test.ts / branch-naming.test.ts / work-item-types.test.ts / api.test.ts / urls.test.ts / pr.test.ts / exec.test.ts
+  wiql.test.ts / work-item-types.test.ts / api.test.ts / urls.test.ts / pr.test.ts / exec.test.ts
                           pure-logic unit tests for the modules above
   fixtures/               fabricated remote URLs + az JSON payloads (contoso/MyProject/my-repo placeholders — no real org anywhere)
 ```
@@ -196,9 +259,10 @@ functions — was read directly rather than guessed. Notably:
   template, unlike work item type/state names).
 - There is **no** `az boards work-item-type` command group at all (it's
   simply absent from the extension's command registry), so "what state
-  category is this state in" (`lib/work-item-types.ts`, the "never
-  hardcode a state name" logic `dova start`'s transition step needs)
-  goes through `az rest` against the REST API directly for that reason.
+  category is this state in" (`lib/work-item-types.ts`, used to drop
+  Completed/Removed items from `dova link`'s children expansion — never
+  a hardcoded state name) goes through `az rest` against the REST API
+  directly for that reason.
 
 If you're extending this and hit a command whose JSON shape isn't
 obvious from `--help`, the same technique (read the extension's Python
@@ -246,7 +310,7 @@ Every "view" also resolves the item's immediate hierarchy, not just its
 own fields — generic across every work item type (a Feature's User
 Stories, an Epic's Features, a Bug's linked Tasks, whatever the process
 calls them), the same "just look at `[System.Parent]`" approach
-`dova start`'s own expansion uses:
+`dova link`'s own expansion uses:
 
 - **parent** — id, title, type, state (hydrated with one extra fetch when a parent exists)
 - **children** — same shape, one WIQL call on `[System.Parent] = <id>`

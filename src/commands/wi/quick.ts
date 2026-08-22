@@ -3,7 +3,7 @@ import { defaultRunner } from '../../lib/exec.js';
 import { quickCreateWorkItem } from '../../lib/quick-create.js';
 import { addContextOptions, addJsonOption, addTeamOptions } from '../../lib/command-helpers.js';
 import { emit, getColor } from '../../lib/output.js';
-import { runStart } from '../../lib/start.js';
+import { runLink } from '../../lib/link.js';
 
 interface WiQuickFlags {
   org?: string;
@@ -13,7 +13,7 @@ interface WiQuickFlags {
   team?: string;
   reresolve?: boolean;
   at?: string;
-  start?: boolean;
+  link?: boolean;
   json?: string | boolean;
   color: boolean;
 }
@@ -23,7 +23,7 @@ export function registerWiQuickCommand(wi: Command): void {
     .command('quick <type> <title>')
     .description('Fast work item filing for any type — `dova bug` is sugar over this with type defaulted to Bug')
     .option('--at <location>', 'file:line to build a "Found in:" permalink from')
-    .option('--start', 'chain into `dova start` with the newly created id');
+    .option('--link', 'link the newly created id to the current branch (chains into `dova link`)');
 
   addContextOptions(cmd);
   addTeamOptions(cmd);
@@ -55,8 +55,8 @@ export function registerWiQuickCommand(wi: Command): void {
       );
     });
 
-    if (opts.start) {
-      await runStart({
+    if (opts.link) {
+      await runLink({
         ids: [String(result.id)],
         org: opts.org,
         orgUrl: opts.orgUrl,
