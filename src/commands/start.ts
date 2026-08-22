@@ -1,5 +1,5 @@
 import type { Command } from 'commander';
-import { addContextOptions, addJsonOption, addTeamOptions, addNoColorOption } from '../lib/command-helpers.js';
+import { addContextOptions, addJsonOption, addNoColorOption } from '../lib/command-helpers.js';
 import { emit, getColor } from '../lib/output.js';
 import { runStart, renderStartHuman } from '../lib/start.js';
 
@@ -8,8 +8,6 @@ interface StartFlags {
   orgUrl?: string;
   project?: string;
   repo?: string;
-  team?: string;
-  reresolve?: boolean;
   primary?: string;
   assign?: boolean;
   json?: string | boolean;
@@ -31,7 +29,6 @@ export function registerStartCommand(program: Command): void {
     .option('--no-assign', 'never assign items to the current user');
 
   addContextOptions(cmd);
-  addTeamOptions(cmd);
   addJsonOption(cmd);
   addNoColorOption(cmd);
 
@@ -45,8 +42,6 @@ export function registerStartCommand(program: Command): void {
       orgUrl: opts.orgUrl,
       project: opts.project,
       repo: opts.repo,
-      team: opts.team,
-      reresolve: opts.reresolve,
       json: opts.json,
       color,
     });

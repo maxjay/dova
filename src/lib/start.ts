@@ -3,11 +3,10 @@ import type { ChalkInstance } from 'chalk';
 import type { Runner } from './exec.js';
 import { defaultRunner, runAzJson, tryGit, runGit } from './exec.js';
 import { resolveContext } from './context.js';
-import { resolveProject, resolveTeam } from './team-resolver.js';
+import { resolveProject } from './team-resolver.js';
 import { gitConfigSet } from './config.js';
 import { fetchWorkItemsByIds, buildWiWebUrl, fieldValue } from './work-items.js';
 import { buildWiql } from './wiql.js';
-import { fetchBacklogConfiguration, isPortfolioType } from './backlog.js';
 import { fetchWorkItemTypeStates, decideStartTransition } from './work-item-types.js';
 import { slugify, resolveBranchPrefix, buildBranchName } from './branch-naming.js';
 import { UserError } from './errors.js';
@@ -37,8 +36,6 @@ export interface StartOptions {
   orgUrl?: string;
   project?: string;
   repo?: string;
-  team?: string;
-  reresolve?: boolean;
   json?: string | boolean;
   color: ChalkInstance;
   cwd?: string;
@@ -93,7 +90,6 @@ export async function runStart(opts: StartOptions): Promise<StartResult> {
     { cwd }
   );
   const projectResult = await resolveProject(runner, ctx.project, { project: opts.project }, { cwd });
-  const teamResult = await resolveTeam(runner, ctx.orgUrl, projectResult.project, { team: opts.team }, { cwd, reresolve: opts.reresolve });
 
   // Call: fetch the seed items in one batch.
   const seedItems = await fetchWorkItemsByIds(runner, ctx.orgUrl, seedIds);
@@ -101,64 +97,70 @@ export async function runStart(opts: StartOptions): Promise<StartResult> {
   for (const id of seedIds) {
     if (!seedById.has(id)) throw new UserError(`Work item #${id} was not found.`);
   }
-
-  // Portfolio-level ids (Epic/Feature/whatever this process calls them,
-  // determined from the team's backlog configuration, never a hardcoded
-  // type name) expand into a multi-select of their non-completed children.
-  const backlogConfig = await fetchBacklogConfiguration(runner, ctx.orgUrl, projectResult.project, teamResult.team);
-  const actualPortfolioIds = seedIds.filter((id) => isPortfolioType(backlogConfig, itemType(seedById.get(id)!)));
-
   const workItemById = new Map<number, AzWorkItem>(seedItems.map((i) => [i.id, i]));
-  let finalIds: number[] = [];
 
-  if (actualPortfolioIds.length > 0) {
-    const childrenWiql = buildWiql({
-      fields: ['System.Id', 'System.Title', 'System.State', 'System.WorkItemType', 'System.AssignedTo', 'System.Parent'],
-      where: [{ field: 'System.Parent', op: 'IN', value: actualPortfolioIds }],
-    });
-    const children = (await runAzJson<AzWorkItem[] | null>(runner, [
-      'boards', 'query', '--wiql', childrenWiql, '--organization', ctx.orgUrl,
-    ])) ?? [];
-    for (const child of children) workItemById.set(child.id, child);
-
-    // Need each distinct child type's state categories to drop Completed/Removed items.
-    const childTypesToCheck = [...new Set(children.map(itemType))];
-    const statesByType = new Map<string, Awaited<ReturnType<typeof fetchWorkItemTypeStates>>>();
-    for (const type of childTypesToCheck) {
+  // A distinct work item type's state categories, fetched at most once and
+  // reused below both to drop Completed/Removed children and to decide
+  // each final item's start-transition.
+  const statesByType = new Map<string, Awaited<ReturnType<typeof fetchWorkItemTypeStates>>>();
+  async function statesFor(type: string): Promise<Awaited<ReturnType<typeof fetchWorkItemTypeStates>>> {
+    if (!statesByType.has(type)) {
       statesByType.set(type, await fetchWorkItemTypeStates(runner, ctx.orgUrl, projectResult.project, type));
     }
-    const isCompletedOrRemoved = (child: AzWorkItem): boolean => {
-      const states = statesByType.get(itemType(child)) ?? [];
-      const category = states.find((s) => s.name.toLowerCase() === itemState(child).toLowerCase())?.category;
-      return category === 'Completed' || category === 'Removed';
-    };
+    return statesByType.get(type)!;
+  }
+  async function isCompletedOrRemoved(item: AzWorkItem): Promise<boolean> {
+    const states = await statesFor(itemType(item));
+    const category = states.find((s) => s.name.toLowerCase() === itemState(item).toLowerCase())?.category;
+    return category === 'Completed' || category === 'Removed';
+  }
 
-    for (const parentId of actualPortfolioIds) {
-      const candidates = children.filter((c) => c.fields['System.Parent'] === parentId).filter((c) => !isCompletedOrRemoved(c));
-      const parent = workItemById.get(parentId)!;
-      if (candidates.length === 0) {
-        warnings.push(`#${parentId} (${itemTitle(parent)}) has no open children — nothing to start from it.`);
-        continue;
-      }
-      const selected = await prompts.checkbox({
-        message: `#${parentId} "${itemTitle(parent)}" is a portfolio item — pick which children to start:`,
-        choices: candidates.map((c) => ({
-          name: `#${c.id} [${itemType(c)}/${itemState(c)}] ${itemTitle(c)}`,
-          value: String(c.id),
-          checked: true,
-        })),
-      });
-      finalIds.push(...selected.map(Number));
+  // Any id with open children (whatever it's called — Epic, Feature, or
+  // just a Bug someone's been using as a checklist) expands into a
+  // multi-select of them. This reads straight off the ticket's own
+  // hierarchy — no team, no backlog-level classification, nothing to
+  // resolve or ask about first.
+  const childrenWiql = buildWiql({
+    fields: ['System.Id', 'System.Title', 'System.State', 'System.WorkItemType', 'System.AssignedTo', 'System.Parent'],
+    where: [{ field: 'System.Parent', op: 'IN', value: seedIds }],
+  });
+  const children = (await runAzJson<AzWorkItem[] | null>(runner, [
+    'boards', 'query', '--wiql', childrenWiql, '--organization', ctx.orgUrl,
+  ])) ?? [];
+  for (const child of children) workItemById.set(child.id, child);
+
+  let finalIds: number[] = [];
+  for (const seedId of seedIds) {
+    const ownChildren = children.filter((c) => c.fields['System.Parent'] === seedId);
+    const openChildren: AzWorkItem[] = [];
+    for (const child of ownChildren) {
+      if (!(await isCompletedOrRemoved(child))) openChildren.push(child);
     }
-    // Non-portfolio seed ids pass through untouched, in their original order.
-    finalIds.push(...seedIds.filter((id) => !actualPortfolioIds.includes(id)));
-  } else {
-    finalIds = [...seedIds];
+
+    if (ownChildren.length === 0) {
+      // No children at all — this is a leaf item, start it directly.
+      finalIds.push(seedId);
+      continue;
+    }
+    if (openChildren.length === 0) {
+      warnings.push(`#${seedId} (${itemTitle(seedById.get(seedId)!)}) has children, but none are open — nothing to start from it.`);
+      continue;
+    }
+
+    const selected = await prompts.checkbox({
+      message: `#${seedId} "${itemTitle(seedById.get(seedId)!)}" has open children — pick which to start:`,
+      choices: openChildren.map((c) => ({
+        name: `#${c.id} [${itemType(c)}/${itemState(c)}] ${itemTitle(c)}`,
+        value: String(c.id),
+        checked: true,
+      })),
+    });
+    finalIds.push(...selected.map(Number));
   }
   finalIds = [...new Set(finalIds)];
 
   if (finalIds.length === 0) {
-    throw new UserError('Nothing to start — every portfolio item resolved to zero open children.');
+    throw new UserError('Nothing to start — every item resolved to zero open children.');
   }
 
   // Primary: explicit --primary, else the first id in the resolved set
@@ -238,15 +240,10 @@ export async function runStart(opts: StartOptions): Promise<StartResult> {
   await gitConfigSet(runner, `branch.${branchName}.dova-primary`, String(primaryId), { cwd });
 
   // Transition each item forward out of "Proposed" category, never regressing one already past it.
-  const statesByType = new Map<string, Awaited<ReturnType<typeof fetchWorkItemTypeStates>>>();
   const unassignedIds: number[] = [];
   for (const id of finalIds) {
     const item = workItemById.get(id)!;
-    const type = itemType(item);
-    if (!statesByType.has(type)) {
-      statesByType.set(type, await fetchWorkItemTypeStates(runner, ctx.orgUrl, projectResult.project, type));
-    }
-    const decision = decideStartTransition(statesByType.get(type)!, itemState(item));
+    const decision = decideStartTransition(await statesFor(itemType(item)), itemState(item));
     if (decision.action === 'transition') {
       await runAzJson(runner, ['boards', 'work-item', 'update', '--id', String(id), '--state', decision.toState, '--organization', ctx.orgUrl]);
     } else {

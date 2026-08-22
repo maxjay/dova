@@ -13,19 +13,20 @@ logic each command is built from:
 
 - `dova status` — current branch's active PR, linked work items, recent
   pipeline runs, comment threads. One screen, one `gatherStatus()` call.
-- `dova start <id...>` — the big one: portfolio-item expansion (via the
-  team's backlog configuration, never a hardcoded type name) into a
-  multi-select of open children, state-category-based transitions (never
-  a literal state name, never regresses an item), assignment, local
-  branch-naming, duplicate-branch detection, and git-config tracking. See
-  `src/lib/start.ts`'s doc comments for the full flow.
+- `dova start <id...>` — the big one: any id with open children (whatever
+  it's called — no team/backlog-config lookup involved, just the item's
+  own hierarchy) expands into a multi-select of them, state-category-based
+  transitions (never a literal state name, never regresses an item),
+  assignment, local branch-naming, duplicate-branch detection, and
+  git-config tracking. See `src/lib/start.ts`'s doc comments for the full
+  flow.
 - `dova bug` / `dova wi quick` — fast filing, sharing `src/lib/quick-create.ts`.
 - `dova wi create` — the fuller version, with `--assign-to`/`--parent`.
 - `dova wi view` / `dova wi search` — view shows the item's parent and
   *children* (e.g. a Feature's User Stories) in a table, generic across
-  every work item type — not just gated to portfolio levels; search
-  builds WIQL from flags (`src/lib/wiql.ts`) so nobody has to write it by
-  hand.
+  every work item type — the same "just look at the actual hierarchy"
+  approach `start`'s expansion uses; search builds WIQL from flags
+  (`src/lib/wiql.ts`) so nobody has to write it by hand.
 - `dova view <id-or-url>` — the generic "read anything" entrypoint: given
   a work item or PR link, or a bare id, view its full detail. A link
   unambiguously says which kind of thing it is; a bare id tries as a
@@ -53,11 +54,26 @@ inherently doesn't fit it — transitioning and (optionally) assigning N
 work items is O(n) in however many ids you pass, by the nature of the
 command, not from over-fetching. Every *lookup* that doesn't have to
 scale with N is batched/cached instead (one call for the seed items
-regardless of count, one call for all portfolio items' children combined,
-one state-category fetch per distinct work item *type* in the batch, one
-`git config --get-regexp` for the whole duplicate-branch scan instead of
-one per local branch). Flagging this per the brief's own instruction
-rather than quietly building past the guideline.
+regardless of count, one call for all their children combined, one
+state-category fetch per distinct work item *type* in the batch — reused
+for both the children-filtering step and the transition step, not
+fetched twice — one `git config --get-regexp` for the whole
+duplicate-branch scan instead of one per local branch). Flagging this
+per the brief's own instruction rather than quietly building past the
+guideline.
+
+`start` originally resolved a team up front to look up the org's backlog
+configuration, purely to answer "is this id a portfolio type" before
+deciding whether to expand it — meaning every call paid for a team
+picker (and an unconditional "save to git config?" prompt) even for an
+ordinary Bug that never needed one. The work item it already fetches
+carries everything that expansion decision needs: its own children. So
+`start` now just queries `[System.Parent] = <id>` directly (the same
+data `wi view`'s children table is built from) and expands on that —
+faster, more general (works for any item with children, not just
+canonical portfolio types), and doesn't ask about team at all unless a
+work item is actually being *created* (`wi create`/`wi quick`/`bug`,
+where area/iteration genuinely are team-specific and unavoidable).
 
 ## Why TypeScript, not a compiled binary
 
@@ -124,7 +140,6 @@ src/
     completions/         tree -> {bash,zsh,fish,powershell} script generators
     work-items.ts        fetch-by-id / batch-fetch-by-id / children / full detail+render, shared by wi/pr/start/view
     work-item-types.ts   state -> category, and the "what should dova start transition into" decision
-    backlog.ts            team backlog config -> "is this a portfolio-level type" (never a hardcoded type name)
     wiql.ts                small WIQL builder (wi search, batch id fetch, start's + view's children query)
     pr.ts                  PR fetch/threads/comment/reply/resolve/full detail+render, shared by status + pr * + view
     pipelines.ts            pipeline run fetch + web URL, shared by status + pipeline *
@@ -136,7 +151,7 @@ src/
 tests/
   context.test.ts        parseAzureRepoRemoteUrl + resolveContext, fully mocked
   team-resolver.test.ts   resolveProject/resolveTeam/resolveAreaPath/resolveIterationPath/resolveTeamContext, fully mocked
-  wiql.test.ts / branch-naming.test.ts / work-item-types.test.ts / backlog.test.ts / api.test.ts / urls.test.ts / pr.test.ts
+  wiql.test.ts / branch-naming.test.ts / work-item-types.test.ts / api.test.ts / urls.test.ts / pr.test.ts / exec.test.ts
                           pure-logic unit tests for the modules above
   fixtures/               fabricated remote URLs + az JSON payloads (contoso/MyProject/my-repo placeholders — no real org anywhere)
 ```
@@ -180,12 +195,10 @@ functions — was read directly rather than guessed. Notably:
   fixed system vocabulary, not something that varies by process
   template, unlike work item type/state names).
 - There is **no** `az boards work-item-type` command group at all (it's
-  simply absent from the extension's command registry) and **no**
-  `az`-level concept of a team's portfolio backlog levels. Both of dova's
-  process-agnostic decisions — "what state category is this state in"
-  (`lib/work-item-types.ts`) and "is this type a portfolio-level type for
-  this team" (`lib/backlog.ts`) — go through `az rest` against the
-  underlying REST endpoints directly for that reason.
+  simply absent from the extension's command registry), so "what state
+  category is this state in" (`lib/work-item-types.ts`, the "never
+  hardcode a state name" logic `dova start`'s transition step needs)
+  goes through `az rest` against the REST API directly for that reason.
 
 If you're extending this and hit a command whose JSON shape isn't
 obvious from `--help`, the same technique (read the extension's Python
@@ -232,8 +245,8 @@ separate id spaces with no way to tell them apart from the number alone.
 Every "view" also resolves the item's immediate hierarchy, not just its
 own fields — generic across every work item type (a Feature's User
 Stories, an Epic's Features, a Bug's linked Tasks, whatever the process
-calls them), not gated to portfolio levels the way `dova start`'s
-expansion is:
+calls them), the same "just look at `[System.Parent]`" approach
+`dova start`'s own expansion uses:
 
 - **parent** — id, title, type, state (hydrated with one extra fetch when a parent exists)
 - **children** — same shape, one WIQL call on `[System.Parent] = <id>`
