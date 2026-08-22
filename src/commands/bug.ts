@@ -63,7 +63,6 @@ export function registerBugCommand(program: Command): void {
         orgUrl: opts.orgUrl,
         project: result.project,
         repo: opts.repo,
-        team: result.team,
         json: opts.json,
         color,
       });
