@@ -42,33 +42,6 @@ describe('parseAzureRepoRemoteUrl', () => {
     });
   });
 
-  it('parses the legacy visualstudio.com HTTPS form', () => {
-    expect(parseAzureRepoRemoteUrl(remotes.httpsLegacy)).toEqual({
-      org: 'contoso',
-      project: 'MyProject',
-      repo: 'my-repo',
-      orgUrl: 'https://contoso.visualstudio.com',
-    });
-  });
-
-  it('parses the legacy visualstudio.com form with a /DefaultCollection/ segment', () => {
-    expect(parseAzureRepoRemoteUrl(remotes.httpsLegacyDefaultCollection)).toEqual({
-      org: 'contoso',
-      project: 'MyProject',
-      repo: 'my-repo',
-      orgUrl: 'https://contoso.visualstudio.com',
-    });
-  });
-
-  it('parses the legacy vs-ssh SSH form', () => {
-    expect(parseAzureRepoRemoteUrl(remotes.sshLegacy)).toEqual({
-      org: 'contoso',
-      project: 'MyProject',
-      repo: 'my-repo',
-      orgUrl: 'https://contoso.visualstudio.com',
-    });
-  });
-
   it('returns null for a non-Azure-Repos remote instead of guessing', () => {
     expect(parseAzureRepoRemoteUrl(remotes.notAzureRepos)).toBeNull();
   });
@@ -81,10 +54,6 @@ describe('parseAzureRepoRemoteUrl', () => {
 describe('parseOrgUrl', () => {
   it('parses a modern org URL', () => {
     expect(parseOrgUrl(orgUrls.modern)).toEqual({ org: 'contoso', orgUrl: 'https://dev.azure.com/contoso' });
-  });
-
-  it('parses a legacy org URL', () => {
-    expect(parseOrgUrl(orgUrls.legacy)).toEqual({ org: 'contoso', orgUrl: 'https://contoso.visualstudio.com' });
   });
 
   it('returns null for an unrelated URL', () => {

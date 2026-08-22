@@ -39,7 +39,7 @@ export function registerPrCreateCommand(pr: Command): void {
     .description('Create a pull request from the current branch')
     .option(
       '--work-items <ids...>',
-      "work item ids to link (default: tracked ids from `dova start`, or #id refs in this branch's commit messages)"
+      "work item ids to link (default: tracked ids from `dova link`, or #id refs in this branch's commit messages)"
     )
     .option('--title <title>', 'title (default: last commit subject)')
     .option('--draft', 'create as a draft PR');
