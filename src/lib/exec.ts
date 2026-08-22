@@ -50,7 +50,20 @@ export const defaultRunner: Runner = {
 
   async az(args, opts) {
     try {
-      const result = await execa('az', args, { cwd: opts?.cwd, reject: false });
+      const result = await execa('az', args, {
+        cwd: opts?.cwd,
+        reject: false,
+        // az is a Python CLI; on Windows its stdout defaults to the
+        // console's codepage (often cp1252), not UTF-8. When a response
+        // contains a character outside that codepage — an em dash, a
+        // curly quote, an accented name — az's own attempt to print it
+        // (including its "not a json response, printing raw" fallback)
+        // throws a UnicodeEncodeError and az exits non-zero with a
+        // garbled/truncated stderr. Forcing UTF-8 IO on az's own process
+        // env (not relying on the user's shell/session having it set)
+        // avoids that regardless of the host terminal's codepage.
+        env: { PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' },
+      });
       const exitCode = result.exitCode ?? 1;
       if (exitCode !== 0) {
         interpretAzFailure(result.stderr, result.exitCode);
@@ -90,6 +103,39 @@ export async function runAzJson<T>(runner: Runner, args: string[], opts?: { cwd?
       `Could not parse JSON from "az ${args.join(' ')}":\n${trimmed.slice(0, 500)}`
     );
   }
+}
+
+/**
+ * The Azure DevOps (formerly VSTS) AAD app/resource id. `az rest` can't
+ * derive an AAD resource to request a token for from a dev.azure.com (or
+ * visualstudio.com) URL on its own — dev.azure.com isn't a recognized
+ * Azure cloud endpoint the way management.azure.com is — so every `az
+ * rest` call dova makes against Azure DevOps has to pass this explicitly
+ * via `--resource`. Without it, az either fails outright or silently
+ * requests a token for the wrong audience, and Azure DevOps hands back a
+ * non-JSON (often HTML) response instead — which is what actually
+ * triggers the Windows Unicode crash above (its content is what az's
+ * "not a json response" fallback then tries, and fails, to print).
+ * This is a well-known, stable resource id — not an org-specific value.
+ */
+export const AZURE_DEVOPS_AAD_RESOURCE = '499b84ac-1321-427f-aa17-267ca6975798';
+
+export interface AzRestOptions {
+  method: 'get' | 'post' | 'patch' | 'put' | 'delete';
+  uri: string;
+  body?: string;
+  headers?: string[];
+  /** Override the AAD resource `az rest` requests a token for. Defaults to Azure DevOps. */
+  resource?: string;
+  cwd?: string;
+}
+
+/** `runAzJson`, specialized for `az rest` against Azure DevOps — see `AZURE_DEVOPS_AAD_RESOURCE`. */
+export async function runAzRestJson<T>(runner: Runner, opts: AzRestOptions): Promise<T> {
+  const args = ['rest', '--method', opts.method, '--uri', opts.uri, '--resource', opts.resource ?? AZURE_DEVOPS_AAD_RESOURCE];
+  if (opts.body !== undefined) args.push('--body', opts.body);
+  for (const header of opts.headers ?? []) args.push('--headers', header);
+  return runAzJson<T>(runner, args, { cwd: opts.cwd });
 }
 
 /** Runs a git command and returns trimmed stdout. Throws ExternalCommandError on non-zero exit. */

@@ -1,5 +1,5 @@
 import type { Command } from 'commander';
-import { defaultRunner, runAzJson } from '../lib/exec.js';
+import { defaultRunner, runAzRestJson, AZURE_DEVOPS_AAD_RESOURCE, type AzRestOptions } from '../lib/exec.js';
 import { resolveContext } from '../lib/context.js';
 import { addContextOptions, addJqOption, addNoColorOption } from '../lib/command-helpers.js';
 import type { JqInput } from 'jq-wasm';
@@ -13,7 +13,18 @@ export interface ApiFlags {
   repo?: string;
   method: string;
   body?: string;
+  resource?: string;
   jq?: string;
+}
+
+const REST_METHODS: AzRestOptions['method'][] = ['get', 'post', 'patch', 'put', 'delete'];
+
+function validateMethod(raw: string): AzRestOptions['method'] {
+  const lower = raw.toLowerCase();
+  if ((REST_METHODS as string[]).includes(lower)) {
+    return lower as AzRestOptions['method'];
+  }
+  throw new UserError(`Unknown HTTP method "${raw}".`, [`Supported: ${REST_METHODS.join(', ')}`]);
 }
 
 const DEFAULT_API_VERSION = '7.1';
@@ -52,7 +63,11 @@ export function registerApiCommand(program: Command): void {
   addContextOptions(cmd);
   cmd
     .option('-X, --method <verb>', 'HTTP method', 'GET')
-    .option('-f, --body <json>', 'request body: inline JSON, or @path/to/file.json');
+    .option('-f, --body <json>', 'request body: inline JSON, or @path/to/file.json')
+    .option(
+      '--resource <aad-resource>',
+      `override the AAD resource az requests a token for (default: Azure DevOps, ${AZURE_DEVOPS_AAD_RESOURCE})`
+    );
   addJqOption(cmd);
   addNoColorOption(cmd);
 
@@ -66,10 +81,12 @@ export function registerApiCommand(program: Command): void {
     });
 
     const url = buildApiUrl(path, ctx.orgUrl, ctx.project);
-    const args = ['rest', '--method', opts.method.toLowerCase(), '--uri', url];
-    if (opts.body) args.push('--body', opts.body);
-
-    const data = await runAzJson<unknown>(runner, args);
+    const data = await runAzRestJson<unknown>(runner, {
+      method: validateMethod(opts.method),
+      uri: url,
+      body: opts.body,
+      resource: opts.resource,
+    });
 
     if (opts.jq) {
       process.stdout.write(`${await applyJq(data as JqInput, opts.jq)}\n`);

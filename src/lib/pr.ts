@@ -1,6 +1,6 @@
 import type { ChalkInstance } from 'chalk';
 import type { Runner } from './exec.js';
-import { runAzJson } from './exec.js';
+import { runAzJson, runAzRestJson } from './exec.js';
 import { buildPrWebUrl } from './context.js';
 import { renderTable } from './output.js';
 import { UserError, NotFoundError, looksLikeAzNotFoundError } from './errors.js';
@@ -80,7 +80,7 @@ export async function fetchDiscussionThreads(
   repo: string,
   prId: number
 ): Promise<AzCommentThread[]> {
-  const res = await runAzJson<{ value: AzCommentThread[] }>(runner, ['rest', '--method', 'get', '--uri', threadsUri(orgUrl, project, repo, prId)]);
+  const res = await runAzRestJson<{ value: AzCommentThread[] }>(runner, { method: 'get', uri: threadsUri(orgUrl, project, repo, prId) });
   return (res.value ?? []).filter(isDiscussionThread);
 }
 
@@ -93,7 +93,7 @@ export async function fetchThreadById(
   threadId: number
 ): Promise<AzCommentThread> {
   const uri = threadUri(orgUrl, project, repo, prId, threadId);
-  return runAzJson<AzCommentThread>(runner, ['rest', '--method', 'get', '--uri', uri]);
+  return runAzRestJson<AzCommentThread>(runner, { method: 'get', uri });
 }
 
 /** Posts a new top-level comment thread on a PR. */
@@ -106,10 +106,12 @@ export async function postPrComment(
   text: string
 ): Promise<AzCommentThread> {
   const body = JSON.stringify({ comments: [{ parentCommentId: 0, content: text, commentType: 'text' }], status: 'active' });
-  return runAzJson<AzCommentThread>(runner, [
-    'rest', '--method', 'post', '--uri', threadsUri(orgUrl, project, repo, prId),
-    '--body', body, '--headers', 'Content-Type=application/json',
-  ]);
+  return runAzRestJson<AzCommentThread>(runner, {
+    method: 'post',
+    uri: threadsUri(orgUrl, project, repo, prId),
+    body,
+    headers: ['Content-Type=application/json'],
+  });
 }
 
 /**
@@ -131,7 +133,7 @@ export async function replyToPrThread(
   const parentCommentId = thread.comments[thread.comments.length - 1]?.id ?? 1;
   const uri = threadCommentsUri(orgUrl, project, repo, prId, threadId);
   const body = JSON.stringify({ content: text, commentType: 'text', parentCommentId });
-  return runAzJson<AzComment>(runner, ['rest', '--method', 'post', '--uri', uri, '--body', body, '--headers', 'Content-Type=application/json']);
+  return runAzRestJson<AzComment>(runner, { method: 'post', uri, body, headers: ['Content-Type=application/json'] });
 }
 
 /** The API's raw thread status values. "resolved" isn't one of them — see `resolveThreadStatusInput`. */
@@ -177,7 +179,7 @@ export async function setPrThreadStatus(
 ): Promise<AzCommentThread> {
   const uri = threadUri(orgUrl, project, repo, prId, threadId);
   const body = JSON.stringify({ status });
-  return runAzJson<AzCommentThread>(runner, ['rest', '--method', 'patch', '--uri', uri, '--body', body, '--headers', 'Content-Type=application/json']);
+  return runAzRestJson<AzCommentThread>(runner, { method: 'patch', uri, body, headers: ['Content-Type=application/json'] });
 }
 
 /* ------------------------------------------------------------------ *

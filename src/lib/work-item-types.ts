@@ -1,5 +1,5 @@
 import type { Runner } from './exec.js';
-import { runAzJson } from './exec.js';
+import { runAzRestJson } from './exec.js';
 
 /**
  * Work item state -> category. "category" is the fixed, process-agnostic
@@ -27,7 +27,7 @@ export async function fetchWorkItemTypeStates(
   type: string
 ): Promise<WorkItemState[]> {
   const uri = `${orgUrl}/${encodeURIComponent(project)}/_apis/wit/workitemtypes/${encodeURIComponent(type)}/states?api-version=7.1`;
-  const result = await runAzJson<{ value: WorkItemState[] }>(runner, ['rest', '--method', 'get', '--uri', uri]);
+  const result = await runAzRestJson<{ value: WorkItemState[] }>(runner, { method: 'get', uri });
   return result.value ?? [];
 }
 
