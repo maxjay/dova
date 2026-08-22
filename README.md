@@ -182,7 +182,6 @@ losing on the deployment story.
 | Interactive prompts | [@inquirer/prompts](https://github.com/SBoudrias/Inquirer.js) | Arrow-key select/confirm for the ambiguous-without-a-flag cases |
 | Process execution | [execa](https://github.com/sindresorhus/execa) | Sane cross-platform spawning; every `az`/`git` call goes through `src/lib/exec.ts`, which is the one seam tests fake instead of mocking modules |
 | `--jq` | [jq-wasm](https://github.com/owenthereal/jq-wasm) | Real jq semantics with **no external binary** — matters on a locked-down machine where installing a second CLI tool isn't a given |
-| Config/cache dir | [conf](https://github.com/sindresorhus/conf) | Resolves the correct per-OS path (XDG / AppData / Application Support) itself |
 | Browser opening | [open](https://github.com/sindresorhus/open) | Cross-platform `--web` |
 | Build | [tsup](https://github.com/egoist/tsup) | Bundles to a single ESM file with a shebang banner; no separate `declaration`/type-emit step needed for a CLI |
 | Tests | [vitest](https://vitest.dev) | Fast, native TS, good `vi.fn()` ergonomics for the prompt/runner fakes |
@@ -197,8 +196,8 @@ src/
   lib/
     exec.ts           the only place that shells out to az/git — everything else takes a Runner
     context.ts         org/project/repo/branch resolution
-    team-resolver.ts   team/area/iteration resolution + its on-disk cache + the --like/--save area override
-    config.ts          git-config helpers + az devops's own config file + dova's cache dir
+    team-resolver.ts   team/area/iteration resolution for creating work items, incl. --like/--save/--team overrides
+    config.ts          git-config helpers + az devops's own config file
     output.ts           --json / --jq / color / table rendering
     command-helpers.ts   shared flag-group builders (--org/--project/--repo, --json, --jq, --web, --no-color)
     completions/         tree -> {bash,zsh,fish,powershell} script generators
@@ -213,7 +212,7 @@ src/
   types/azure-devops.ts  minimal REST object shapes (PR, WorkItem, Build, CommentThread)
 tests/
   context.test.ts        parseAzureRepoRemoteUrl + resolveContext, fully mocked
-  team-resolver.test.ts   resolveProject/resolveTeam/resolveAreaPath/resolveIterationPath/resolveTeamContext/resolveCreateContext, fully mocked
+  team-resolver.test.ts   resolveProject/resolveTeam/resolveAreaPath/resolveIterationPath/resolveCreateContext, fully mocked
   wiql.test.ts / work-item-types.test.ts / api.test.ts / urls.test.ts / pr.test.ts / exec.test.ts
                           pure-logic unit tests for the modules above
   fixtures/               fabricated remote URLs + az JSON payloads (contoso/MyProject/my-repo placeholders — no real org anywhere)
@@ -243,8 +242,9 @@ functions — was read directly rather than guessed. Notably:
   (`{ defaultValue, values }`), not a flattened list — so "no area
   flagged as default" is just `!defaultValue`, no searching required.
 - `az boards iteration team list --timeframe current` is genuinely
-  supported by the current extension (confirmed from source), with a
-  defensive `az rest` fallback in case that ever changes.
+  supported by the current extension (confirmed from source) — no
+  fallback needed for an older extension version, since dova only
+  targets `dev.azure.com`.
 - `az repos pr work-item list` doesn't just return refs — the extension
   resolves them and returns full `WorkItem` objects, fields included, so
   status/pr-view don't need a second round-trip per item.
@@ -286,25 +286,33 @@ see `resolveContext()`:
    see above).
 4. A specific, actionable error. Never a silent guess.
 
-Team/area/iteration resolution (`resolveTeamContext()`) is separate,
-shared plumbing used by any command that creates or files a work item —
-see the doc comment at the top of `team-resolver.ts` for its full
-resolution order and caching behavior.
+Area/iteration resolution for creating a work item (`resolveCreateContext()`
+in `team-resolver.ts`) is separate, shared plumbing behind every command
+that creates or files one (`dova bug`, `dova wi quick`, `dova wi
+create`). One repo has one team's worth of tickets in it — that's the
+whole assumption — so the only thing dova ever remembers durably is
+repo-local git config, no separate cache directory:
 
-That plumbing assumes a repo has one team. That breaks when a ticket
-genuinely belongs to a different team than the repo's own default (a
-shared-library repo, a bug that's actually another product area's
-territory) — and the assumption's own fallback (an interactive team
-picker) needs a TTY an agent doesn't have. `resolveCreateContext()`
-layers two tiers on top for exactly that: `--like <id>` copies
-`--area`/`--iteration` straight off an existing work item (one
-`boards work-item show` call, no team resolved at all — team was only
-ever a means to an area/iteration pair, and `work-item create` doesn't
-take `--team`), and `--like <id> --save` persists that pair as
-`dova.area`/`dova.iteration` repo-local git config, which from then on
-wins over `dova.team` for creates in that repo. Every command that
-creates a work item (`dova bug`, `dova wi quick`, `dova wi create`)
-takes `--like`/`--save` via `addTeamOptions()`.
+1. `--like <id>` or `--team <name>` — explicit, one-off overrides for
+   this call only, never persisted. `--like` copies `--area`/`--iteration`
+   straight off an existing work item (one `boards work-item show`
+   call, no team resolved at all — team is only ever a means to an
+   area/iteration pair, and `work-item create` doesn't take `--team`).
+   `--team` picks a team by name and resolves its area/iteration fresh.
+2. Saved `dova.area`+`dova.iteration` repo-local git config — the
+   common case once a repo has been used once: zero interactive
+   prompts, one `az` call (the create itself).
+3. `dova.team` repo-local git config, or (first time only) an
+   interactive picker over `az devops team list` — then `--area`/
+   `--iteration` resolution for that team, saved to `dova.area`/
+   `dova.iteration` for next time (and `--like <id> --save` writes the
+   same two keys directly, for "this ticket's team, not the repo's
+   usual one, is now the default").
+
+`--reresolve` ignores every saved value and starts over. There's no
+global (cross-repo) override for project or team — team is inherently
+project-scoped, and nothing about "my default team everywhere" survived
+contact with a real scenario, so it isn't there to reach for.
 
 ## Reading things
 

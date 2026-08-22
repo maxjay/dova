@@ -2,7 +2,6 @@ import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
 import ini from 'ini';
-import Conf from 'conf';
 import type { Runner } from './exec.js';
 
 /* ------------------------------------------------------------------ *
@@ -94,46 +93,3 @@ export function readAzDevopsDefaults(configFilePath: string = azDevopsConfigFile
   };
 }
 
-/* ------------------------------------------------------------------ *
- * dova's own config/cache dir — NOT git config, since this isn't
- * per-branch or per-repo. Uses the standard per-OS location:
- * XDG on Linux, Application Support on macOS, AppData on Windows
- * (that's what the `conf` package resolves internally).
- * ------------------------------------------------------------------ */
-
-export interface CachedTeamContext {
-  org: string;
-  project: string;
-  team: string;
-  areaPath: string;
-  iterationPath: string;
-  /** Warning surfaced when resolution fell back (e.g. Kanban team, no default area). */
-  warning?: string;
-  resolvedAt: string; // ISO timestamp
-}
-
-export interface DovaCacheSchema {
-  teamContext: Record<string, CachedTeamContext>;
-}
-
-let cacheInstance: Conf<DovaCacheSchema> | null = null;
-
-/** Lazily-constructed singleton so tests can override via `setCacheInstance`. */
-export function getCache(): Conf<DovaCacheSchema> {
-  if (!cacheInstance) {
-    cacheInstance = new Conf<DovaCacheSchema>({
-      projectName: 'dova',
-      configName: 'cache',
-      defaults: { teamContext: {} },
-    });
-  }
-  return cacheInstance;
-}
-
-export function setCacheInstance(conf: Conf<DovaCacheSchema> | null): void {
-  cacheInstance = conf;
-}
-
-export function teamContextCacheKey(org: string, project: string, team: string): string {
-  return `${org}::${project}::${team}`;
-}
