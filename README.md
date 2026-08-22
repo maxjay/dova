@@ -1,194 +1,213 @@
 # dova
 
-A `gh`/`glab`-style CLI for Azure DevOps. Wraps `az` (with the
-`azure-devops` extension) and `git`, inferring org/project/repo/branch/team
-from the directory you're standing in instead of making you pass flags
-every time.
+A `gh`/`glab`-style command-line tool for Azure DevOps. `dova` wraps
+`az` (with the `azure-devops` extension) and `git`, resolving
+organization, project, repo, branch, and team from the directory
+you're standing in — so day-to-day commands don't need `--org`,
+`--project`, or `--team` on every call. No organization name, project
+name, team name, or process-specific type/state name is hardcoded
+anywhere in the source: everything is inferred from the current git
+remote, `az`'s own config, or the work item data itself.
 
-## Status: v1 command surface implemented
+## Install
 
-Every command from the project brief is implemented end to end — see
-`src/commands/` for the commander wiring and `src/lib/` for the shared
-logic each command is built from:
+```sh
+git clone <this-repo>
+cd dova
+npm install
+npm run build
+npm link          # or: npm install -g .
+```
 
-- `dova status` — current branch's active PR, linked work items, recent
-  pipeline runs, comment threads. One screen, one `gatherStatus()` call.
-- `dova link <id...>` — associates the branch you're *already on* with
-  one or more work items, so `dova pr create` links them automatically.
-  Doesn't create, name, or check out a branch — see "Context linkage,
-  not workflow" below for why, and the full scenario this is built
-  around.
-- `dova bug` / `dova wi quick` — fast filing, sharing `src/lib/quick-create.ts`,
-  with `--link` to chain into `dova link` for the newly created id.
-- `dova wi create` — the fuller version, with `--assign-to`/`--parent`.
-- `dova wi view` / `dova wi search` — view shows the item's parent and
-  *children* (e.g. a Feature's User Stories) in a table, generic across
-  every work item type — the same "just look at the actual hierarchy"
-  approach `link`'s expansion uses; search builds WIQL from flags
-  (`src/lib/wiql.ts`) so nobody has to write it by hand.
-- `dova view <id-or-url>` — the generic "read anything" entrypoint: given
-  a work item or PR link, or a bare id, view its full detail. A link
-  unambiguously says which kind of thing it is; a bare id tries as a
-  work item first, falling back to a PR. See "Reading things" below.
-- `dova pr create` / `dova pr view` / `dova pr comment` /
-  `dova pr comment reply` / `dova pr comment resolve` — `comment` posts a
-  new thread, `reply` responds within an existing one, and `resolve`
-  takes an optional status (`resolved` by default, also `active`,
-  `won't-fix`, `closed`, `pending`) rather than only ever resolving.
-- `dova pipeline status` / `dova pipeline watch` — watch polls and exits,
-  no daemon.
-- `dova pipeline log [run-id]` — why a run failed, not just that it did:
-  the failed task's own log (default: the first failure, most recent run
-  for the current branch). `az` has no command for this at all — see
-  "Inspecting a failed run" below.
-- `dova api` — the raw REST escape hatch.
-- `dova completion {bash,zsh,fish,powershell}` — generated from the live
-  command tree (see "Completions" below).
+Requires Node 20+, `az` with the `azure-devops` extension
+(`az extension add --name azure-devops`), and a `git` remote pointed at
+an Azure Repos repo. `az login` needs to have run once already — dova
+never handles authentication itself.
 
-Context resolution (`src/lib/context.ts`) and team/area/iteration
-resolution (`src/lib/team-resolver.ts`) are the shared plumbing
-underneath nearly all of this, and are the most heavily tested modules
-(`tests/context.test.ts`, `tests/team-resolver.test.ts`) since almost
-everything else depends on one or both.
+## Quick start
 
-## Context linkage, not workflow
+```sh
+cd my-azure-repo               # any repo with an Azure Repos remote
+dova status                    # active PR, linked work items, recent pipeline runs, comment threads
+dova bug "Login redirects to the wrong page" --at src/auth.ts:42
+git checkout -b fix/login-redirect
+dova link 4821                 # record that this branch is about ticket #4821
+# ...do the work...
+dova pr create                 # opens the PR, auto-linked to #4821
+```
 
-This is the organizing principle behind `dova link`, and it's worth
-stating explicitly because the command went through two real redesigns
-to get here.
+## Commands
 
-**dova is not a replacement for git.** It works alongside it. The
-developer (or an agent acting for them) creates branches, names them,
-checks them out, commits — all of that is git's job, already done,
-using whatever convention they already use, before dova is ever
-invoked. dova's job is narrower and sits on either side of that: be a
-handy proxy for `az` (fetch a ticket, create a PR, post a comment), and
-record the *linkage* between local git state and Azure DevOps entities
-that git itself has no concept of — which branch corresponds to which
-ticket, so the next `az`-facing command doesn't need to be told again.
+| Command | What it does |
+|---|---|
+| `dova status` | Current branch: active PR, linked work items, recent pipeline runs, comment threads — one screen. |
+| `dova link <id...>` | Associates the branch you're already on with one or more work items, so `pr create` links them automatically. See [Linkage, not workflow](#linkage-not-workflow). |
+| `dova list` | Every local branch with a link, most recently active first. See [Finding a branch again](#finding-a-branch-again). |
+| `dova summarize <branch>` | Catch-up report for one branch: linked tickets' descriptions, commit log, diff stat. |
+| `dova bug <title>` | Quickly file a Bug. `--at file:line` attaches a permalink; `--link` chains into `dova link`. |
+| `dova wi quick <type> <title>` | Same as `bug`, for any work item type. |
+| `dova wi create` | The fuller create command — `--assign-to`, `--parent`. |
+| `dova wi view <id\|url>` | A work item's detail, including its parent and children. |
+| `dova wi search` | Search work items by flags, built into a WIQL query. |
+| `dova view <id\|url>` | Generic read: a work item or a PR, from a bare id or a link — auto-detects which. |
+| `dova pr create` | Opens a PR; auto-attaches any work items linked via `dova link`. |
+| `dova pr view [id\|url]` | A PR's detail, including its comment threads. |
+| `dova pr comment <id> <text>` | Post a new comment thread. |
+| `dova pr comment reply <id> <thread-id> <text>` | Reply within an existing thread. |
+| `dova pr comment resolve <id> <thread-id> [status]` | Set a thread's status (`resolved` by default). |
+| `dova pipeline status` | Recent pipeline runs for a branch. |
+| `dova pipeline watch [run-id]` | Poll a run until it finishes; exits non-zero on failure. |
+| `dova pipeline log [run-id]` | Why a run failed — the failed task's own log. See [Diagnosing a failed run](#diagnosing-a-failed-run). |
+| `dova api <path>` | Raw authenticated REST call — the escape hatch for anything not wrapped. |
+| `dova completion <shell>` | Generates a completion script for bash/zsh/fish/powershell. |
 
-### The scenario
+Every command supports `--json [fields]` and `--jq <expr>` for scripted
+use (mirroring `gh`), `--no-color`/`$NO_COLOR`, and `--web` where a
+browser view makes sense. `--org`/`--org-url`/`--project`/`--repo`
+override context resolution on any command that needs it.
 
-An agent is given a ticket and asked to start work on it:
+## Design
 
-| # | Step | Command | Owner |
-|---|---|---|---|
-| 1 | Read the ticket | `dova wi view 4821 --json` | **dova** — `az` proxy, a plain read |
-| 2 | Create + check out the branch | `git checkout -b fix/4821-login-redirect` | **git** — the agent's own naming, dova never sees it |
-| 3 | Link the ticket to the branch just checked out | `dova link 4821` | **dova** — the one fact git has no concept of |
-| 4 | Do the work | edits, `git commit`, etc. | **git** / the agent's own tooling |
-| 5 | Open the PR | `dova pr create` | **dova** — reads the link back out and attaches it automatically, no flags needed |
+### Context resolution
 
-Steps 2 and 4 never touch dova. Steps 1, 3, 5 are each either a plain
-`az` read/write or a git-config read/write — nothing in the whole flow
-has dova creating or naming a branch.
+Org/project/repo resolve in this order (`resolveContext()` in
+`src/lib/context.ts`):
 
-### Why `link`, not `start`
+1. `--org`/`--org-url`/`--project`/`--repo` flags. `--org` and
+   `--project` together are already a complete answer and short-circuit
+   everything else.
+2. `git remote get-url origin`, parsed for both the modern
+   (`dev.azure.com/{org}/{project}/_git/{repo}`) and legacy
+   (`{org}.visualstudio.com`) URL forms, HTTPS or SSH.
+3. `az devops configure` defaults, read directly from its config file
+   (`az devops configure --list` doesn't produce parseable JSON — see
+   [az CLI notes](#az-cli-notes)).
+4. A specific, actionable error. Never a silent guess.
 
-The command used to be called `start` and did four things: create +
-name the branch, transition the ticket's state to InProgress, offer to
-assign it to you, and write the git-config link. Cut against "dova is a
-linkage layer alongside git," only the last of those is actually
-linkage:
+### Area/iteration resolution
 
-- **Branch creation/naming** is git's job, full stop — the developer or
-  agent already has their own convention, and dova imposing one (or
-  even offering to) is dova doing git's work for it.
-- **State transition** and **assignment** change something on the
-  Azure Boards side that has nothing to do with whether `pr create` can
-  find and link the ticket — a PR links by id regardless of the
-  ticket's state or assignee. They're workflow automation (mirroring
-  what a human does when they *begin* work), not context propagation.
-  (These were explicit in the original spec for this command — this is
-  a real reconsideration of that requirement, not cleanup of drift.)
+Filing a work item needs an area path and iteration, which needs a
+team — `resolveCreateContext()` in `src/lib/team-resolver.ts` resolves
+that chain, in order:
 
-What's left once you cut those three is: fetch the ticket(s) (validates
-the id, and is where children-disambiguation still lives — see below),
-then write `branch.<current-branch>.dova-workitems`/`dova-primary` for
-whatever branch you're already standing on. There's no branch being
-created and nothing beginning — hence `link`, not `start`.
+1. `--like <id>` — copies `--area`/`--iteration` straight off an
+   existing work item (one call), bypassing team resolution entirely.
+   `--team <name>` — resolves area/iteration for a named team instead.
+   Both are one-off overrides for that call only.
+2. Saved `dova.area`/`dova.iteration` (repo-local git config) — the
+   common case once a repo has been used once: no prompts, one `az`
+   call (the create itself).
+3. `dova.team` (repo-local git config), or, the first time, an
+   interactive picker over the project's teams — then area/iteration
+   resolution for that team, saved for next time. `--like <id> --save`
+   writes the same two keys directly.
 
-`dova link` is also idempotent and additive: running it again on the
-same branch with another id merges it into the existing linked set
-(keeping whichever primary was already established) rather than
-clobbering it — exactly the shape "also link this related ticket to
-what I'm already working on" needs. If an id you're linking is already
+`--reresolve` ignores every saved value. There is no global
+(cross-repo) override for project or team: team is inherently
+project-scoped, and a per-repo default covers the realistic case.
+
+### Linkage, not workflow
+
+`dova` does not manage git branches. Creating, naming, and checking out
+a branch is git's job — the developer or agent already has their own
+convention for it, before `dova` is ever invoked. `dova link` records
+the one thing git and Azure DevOps have no shared concept of: that the
+branch you're standing on corresponds to a given work item.
+
+```sh
+dova wi view 4821 --json          # read the ticket
+git checkout -b fix/4821-redirect # create + check out the branch — git, not dova
+dova link 4821                    # record the linkage
+# ...work, commit...
+dova pr create                    # reads the link back out, attaches #4821 automatically
+```
+
+`dova link` never creates a branch, never transitions a ticket's
+state, and never touches assignment — none of those affect whether
+`pr create` can find and attach the ticket. It's additive and
+idempotent: linking a second id to an already-linked branch merges
+into the existing set rather than overwriting it. If an id is already
 linked to a *different* branch, it offers to check that branch out
-instead of double-tracking the same ticket in two places — that's not
-branch lifecycle management (nothing is created or named), it's the
-same kind of navigation `gh pr checkout` does.
+instead of double-tracking the same work — navigation, not branch
+lifecycle management.
 
-Any id with open children (an Epic, a Feature, or just a Bug someone's
-been using as a checklist — whatever the process calls it) still
-expands into a multi-select of them, unchanged from before, and for the
-same reason work item type/state names are never hardcoded elsewhere in
-this codebase: it's driven by the ticket's actual `[System.Parent]`
-hierarchy, not by asking a team what its backlog levels are called. For
-an agent that's already run `wi view` on the ticket first (step 1
-above), this disambiguation is mostly moot — the agent already knows
-from that response whether the ticket has open children and can pass
-the correct leaf id(s) straight to `link`, at which point `link`
-degenerates to a pure git-config write with no extra `az` calls at all.
-The children-check is the safety net for a human (or an agent) linking
-an id cold, without having looked at it first.
+An id with open children (an Epic, a Feature, or a Bug used as a
+checklist) expands into a multi-select of them, driven by the ticket's
+own `[System.Parent]` hierarchy rather than any team/backlog
+configuration — the same principle behind never hardcoding work item
+type or state names anywhere in this codebase.
 
-`link` never resolves a team. The old `start` did, up front, on every
-call, purely to look up the org's backlog configuration and answer "is
-this a portfolio type" — meaning an ordinary Bug paid for a team picker
-(and an unconditional "save to git config?" prompt with no flag to skip
-it) exactly as much as an actual Epic did. Team resolution
-(`team-resolver.ts`) is untouched and still exactly as necessary as
-before for `wi create`/`wi quick`/`bug`, where a *new* ticket genuinely
-needs an area path and iteration assigned and there's no other source
-for those — it just no longer has anything to do with linking a branch
-to a ticket that already exists.
+### Finding a branch again
 
-## Why TypeScript, not a compiled binary
+A common follow-on: "we forgot to do X for that Y thing," with no
+branch name given. `dova link`'s git config already records the
+branch-to-ticket mapping; `list` and `summarize` make it queryable,
+cheapest option first.
 
-This is a developer tool built for iteration speed, not a binary shipped
-to end users who've never heard of Node. That distinction is what
-settled the language call:
+**`dova list`** shows every linked branch, most recently active first.
+It costs the same regardless of branch count: one combined
+`git config --get-regexp` for every branch's `dova-workitems`/
+`dova-primary` at once, one `git for-each-ref` for recency, and one
+batched work item fetch for every linked id across every branch. Often
+enough on its own — a branch named `fix/200-login-redirect` next to "we
+forgot to fix the login redirect" doesn't need more.
 
-- **The team building it lives in TypeScript already.** Velocity here
-  means fast edit-test loops, an editor that understands the Azure
-  DevOps REST shapes as real types, and contributors who don't have to
-  learn Go/Cobra to add a command. A scripting-language tool with a real
-  type system costs nothing extra to maintain and is faster to extend.
-- **The runtime "cost" is already paid.** dova's own hard prerequisites
-  are `az` (a Python-based CLI with its own runtime) and `git`. A team
-  that can install and keep those current on a locked-down machine can
-  install Node — it's a five-minute, well-trodden ask, not a new class of
-  problem. This would be a much harder sell for a tool with *no* other
-  runtime prerequisites at all.
-- **Distribution is still simple without a single binary.** `npm i -g
-  dova` (or a private registry / internal npm mirror) is the realistic
-  install path for a team that already runs `az` and `git`. If a single
-  static binary ever becomes a real requirement (fully offline machines,
-  no npm registry access), `tsup`'s output is a plain Node ESM bundle —
-  `pkg`/`nexe`-style packaging is a follow-on step, not a rewrite.
+**`dova summarize <branch>`** is a catch-up report for the branches
+`list` alone doesn't resolve: the linked tickets' full descriptions
+(the *why*), the commit log since the branch diverged from its base
+(the *what happened* — often more distinctive for matching a vague
+description than a diff would be), and a `diff --stat` (the *how big*).
+Compact by default; `--full` shows full commit messages and the actual
+diff. Neither `list` nor `summarize` checks a branch out or does any
+matching itself — deciding whether a branch fits what was described is
+the caller's judgment, not something dova computes.
 
-The counter-case — Go + Cobra + a table/color library, one static
-binary, zero runtime — is the right call for a tool distributed to
-strangers (which is exactly why `gh` and `glab` are built that way: they
-ship to every contributor on every OS with zero assumptions). dova isn't
-that; it's an internal team tool where the people running it are the
-people building it. TypeScript wins on velocity here without meaningfully
-losing on the deployment story.
+The base `summarize` compares against resolves in order: `--base <ref>`
+> the target branch of an active PR for this branch, when one exists >
+the repo's default branch (from a local `origin/HEAD` symref, falling
+back to one `az repos show` call if that's unset).
 
-## Stack
+### Reading anything
 
-| Concern | Choice | Why |
-|---|---|---|
-| Language/runtime | TypeScript on Node 20+ | see above |
-| CLI parsing | [commander](https://github.com/tj/commander.js) | Small, explicit, no generator/build-step magic; nested subcommands map cleanly onto `dova wi create` style paths |
-| Color | [chalk](https://github.com/chalk/chalk) | Respects `NO_COLOR` / non-TTY out of the box; `getColor()` also forces it off for `--no-color` |
-| Tables | [cli-table3](https://github.com/cli-table/cli-table3) | Real column alignment/wrapping, not hand-padded strings |
-| Interactive prompts | [@inquirer/prompts](https://github.com/SBoudrias/Inquirer.js) | Arrow-key select/confirm for the ambiguous-without-a-flag cases |
-| Process execution | [execa](https://github.com/sindresorhus/execa) | Sane cross-platform spawning; every `az`/`git` call goes through `src/lib/exec.ts`, which is the one seam tests fake instead of mocking modules |
-| `--jq` | [jq-wasm](https://github.com/owenthereal/jq-wasm) | Real jq semantics with **no external binary** — matters on a locked-down machine where installing a second CLI tool isn't a given |
-| Browser opening | [open](https://github.com/sindresorhus/open) | Cross-platform `--web` |
-| Build | [tsup](https://github.com/egoist/tsup) | Bundles to a single ESM file with a shebang banner; no separate `declaration`/type-emit step needed for a CLI |
-| Tests | [vitest](https://vitest.dev) | Fast, native TS, good `vi.fn()` ergonomics for the prompt/runner fakes |
+`dova view`, `dova wi view`, and `dova pr view` each accept a bare id
+or a link (`src/lib/urls.ts` parses both work item and PR URLs,
+including the legacy `.visualstudio.com` host). A link's org/project
+(and repo, for a PR) override context resolution, so pasting a link to
+a different org than the one you're standing in just works.
+
+`dova view` is the generic form: a link says unambiguously what kind of
+thing it is; a bare id tries as a work item first, falling back to a
+PR, since the two are separate id spaces.
+
+Every work item view also resolves its immediate parent and children —
+generic across every work item type, from the ticket's own
+`[System.Parent]` field rather than any type-specific hierarchy
+knowledge. This comes through in `--json` as `parent`/`children`
+directly, so a script or an LLM can walk the hierarchy without a second
+call per child just to get a title.
+
+### Diagnosing a failed run
+
+`dova status`/`dova pipeline status` show that a run failed, not why —
+`az` itself has no timeline, job, or log command at all (the
+`azure-devops` extension's `pipelines runs` group is only
+`list`/`show`/`tag`/`artifact`). `dova pipeline log` goes through
+`az rest` against the Build REST API directly:
+
+1. `GET .../builds/{id}/timeline?api-version=7.1` — the full
+   stage/job/task breakdown, one call.
+2. `GET .../builds/{id}/logs/{logId}?api-version=7.1` — one call per
+   task, plain text rather than JSON (`runAzRestText()` in
+   `src/lib/exec.ts`).
+
+A run can have several failed tasks — a failure cascades up through its
+job and stage, and independent tasks can fail too. By default,
+`dova pipeline log [run-id]` (most recent run for the current branch)
+shows just the earliest failure, on the theory that the real root cause
+is usually the first one and everything after is fallout. `--task
+<name>` targets a specific task; `--all` shows every failed one.
+Human output tails to the last 200 lines (`--full` for the whole log);
+`--json` always carries the untruncated text.
 
 ## Architecture
 
@@ -200,7 +219,7 @@ src/
   lib/
     exec.ts           the only place that shells out to az/git — everything else takes a Runner
     context.ts         org/project/repo/branch resolution
-    team-resolver.ts   team/area/iteration resolution for creating work items, incl. --like/--save/--team overrides
+    team-resolver.ts   team/area/iteration resolution, incl. the --like/--save/--team overrides
     config.ts          git-config helpers + az devops's own config file
     output.ts           --json / --jq / color / table rendering
     command-helpers.ts   shared flag-group builders (--org/--project/--repo, --json, --jq, --web, --no-color)
@@ -211,225 +230,116 @@ src/
     pr.ts                  PR fetch/threads/comment/reply/resolve/full detail+render, shared by status + pr * + view
     pipelines.ts            pipeline run fetch + web URL + timeline/log fetch, shared by status + pipeline *
     quick-create.ts          shared guts of `dova bug` / `dova wi quick`
-    link.ts                   `dova link`'s full implementation
+    link.ts                   `dova link`'s implementation
     urls.ts                    work item / PR link parsing, for "give dova a link or an id"
-  types/azure-devops.ts  minimal REST object shapes (PR, WorkItem, Build, CommentThread)
+  types/azure-devops.ts  minimal REST object shapes (PR, WorkItem, Build, CommentThread, GitRepository)
 tests/
   context.test.ts        parseAzureRepoRemoteUrl + resolveContext, fully mocked
-  team-resolver.test.ts   resolveProject/resolveTeam/resolveAreaPath/resolveIterationPath/resolveCreateContext, fully mocked
+  team-resolver.test.ts   resolveProject/resolveTeam/resolveAreaPath/resolveIterationPath/resolveCreateContext
+  list.test.ts / summarize.test.ts
+                          gatherLinkedBranches / resolveBase+resolveDiffableRef+gatherSummary
   wiql.test.ts / work-item-types.test.ts / api.test.ts / urls.test.ts / pr.test.ts / exec.test.ts / pipelines.test.ts
                           pure-logic unit tests for the modules above
   fixtures/               fabricated remote URLs + az JSON payloads (contoso/MyProject/my-repo placeholders — no real org anywhere)
 ```
 
-**Every `az` call goes through `runAzJson()`** (`src/lib/exec.ts`), which
+Every `az` call goes through `runAzJson()` (`src/lib/exec.ts`), which
 appends `--output json` and parses it — nothing scrapes table output.
 Every command's real logic takes a `Runner` (the `git`/`az` process
 interface) as a parameter rather than importing `execa` directly, so
 tests substitute an in-memory fake instead of mocking modules.
 
-### Where the az CLI facts in this codebase came from
+### Stack
 
-Several choices across this codebase depend on exact `az`/REST shapes
-that aren't fully nailed down on learn.microsoft.com (or the docs site
-wasn't reachable while building this). Where that was true, the actual
+| Concern | Choice | Why |
+|---|---|---|
+| Language/runtime | TypeScript on Node 20+ | see [below](#why-typescript-not-a-compiled-binary) |
+| CLI parsing | [commander](https://github.com/tj/commander.js) | Explicit, no generator step; nested subcommands map cleanly onto `dova wi create` style paths |
+| Color | [chalk](https://github.com/chalk/chalk) | Respects `NO_COLOR` / non-TTY out of the box |
+| Tables | [cli-table3](https://github.com/cli-table/cli-table3) | Real column alignment/wrapping |
+| Interactive prompts | [@inquirer/prompts](https://github.com/SBoudrias/Inquirer.js) | Arrow-key select/confirm for the ambiguous-without-a-flag cases |
+| Process execution | [execa](https://github.com/sindresorhus/execa) | Every `az`/`git` call goes through `src/lib/exec.ts`, the one seam tests fake |
+| `--jq` | [jq-wasm](https://github.com/owenthereal/jq-wasm) | Real jq semantics with no external binary required |
+| Browser opening | [open](https://github.com/sindresorhus/open) | Cross-platform `--web` |
+| Build | [tsup](https://github.com/egoist/tsup) | Single ESM bundle with a shebang banner |
+| Tests | [vitest](https://vitest.dev) | Fast, native TS |
+
+### Why TypeScript, not a compiled binary
+
+`gh`/`glab` ship as a single static Go binary because they're
+distributed to every contributor on every OS with zero assumptions.
+dova is an internal tool where the people running it are the people
+building it, and already run `az` (a Python CLI) and `git` — a Node
+runtime is the same class of five-minute install, not a new one. That
+trade favors TypeScript: a real type system over the Azure DevOps REST
+shapes, fast edit-test loops, no separate language to onboard a
+contributor into. Distribution is still simple without a single binary
+— `npm install -g` (or a private registry) is the realistic path for a
+team that already runs `az`; a static binary via `pkg`/`nexe` is a
+follow-on packaging step over the existing `tsup` bundle if it's ever
+needed, not a rewrite.
+
+### az CLI notes
+
+Some `az`/REST shapes used here aren't fully documented on
+learn.microsoft.com. Where that was true, the
 [azure-devops-cli-extension](https://github.com/Azure/azure-devops-cli-extension)
-source — including its `commands.py` command-registration files, which
-give the ground-truth mapping from `az` command names to implementation
-functions — was read directly rather than guessed. Notably:
+source was read directly — its `commands.py` files give the ground-truth
+mapping from `az` command names to implementation functions:
 
-- `az devops configure --list` does **not** produce parseable JSON (its
-  `list_config` code path is a bare `print()`, returning nothing) — so
-  dova reads the extension's own INI config file directly instead
-  (`azDevopsConfigFilePath()` in `lib/config.ts`).
+- `az devops configure --list` does not produce parseable JSON (its
+  `list_config` path is a bare `print()`) — dova reads the extension's
+  own INI config file directly instead (`azDevopsConfigFilePath()` in
+  `lib/config.ts`).
 - `az boards area team list` returns one `TeamFieldValues` object
-  (`{ defaultValue, values }`), not a flattened list — so "no area
-  flagged as default" is just `!defaultValue`, no searching required.
-- `az boards iteration team list --timeframe current` is genuinely
-  supported by the current extension (confirmed from source) — no
-  fallback needed for an older extension version, since dova only
-  targets `dev.azure.com`.
-- `az repos pr work-item list` doesn't just return refs — the extension
-  resolves them and returns full `WorkItem` objects, fields included, so
-  status/pr-view don't need a second round-trip per item.
-- `az pipelines runs list`/`runs show` are, under the hood, the same
-  `Build` REST model as the older `az pipelines build` commands (both
-  call the same `BuildClient`) — so one `AzBuild` type covers both.
+  (`{ defaultValue, values }`), not a flattened list.
+- `az boards iteration team list --timeframe current` is supported by
+  the current extension — no fallback needed, since dova only targets
+  `dev.azure.com`.
+- `az repos pr work-item list` resolves and returns full `WorkItem`
+  objects, not just refs, so status/pr-view don't need a second
+  round-trip per item.
+- `az pipelines runs list`/`runs show` are the same `Build` REST model
+  as the older `az pipelines build` commands (both call the same
+  `BuildClient`) — one `AzBuild` type covers both.
 - `az boards work-item relation add --relation-type Parent` is how
-  `wi create --parent` links a child, confirmed against
-  `dev/boards/relations.py` (relation-type names like "Parent" are
-  matched case-insensitively against the org's relation types — this is
-  fixed system vocabulary, not something that varies by process
-  template, unlike work item type/state names).
-- There is **no** `az boards work-item-type` command group at all (it's
-  simply absent from the extension's command registry), so "what state
-  category is this state in" (`lib/work-item-types.ts`, used to drop
-  Completed/Removed items from `dova link`'s children expansion — never
-  a hardcoded state name) goes through `az rest` against the REST API
-  directly for that reason.
+  `wi create --parent` links a child. Relation-type names like "Parent"
+  are matched case-insensitively against the org's relation types —
+  fixed system vocabulary, unlike work item type/state names.
+- There is no `az boards work-item-type` command group — it's absent
+  from the extension's command registry — so `lib/work-item-types.ts`
+  (state -> category, used to drop Completed/Removed items from
+  `link`'s children expansion) goes through `az rest` directly.
+- The `pipelines runs` command group is only `list`/`show`/`tag`/
+  `artifact` — no timeline, job, or log command — so `pipeline log`
+  goes through `az rest` against the Build timeline/logs endpoints.
+- `az repos show` returns a `GitRepository` object including
+  `defaultBranch` (e.g. `refs/heads/main`), used as `summarize`'s
+  fallback base branch.
 
-If you're extending this and hit a command whose JSON shape isn't
-obvious from `--help`, the same technique (read the extension's Python
-source on GitHub — `commands.py` in each command group's directory for
-the command-name-to-function mapping, then the named file for the
-actual shape) is usually faster and more reliable than guessing from
-docs or table output.
-
-## Context resolution
-
-Every command that needs org/project/repo resolves it in this order —
-see `resolveContext()`:
-
-1. Explicit `--org`/`--org-url`/`--project`/`--repo` flags. If `--org`
-   and `--project` are both given, that's already a complete answer and
-   nothing else is even consulted.
-2. `git remote get-url origin`, parsed for both the modern
-   (`dev.azure.com/{org}/{project}/_git/{repo}`, HTTPS or SSH) and legacy
-   (`{org}.visualstudio.com`, HTTPS or SSH) URL forms.
-3. `az devops configure` defaults (read from its config file directly —
-   see above).
-4. A specific, actionable error. Never a silent guess.
-
-Area/iteration resolution for creating a work item (`resolveCreateContext()`
-in `team-resolver.ts`) is separate, shared plumbing behind every command
-that creates or files one (`dova bug`, `dova wi quick`, `dova wi
-create`). One repo has one team's worth of tickets in it — that's the
-whole assumption — so the only thing dova ever remembers durably is
-repo-local git config, no separate cache directory:
-
-1. `--like <id>` or `--team <name>` — explicit, one-off overrides for
-   this call only, never persisted. `--like` copies `--area`/`--iteration`
-   straight off an existing work item (one `boards work-item show`
-   call, no team resolved at all — team is only ever a means to an
-   area/iteration pair, and `work-item create` doesn't take `--team`).
-   `--team` picks a team by name and resolves its area/iteration fresh.
-2. Saved `dova.area`+`dova.iteration` repo-local git config — the
-   common case once a repo has been used once: zero interactive
-   prompts, one `az` call (the create itself).
-3. `dova.team` repo-local git config, or (first time only) an
-   interactive picker over `az devops team list` — then `--area`/
-   `--iteration` resolution for that team, saved to `dova.area`/
-   `dova.iteration` for next time (and `--like <id> --save` writes the
-   same two keys directly, for "this ticket's team, not the repo's
-   usual one, is now the default").
-
-`--reresolve` ignores every saved value and starts over. There's no
-global (cross-repo) override for project or team — team is inherently
-project-scoped, and nothing about "my default team everywhere" survived
-contact with a real scenario, so it isn't there to reach for.
-
-## Reading things
-
-`dova view`, `dova wi view`, and `dova pr view` all accept either a bare
-id or a link (`lib/urls.ts` parses both the work item and PR URL forms,
-including the legacy `.visualstudio.com` host). A link's org/project
-(and repo, for a PR link) override context resolution — pasting a link
-to a *different* org/project than the one you're standing in just works,
-the way `gh pr view <url>` does.
-
-`dova view` is the generic form for when the caller (a person, or an
-LLM driving dova) doesn't already know or care whether an id is a work
-item or a PR: a link says so unambiguously; a bare id tries as a work
-item first (falling back to a PR), since work item ids and PR ids are
-separate id spaces with no way to tell them apart from the number alone.
-
-Every "view" also resolves the item's immediate hierarchy, not just its
-own fields — generic across every work item type (a Feature's User
-Stories, an Epic's Features, a Bug's linked Tasks, whatever the process
-calls them), the same "just look at `[System.Parent]`" approach
-`dova link`'s own expansion uses:
-
-- **parent** — id, title, type, state (hydrated with one extra fetch when a parent exists)
-- **children** — same shape, one WIQL call on `[System.Parent] = <id>`
-
-That structure comes through in `--json` as `parent`/`children`
-directly (see `WorkItemDetail` in `lib/work-items.ts`) — a nav an LLM
-consuming `--json` can walk without a second `dova wi view` per child
-just to get titles/states, and a table in the human view for the same
-reason.
-
-## Inspecting a failed run
-
-`dova status`/`dova pipeline status` tell you a run failed; neither
-tells you *why* — no job/task breakdown, no logs, anywhere. `az` itself
-has nothing here either: the extension's whole `pipelines runs` command
-group is `list`/`show`/`tag`/`artifact` (confirmed from
-`pipelines/commands.py`, the same source-reading technique used
-elsewhere in this codebase) — no timeline, no job, no log command at
-all. So `dova pipeline log` goes through `az rest` against the Build
-REST API directly, same as PR threads and work item states already do:
-
-1. `GET .../builds/{id}/timeline?api-version=7.1` — one call, the full
-   stage/job/task breakdown as a flat `records[]` list.
-2. `GET .../builds/{id}/logs/{logId}?api-version=7.1` — one call *per
-   task*, plain text (not JSON) — the one new wrinkle here, handled by
-   `runAzRestText()` in `lib/exec.ts`, `runAzRestJson()`'s sibling minus
-   the `JSON.parse`.
-
-A failed run can have several failed records — a failing task cascades
-a failure up through its job and stage, and more than one task can
-genuinely fail independently. Rather than dump every log by default
-(and blow the `az rest` call budget), `dova pipeline log [run-id]`
-(default: most recent run for the current branch) fetches the timeline,
-keeps only records that both failed *and* produced their own log
-(`failedRecords()` in `lib/pipelines.ts` — this is what drops the
-Stage/Phase rollups, which are also marked failed but have nothing of
-their own to show), sorts by start time, and shows just the **first**
-one — the real root cause is almost always the earliest failure, with
-everything after it fallout. `--task <name>` targets a specific one by
-name once you know which you want; `--all` shows every failed task's
-log. Human output tails to the last 200 lines (`--full` for the whole
-thing); `--json` always carries the full text, untruncated, for piping
-or programmatic use. Common case: 2 `az` calls total (timeline + one
-log), 3 if the run id also has to be looked up from the branch.
-
-## Completions
-
-`dova completion <bash|zsh|fish|powershell>` generates a script directly
-from the live commander command tree (`src/lib/completions/introspect.ts`
-walks the actual `Command` graph — there's no separate, hand-maintained
-list of commands/flags to keep in sync).
-
-```sh
-# bash
-source <(dova completion bash)
-
-# zsh
-source <(dova completion zsh)
-
-# fish
-dova completion fish > ~/.config/fish/completions/dova.fish
-
-# PowerShell
-dova completion powershell >> $PROFILE
-```
-
-The bash generator avoids `declare -A` (bash 4+ only) since macOS ships
-bash 3.2; zsh reuses that same generated logic via `bashcompinit` rather
-than a second hand-written implementation. PowerShell's generator takes
-a different tack that fits the shell better: it serializes the whole
-tree as a nested hashtable and walks it with one generic script block at
-completion time, rather than one branch per command path.
+For anything else: reading the extension's Python source on GitHub
+(`commands.py` per command group for the name-to-function mapping, then
+the named implementation file for the actual shape) is faster and more
+reliable than guessing from `--help` or table output.
 
 ## Development
 
 ```sh
 npm install
-npm run dev -- status         # run against source via tsx, no build step
-npm run build                 # bundle to dist/index.js
-npm test                       # vitest
-npm run typecheck              # tsc --noEmit
+npm run dev -- status   # run against source via tsx, no build step
+npm run build            # bundle to dist/index.js
+npm test                  # vitest
+npm run typecheck          # tsc --noEmit
 ```
 
-No org name, project name, team name, or process-specific state/type
-name is hardcoded anywhere in the source, examples, or tests — see the
-"No hardcoded org" requirement this was built against. Test fixtures use
-`contoso`/`MyProject`/`my-repo`/`MyTeam` as placeholders throughout.
+Test fixtures use `contoso`/`MyProject`/`my-repo`/`MyTeam` as
+placeholders throughout — no real org name appears anywhere in the
+source, examples, or tests.
 
-## Deliberately out of scope for v1
+## Out of scope
 
-Noted, not built: `dova tui` (full-screen dashboard), `dova stats`
+Not built, on purpose: `dova tui` (full-screen dashboard), `dova stats`
 (OData-based cycle time/PR turnaround), `dova blame`, an extension
 system, a local TTL cache for reads, and any push-notification feature
-(webhooks can't target localhost, and a naive polling loop marketed as
-"real-time" isn't an acceptable substitute — see the project brief).
+(webhooks can't target localhost, and a polling loop marketed as
+"real-time" isn't an acceptable substitute).

@@ -69,6 +69,27 @@ export async function fetchChildren(runner: Runner, orgUrl: string, parentId: nu
   return result ?? [];
 }
 
+/**
+ * `System.Description` is rich text (HTML) for most process templates,
+ * not plain text. This is a pragmatic tag-stripper for terminal display
+ * — not an HTML parser — covering markup and entities that actually
+ * show up in practice, not the general case.
+ */
+export function stripHtml(html: string): string {
+  return html
+    .replace(/<(br|\/p|\/div|\/li)\s*\/?>/gi, '\n')
+    .replace(/<li[^>]*>/gi, '- ')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 export function fieldValue(item: AzWorkItem, field: string): string | null {
   const value = item.fields[field];
   if (value === undefined || value === null) return null;
