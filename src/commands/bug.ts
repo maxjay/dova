@@ -1,10 +1,24 @@
 import type { Command } from 'commander';
-import { addContextOptions, addJsonOption, addTeamOptions, notImplemented } from '../lib/command-helpers.js';
+import { defaultRunner } from '../lib/exec.js';
+import { quickCreateWorkItem } from '../lib/quick-create.js';
+import { addContextOptions, addJsonOption, addTeamOptions } from '../lib/command-helpers.js';
+import { emit, getColor } from '../lib/output.js';
+import { runStart } from '../lib/start.js';
 
-/**
- * NOT YET IMPLEMENTED. Sugar over `dova wi quick bug <title>` — see
- * commands/wi/quick.ts for the shared implementation once it lands.
- */
+interface BugFlags {
+  org?: string;
+  orgUrl?: string;
+  project?: string;
+  repo?: string;
+  team?: string;
+  reresolve?: boolean;
+  at?: string;
+  start?: boolean;
+  json?: string | boolean;
+  color: boolean;
+}
+
+/** Sugar over `dova wi quick bug <title>` — see lib/quick-create.ts for the shared implementation. */
 export function registerBugCommand(program: Command): void {
   const cmd = program
     .command('bug <title>')
@@ -16,5 +30,43 @@ export function registerBugCommand(program: Command): void {
   addTeamOptions(cmd);
   addJsonOption(cmd);
 
-  cmd.action(() => notImplemented('dova bug'));
+  cmd.action(async (title: string, opts: BugFlags) => {
+    const runner = defaultRunner;
+    const color = getColor(opts.color === false);
+
+    const result = await quickCreateWorkItem(runner, {
+      type: 'Bug',
+      title,
+      at: opts.at,
+      project: opts.project,
+      team: opts.team,
+      reresolve: opts.reresolve,
+    });
+
+    await emit(result, opts, () => {
+      process.stdout.write(
+        [
+          `${color.green('Created')} Bug ${color.bold(`#${result.id}`)}`,
+          `  ${color.dim(result.url)}`,
+          `  Project: ${result.project}   Team: ${result.team}`,
+          `  Area: ${result.areaPath}`,
+          `  Iteration: ${result.iterationPath}`,
+          ...result.warnings.map((w) => color.yellow(`  Warning: ${w}`)),
+        ].join('\n') + '\n'
+      );
+    });
+
+    if (opts.start) {
+      await runStart({
+        ids: [String(result.id)],
+        org: opts.org,
+        orgUrl: opts.orgUrl,
+        project: result.project,
+        repo: opts.repo,
+        team: result.team,
+        json: opts.json,
+        color,
+      });
+    }
+  });
 }

@@ -1,7 +1,22 @@
 import type { Command } from 'commander';
-import { addContextOptions, addJsonOption, addJqOption, addNoColorOption, notImplemented } from '../../lib/command-helpers.js';
+import { defaultRunner } from '../../lib/exec.js';
+import { resolveContext } from '../../lib/context.js';
+import { fetchRecentRuns, buildRunWebUrl } from '../../lib/pipelines.js';
+import { addContextOptions, addJsonOption, addJqOption, addNoColorOption } from '../../lib/command-helpers.js';
+import { emit, getColor, renderTable } from '../../lib/output.js';
+import { UserError } from '../../lib/errors.js';
 
-/** NOT YET IMPLEMENTED. `az pipelines runs list --branch <branch>` under the hood — see commands/status.ts for the same call. */
+interface PipelineStatusFlags {
+  org?: string;
+  orgUrl?: string;
+  project?: string;
+  repo?: string;
+  branch?: string;
+  json?: string | boolean;
+  jq?: string;
+  color: boolean;
+}
+
 export function registerPipelineStatusCommand(pipeline: Command): void {
   const cmd = pipeline
     .command('status')
@@ -13,5 +28,37 @@ export function registerPipelineStatusCommand(pipeline: Command): void {
   addJqOption(cmd);
   addNoColorOption(cmd);
 
-  cmd.action(() => notImplemented('dova pipeline status'));
+  cmd.action(async (opts: PipelineStatusFlags) => {
+    const runner = defaultRunner;
+    const color = getColor(opts.color === false);
+    const ctx = await resolveContext(runner, { org: opts.org, orgUrl: opts.orgUrl, project: opts.project, repo: opts.repo });
+
+    const branch = opts.branch ?? ctx.branch;
+    if (!branch) {
+      throw new UserError('No branch to check — pass --branch, or run this inside a repo on a branch.');
+    }
+
+    const runs = await fetchRecentRuns(runner, ctx.orgUrl, ctx.project, branch, 10);
+    const results = runs.map((r) => ({
+      id: r.id,
+      name: r.definition?.name ?? `#${r.buildNumber}`,
+      status: r.status,
+      result: r.result,
+      queueTime: r.queueTime ?? null,
+      url: r._links?.web?.href ?? buildRunWebUrl(ctx.orgUrl, ctx.project, r.id),
+    }));
+
+    await emit({ branch, runs: results }, opts, () => {
+      if (results.length === 0) {
+        process.stdout.write(`${color.dim(`No pipeline runs found for branch "${branch}".`)}\n`);
+        return;
+      }
+      const rows = results.map((r) => {
+        const outcome = r.result ?? r.status;
+        const colored = outcome === 'succeeded' ? color.green(outcome) : outcome === 'failed' ? color.red(outcome) : color.yellow(outcome);
+        return [String(r.id), r.name, colored, r.queueTime ?? '?'];
+      });
+      process.stdout.write(`${renderTable(['Run', 'Pipeline', 'Result', 'Queued'], rows)}\n`);
+    });
+  });
 }

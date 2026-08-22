@@ -1,12 +1,14 @@
 import type { Command } from 'commander';
-import { defaultRunner, runAzJson } from '../lib/exec.js';
+import { defaultRunner } from '../lib/exec.js';
 import { gitConfigGet } from '../lib/config.js';
 import { resolveContext, buildPrWebUrl } from '../lib/context.js';
 import { addContextOptions, addJsonOption, addJqOption, addNoColorOption, addWebOption } from '../lib/command-helpers.js';
 import { emit, getColor, renderTable } from '../lib/output.js';
 import { openInBrowser } from '../lib/browser.js';
 import { NotFoundError, UserError } from '../lib/errors.js';
-import type { AzPullRequest, AzWorkItem, AzBuild, AzCommentThread } from '../types/azure-devops.js';
+import { fetchRecentRuns, buildRunWebUrl } from '../lib/pipelines.js';
+import { fetchWorkItemsByIds, fieldValue } from '../lib/work-items.js';
+import { fetchActivePrForBranch, fetchPrWorkItems, fetchDiscussionThreads, isUnresolvedThreadStatus } from '../lib/pr.js';
 
 export interface StatusFlags {
   org?: string;
@@ -61,19 +63,6 @@ export interface StatusResult {
   warnings: string[];
 }
 
-function webUrlForRun(run: AzBuild, orgUrl: string, project: string): string {
-  return run._links?.web?.href ?? `${orgUrl}/${encodeURIComponent(project)}/_build/results?buildId=${run.id}`;
-}
-
-/** Real thread-vs-noise heuristic: a thread whose every comment is system-authored ("X created the PR", "X pushed N commits") isn't a discussion. */
-function isDiscussionThread(thread: AzCommentThread): boolean {
-  return !thread.isDeleted && (thread.comments ?? []).some((c) => c.commentType !== 'system' && (c.content ?? '').trim().length > 0);
-}
-
-function isUnresolved(status: string): boolean {
-  return status === 'active' || status === 'pending';
-}
-
 export async function gatherStatus(flags: StatusFlags, cwd?: string): Promise<StatusResult> {
   const runner = defaultRunner;
   const ctx = await resolveContext(runner, {
@@ -94,26 +83,14 @@ export async function gatherStatus(flags: StatusFlags, cwd?: string): Promise<St
   const { orgUrl, project, repo, branch } = { ...ctx, repo: ctx.repo, branch: ctx.branch };
 
   // Call 1: the active PR for this branch, if any.
-  const prs = await runAzJson<AzPullRequest[]>(runner, [
-    'repos', 'pr', 'list',
-    '--organization', orgUrl,
-    '--project', project,
-    '--repository', repo,
-    '--source-branch', branch,
-    '--status', 'active',
-  ]);
-  const pr = prs[0] ?? null;
+  const pr = await fetchActivePrForBranch(runner, orgUrl, project, repo, branch);
 
   // Call 2: work items — from the PR when one exists, otherwise from what
   // `dova start` tracked locally (see lib/config.ts's branch.<name>.dova-workitems).
   let workItems: WorkItemSummary[];
   if (pr) {
-    const raw = await runAzJson<AzWorkItem[] | null>(runner, [
-      'repos', 'pr', 'work-item', 'list',
-      '--id', String(pr.pullRequestId),
-      '--organization', orgUrl,
-    ]);
-    workItems = (raw ?? []).map((w) => ({
+    const raw = await fetchPrWorkItems(runner, orgUrl, pr.pullRequestId);
+    workItems = raw.map((w) => ({
       id: w.id,
       title: w.fields?.['System.Title'] ?? null,
       state: w.fields?.['System.State'] ?? null,
@@ -123,28 +100,34 @@ export async function gatherStatus(flags: StatusFlags, cwd?: string): Promise<St
   } else {
     const tracked = await gitConfigGet(runner, `branch.${branch}.dova-workitems`, { cwd });
     const primary = await gitConfigGet(runner, `branch.${branch}.dova-primary`, { cwd });
-    workItems = (tracked ?? '')
+    const ids = (tracked ?? '')
       .split(',')
       .map((s) => s.trim())
       .filter(Boolean)
-      .map((id) => ({ id: Number(id), title: null, state: null, type: null, primary: id === primary }));
+      .map(Number);
+    const hydrated = ids.length > 0 ? await fetchWorkItemsByIds(runner, orgUrl, ids) : [];
+    const byId = new Map(hydrated.map((w) => [w.id, w]));
+    workItems = ids.map((id) => {
+      const w = byId.get(id);
+      return {
+        id,
+        title: w ? (fieldValue(w, 'System.Title') ?? null) : null,
+        state: w ? (fieldValue(w, 'System.State') ?? null) : null,
+        type: w ? (fieldValue(w, 'System.WorkItemType') ?? null) : null,
+        primary: String(id) === primary,
+      };
+    });
   }
 
   // Call 3: last 3 pipeline runs for this branch.
-  const runs = await runAzJson<AzBuild[]>(runner, [
-    'pipelines', 'runs', 'list',
-    '--organization', orgUrl,
-    '--project', project,
-    '--branch', branch,
-    '--top', '3',
-  ]);
+  const runs = await fetchRecentRuns(runner, orgUrl, project, branch, 3);
   const pipelineRuns: PipelineRunSummary[] = runs.map((r) => ({
     id: r.id,
     name: r.definition?.name ?? `#${r.buildNumber}`,
     status: r.status,
     result: r.result,
     queueTime: r.queueTime ?? null,
-    url: webUrlForRun(r, orgUrl, project),
+    url: r._links?.web?.href ?? buildRunWebUrl(orgUrl, project, r.id),
   }));
 
   // Call 4: comment threads (only meaningful once there's a PR). The
@@ -152,16 +135,14 @@ export async function gatherStatus(flags: StatusFlags, cwd?: string): Promise<St
   // this goes through `az rest` against the PR threads endpoint.
   let threads: ThreadSummary[] = [];
   if (pr) {
-    const uri = `${orgUrl}/${encodeURIComponent(project)}/_apis/git/repositories/${encodeURIComponent(repo)}/pullRequests/${pr.pullRequestId}/threads?api-version=7.1`;
-    const res = await runAzJson<{ value: AzCommentThread[] }>(runner, ['rest', '--method', 'get', '--uri', uri]);
-    threads = (res.value ?? [])
-      .filter(isDiscussionThread)
+    const raw = await fetchDiscussionThreads(runner, orgUrl, project, repo, pr.pullRequestId);
+    threads = raw
       .map((t) => {
         const last = t.comments[t.comments.length - 1];
         return {
           id: t.id,
           status: t.status,
-          unresolved: isUnresolved(t.status),
+          unresolved: isUnresolvedThreadStatus(t.status),
           commentCount: t.comments.length,
           lastAuthor: last?.author?.displayName ?? null,
           lastComment: last?.content ?? null,
@@ -278,6 +259,6 @@ export function registerStatusCommand(program: Command): void {
       return;
     }
 
-    await emit(result as unknown as Record<string, unknown>, opts, () => renderStatusHuman(result, color));
+    await emit(result, opts, () => renderStatusHuman(result, color));
   });
 }

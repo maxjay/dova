@@ -5,23 +5,49 @@ A `gh`/`glab`-style CLI for Azure DevOps. Wraps `az` (with the
 from the directory you're standing in instead of making you pass flags
 every time.
 
-## Status: early scaffold
+## Status: v1 command surface implemented
 
-This repo is mid-build. What's real today:
+Every command from the project brief is implemented end to end — see
+`src/commands/` for the commander wiring and `src/lib/` for the shared
+logic each command is built from:
 
-- Context resolution (`src/lib/context.ts`) — parses `git remote get-url
-  origin` for org/project/repo, falls back to `az devops configure`
-  defaults, errors clearly otherwise. Fully tested.
-- Team/area/iteration resolution (`src/lib/team-resolver.ts`) — the
-  shared plumbing every work-item-touching command needs. Fully tested.
-- `dova status` — implemented end to end.
-- `dova api` — implemented end to end (the escape hatch).
-- `dova completion {bash,zsh,fish,powershell}` — implemented, generated
-  from the live command tree (see "Completions" below).
-- Everything else (`start`, `bug`, `wi *`, `pr *`, `pipeline *`) is
-  scaffolded — full `--help`, full flag surface — but each action just
-  throws "not implemented yet". See the command's docstring for its
-  planned behavior.
+- `dova status` — current branch's active PR, linked work items, recent
+  pipeline runs, comment threads. One screen, one `gatherStatus()` call.
+- `dova start <id...>` — the big one: portfolio-item expansion (via the
+  team's backlog configuration, never a hardcoded type name) into a
+  multi-select of open children, state-category-based transitions (never
+  a literal state name, never regresses an item), assignment, local
+  branch-naming, duplicate-branch detection, and git-config tracking. See
+  `src/lib/start.ts`'s doc comments for the full flow.
+- `dova bug` / `dova wi quick` — fast filing, sharing `src/lib/quick-create.ts`.
+- `dova wi create` — the fuller version, with `--assign-to`/`--parent`.
+- `dova wi view` / `dova wi search` — search builds WIQL from flags
+  (`src/lib/wiql.ts`) so nobody has to write it by hand.
+- `dova pr create` / `dova pr view` / `dova pr comment` /
+  `dova pr comment resolve`.
+- `dova pipeline status` / `dova pipeline watch` — watch polls and exits,
+  no daemon.
+- `dova api` — the raw REST escape hatch.
+- `dova completion {bash,zsh,fish,powershell}` — generated from the live
+  command tree (see "Completions" below).
+
+Context resolution (`src/lib/context.ts`) and team/area/iteration
+resolution (`src/lib/team-resolver.ts`) are the shared plumbing
+underneath nearly all of this, and are the most heavily tested modules
+(`tests/context.test.ts`, `tests/team-resolver.test.ts`) since almost
+everything else depends on one or both.
+
+**On `dova start`'s call count:** the project brief's "no command makes
+more than 3-4 calls" guideline is met everywhere else, but `start`
+inherently doesn't fit it — transitioning and (optionally) assigning N
+work items is O(n) in however many ids you pass, by the nature of the
+command, not from over-fetching. Every *lookup* that doesn't have to
+scale with N is batched/cached instead (one call for the seed items
+regardless of count, one call for all portfolio items' children combined,
+one state-category fetch per distinct work item *type* in the batch, one
+`git config --get-regexp` for the whole duplicate-branch scan instead of
+one per local branch). Flagging this per the brief's own instruction
+rather than quietly building past the guideline.
 
 ## Why TypeScript, not a compiled binary
 
@@ -86,10 +112,21 @@ src/
     output.ts           --json / --jq / color / table rendering
     command-helpers.ts   shared flag-group builders (--org/--project/--repo, --json, --jq, --web, --no-color)
     completions/         tree -> {bash,zsh,fish,powershell} script generators
+    work-items.ts        fetch-by-id / batch-fetch-by-id / web URLs, shared by wi/pr/start
+    work-item-types.ts   state -> category, and the "what should dova start transition into" decision
+    backlog.ts            team backlog config -> "is this a portfolio-level type" (never a hardcoded type name)
+    wiql.ts                small WIQL builder (wi search, batch id fetch, start's children query)
+    pr.ts                  PR fetch/threads/comment-post/thread-resolve, shared by status + pr *
+    pipelines.ts            pipeline run fetch + web URL, shared by status + pipeline *
+    branch-naming.ts        slug/prefix/branch-name for `dova start`
+    quick-create.ts          shared guts of `dova bug` / `dova wi quick`
+    start.ts                  `dova start`'s full implementation
   types/azure-devops.ts  minimal REST object shapes (PR, WorkItem, Build, CommentThread)
 tests/
   context.test.ts        parseAzureRepoRemoteUrl + resolveContext, fully mocked
   team-resolver.test.ts   resolveProject/resolveTeam/resolveAreaPath/resolveIterationPath/resolveTeamContext, fully mocked
+  wiql.test.ts / branch-naming.test.ts / work-item-types.test.ts / backlog.test.ts / api.test.ts
+                          pure-logic unit tests for the modules above
   fixtures/               fabricated remote URLs + az JSON payloads (contoso/MyProject/my-repo placeholders — no real org anywhere)
 ```
 
@@ -101,28 +138,49 @@ tests substitute an in-memory fake instead of mocking modules.
 
 ### Where the az CLI facts in this codebase came from
 
-A few of the choices in `team-resolver.ts` and `config.ts` depend on
-exact `az`/REST shapes that aren't fully nailed down on
-learn.microsoft.com (or weren't reachable while building this). Where
-that was true, the actual
+Several choices across this codebase depend on exact `az`/REST shapes
+that aren't fully nailed down on learn.microsoft.com (or the docs site
+wasn't reachable while building this). Where that was true, the actual
 [azure-devops-cli-extension](https://github.com/Azure/azure-devops-cli-extension)
-source was read directly rather than guessed — see the comments in those
-two files for what was verified and where. Notably:
+source — including its `commands.py` command-registration files, which
+give the ground-truth mapping from `az` command names to implementation
+functions — was read directly rather than guessed. Notably:
 
 - `az devops configure --list` does **not** produce parseable JSON (its
   `list_config` code path is a bare `print()`, returning nothing) — so
   dova reads the extension's own INI config file directly instead
-  (`azDevopsConfigFilePath()` in `config.ts`).
+  (`azDevopsConfigFilePath()` in `lib/config.ts`).
 - `az boards area team list` returns one `TeamFieldValues` object
   (`{ defaultValue, values }`), not a flattened list — so "no area
   flagged as default" is just `!defaultValue`, no searching required.
 - `az boards iteration team list --timeframe current` is genuinely
   supported by the current extension (confirmed from source), with a
   defensive `az rest` fallback in case that ever changes.
+- `az repos pr work-item list` doesn't just return refs — the extension
+  resolves them and returns full `WorkItem` objects, fields included, so
+  status/pr-view don't need a second round-trip per item.
+- `az pipelines runs list`/`runs show` are, under the hood, the same
+  `Build` REST model as the older `az pipelines build` commands (both
+  call the same `BuildClient`) — so one `AzBuild` type covers both.
+- `az boards work-item relation add --relation-type Parent` is how
+  `wi create --parent` links a child, confirmed against
+  `dev/boards/relations.py` (relation-type names like "Parent" are
+  matched case-insensitively against the org's relation types — this is
+  fixed system vocabulary, not something that varies by process
+  template, unlike work item type/state names).
+- There is **no** `az boards work-item-type` command group at all (it's
+  simply absent from the extension's command registry) and **no**
+  `az`-level concept of a team's portfolio backlog levels. Both of dova's
+  process-agnostic decisions — "what state category is this state in"
+  (`lib/work-item-types.ts`) and "is this type a portfolio-level type for
+  this team" (`lib/backlog.ts`) — go through `az rest` against the
+  underlying REST endpoints directly for that reason.
 
 If you're extending this and hit a command whose JSON shape isn't
 obvious from `--help`, the same technique (read the extension's Python
-source on GitHub) is usually faster and more reliable than guessing from
+source on GitHub — `commands.py` in each command group's directory for
+the command-name-to-function mapping, then the named file for the
+actual shape) is usually faster and more reliable than guessing from
 docs or table output.
 
 ## Context resolution
