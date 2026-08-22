@@ -37,6 +37,10 @@ logic each command is built from:
   `won't-fix`, `closed`, `pending`) rather than only ever resolving.
 - `dova pipeline status` / `dova pipeline watch` — watch polls and exits,
   no daemon.
+- `dova pipeline log [run-id]` — why a run failed, not just that it did:
+  the failed task's own log (default: the first failure, most recent run
+  for the current branch). `az` has no command for this at all — see
+  "Inspecting a failed run" below.
 - `dova api` — the raw REST escape hatch.
 - `dova completion {bash,zsh,fish,powershell}` — generated from the live
   command tree (see "Completions" below).
@@ -205,7 +209,7 @@ src/
     work-item-types.ts   state -> category (used to drop Completed/Removed children from link's expansion)
     wiql.ts                small WIQL builder (wi search, batch id fetch, link's + view's children query)
     pr.ts                  PR fetch/threads/comment/reply/resolve/full detail+render, shared by status + pr * + view
-    pipelines.ts            pipeline run fetch + web URL, shared by status + pipeline *
+    pipelines.ts            pipeline run fetch + web URL + timeline/log fetch, shared by status + pipeline *
     quick-create.ts          shared guts of `dova bug` / `dova wi quick`
     link.ts                   `dova link`'s full implementation
     urls.ts                    work item / PR link parsing, for "give dova a link or an id"
@@ -213,7 +217,7 @@ src/
 tests/
   context.test.ts        parseAzureRepoRemoteUrl + resolveContext, fully mocked
   team-resolver.test.ts   resolveProject/resolveTeam/resolveAreaPath/resolveIterationPath/resolveCreateContext, fully mocked
-  wiql.test.ts / work-item-types.test.ts / api.test.ts / urls.test.ts / pr.test.ts / exec.test.ts
+  wiql.test.ts / work-item-types.test.ts / api.test.ts / urls.test.ts / pr.test.ts / exec.test.ts / pipelines.test.ts
                           pure-logic unit tests for the modules above
   fixtures/               fabricated remote URLs + az JSON payloads (contoso/MyProject/my-repo placeholders — no real org anywhere)
 ```
@@ -343,6 +347,41 @@ directly (see `WorkItemDetail` in `lib/work-items.ts`) — a nav an LLM
 consuming `--json` can walk without a second `dova wi view` per child
 just to get titles/states, and a table in the human view for the same
 reason.
+
+## Inspecting a failed run
+
+`dova status`/`dova pipeline status` tell you a run failed; neither
+tells you *why* — no job/task breakdown, no logs, anywhere. `az` itself
+has nothing here either: the extension's whole `pipelines runs` command
+group is `list`/`show`/`tag`/`artifact` (confirmed from
+`pipelines/commands.py`, the same source-reading technique used
+elsewhere in this codebase) — no timeline, no job, no log command at
+all. So `dova pipeline log` goes through `az rest` against the Build
+REST API directly, same as PR threads and work item states already do:
+
+1. `GET .../builds/{id}/timeline?api-version=7.1` — one call, the full
+   stage/job/task breakdown as a flat `records[]` list.
+2. `GET .../builds/{id}/logs/{logId}?api-version=7.1` — one call *per
+   task*, plain text (not JSON) — the one new wrinkle here, handled by
+   `runAzRestText()` in `lib/exec.ts`, `runAzRestJson()`'s sibling minus
+   the `JSON.parse`.
+
+A failed run can have several failed records — a failing task cascades
+a failure up through its job and stage, and more than one task can
+genuinely fail independently. Rather than dump every log by default
+(and blow the `az rest` call budget), `dova pipeline log [run-id]`
+(default: most recent run for the current branch) fetches the timeline,
+keeps only records that both failed *and* produced their own log
+(`failedRecords()` in `lib/pipelines.ts` — this is what drops the
+Stage/Phase rollups, which are also marked failed but have nothing of
+their own to show), sorts by start time, and shows just the **first**
+one — the real root cause is almost always the earliest failure, with
+everything after it fallout. `--task <name>` targets a specific one by
+name once you know which you want; `--all` shows every failed task's
+log. Human output tails to the last 200 lines (`--full` for the whole
+thing); `--json` always carries the full text, untruncated, for piping
+or programmatic use. Common case: 2 `az` calls total (timeline + one
+log), 3 if the run id also has to be looked up from the branch.
 
 ## Completions
 
