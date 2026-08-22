@@ -160,6 +160,20 @@ export async function runAzRestJson<T>(runner: Runner, opts: AzRestOptions): Pro
   return runAzJson<T>(runner, args, { cwd: opts.cwd });
 }
 
+/**
+ * Like `runAzRestJson`, but for endpoints that return plain text rather
+ * than JSON (build logs) — no `--output json`, no `JSON.parse`. az
+ * already dumps a non-JSON response body to stdout as-is (the "not a
+ * json response, printing raw" fallback referenced above), so this is
+ * just `runAzRestJson` minus the parse step.
+ */
+export async function runAzRestText(runner: Runner, opts: Omit<AzRestOptions, 'body' | 'rawBody'>): Promise<string> {
+  const args = ['rest', '--method', opts.method, '--uri', opts.uri, '--resource', AZURE_DEVOPS_AAD_RESOURCE];
+  for (const header of opts.headers ?? []) args.push('--headers', header);
+  const result = await runner.az(args, { cwd: opts.cwd });
+  return result.stdout;
+}
+
 /** Runs a git command and returns trimmed stdout. Throws ExternalCommandError on non-zero exit. */
 export async function runGit(runner: Runner, args: string[], opts?: { cwd?: string }): Promise<string> {
   const result = await runner.git(args, opts);

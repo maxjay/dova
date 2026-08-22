@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { runAzRestJson, toAsciiSafeJson, AZURE_DEVOPS_AAD_RESOURCE } from '../src/lib/exec.js';
-import { createFakeRunner, okJson } from './fixtures/fake-runner.js';
+import { runAzRestJson, runAzRestText, toAsciiSafeJson, AZURE_DEVOPS_AAD_RESOURCE } from '../src/lib/exec.js';
+import { createFakeRunner, ok, okJson } from './fixtures/fake-runner.js';
 
 describe('toAsciiSafeJson', () => {
   it('leaves plain-ASCII JSON untouched', () => {
@@ -78,5 +78,23 @@ describe('runAzRestJson', () => {
     });
 
     expect(seenArgs[seenArgs.indexOf('--body') + 1]).toBe('@path/to/file.json');
+  });
+});
+
+describe('runAzRestText', () => {
+  it('returns raw stdout untouched — no JSON.parse, no --output flag', async () => {
+    let seenArgs: string[] = [];
+    const runner = createFakeRunner({
+      az: (args) => {
+        seenArgs = args;
+        return ok('2024-01-01T00:00:00Z Starting task\nnot valid json {{{\nBuild failed with exit code 1');
+      },
+    });
+
+    const text = await runAzRestText(runner, { method: 'get', uri: 'https://dev.azure.com/contoso/_apis/build/builds/1/logs/2?api-version=7.1' });
+
+    expect(text).toBe('2024-01-01T00:00:00Z Starting task\nnot valid json {{{\nBuild failed with exit code 1');
+    expect(seenArgs).not.toContain('--output');
+    expect(seenArgs).toContain('--resource');
   });
 });
