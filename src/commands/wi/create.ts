@@ -1,7 +1,7 @@
 import type { Command } from 'commander';
 import { defaultRunner, runAzJson } from '../../lib/exec.js';
 import { resolveContext } from '../../lib/context.js';
-import { resolveProject, resolveTeamContext } from '../../lib/team-resolver.js';
+import { resolveProject, resolveCreateContext } from '../../lib/team-resolver.js';
 import { buildWiWebUrl } from '../../lib/work-items.js';
 import { addContextOptions, addJsonOption, addTeamOptions } from '../../lib/command-helpers.js';
 import { emit, getColor } from '../../lib/output.js';
@@ -13,6 +13,8 @@ interface WiCreateFlags {
   project?: string;
   repo?: string;
   team?: string;
+  like?: string;
+  save?: boolean;
   reresolve?: boolean;
   type: string;
   title: string;
@@ -41,28 +43,28 @@ export function registerWiCreateCommand(wi: Command): void {
 
     const ctx = await resolveContext(runner, { org: opts.org, orgUrl: opts.orgUrl, project: opts.project, repo: opts.repo });
     const projectResult = await resolveProject(runner, ctx.project, { project: opts.project });
-    const teamContext = await resolveTeamContext(
+    const createContext = await resolveCreateContext(
       runner,
       ctx.org,
       ctx.orgUrl,
       projectResult.project,
       { team: opts.team },
-      { reresolve: opts.reresolve }
+      { reresolve: opts.reresolve, like: opts.like, save: opts.save }
     );
 
     const args = [
       'boards', 'work-item', 'create',
       '--type', opts.type,
       '--title', opts.title,
-      '--area', teamContext.areaPath,
-      '--iteration', teamContext.iterationPath,
+      '--area', createContext.areaPath,
+      '--iteration', createContext.iterationPath,
       '--organization', ctx.orgUrl,
       '--project', projectResult.project,
     ];
     if (opts.assignTo) args.push('--assigned-to', opts.assignTo);
 
     const created = await runAzJson<AzWorkItem>(runner, args);
-    const warnings = [...teamContext.warnings];
+    const warnings = [...createContext.warnings];
 
     if (opts.parent) {
       // The item is already created at this point — a failure here should
@@ -85,9 +87,9 @@ export function registerWiCreateCommand(wi: Command): void {
       id: created.id,
       url: buildWiWebUrl(ctx.orgUrl, projectResult.project, created.id),
       project: projectResult.project,
-      team: teamContext.team,
-      areaPath: teamContext.areaPath,
-      iterationPath: teamContext.iterationPath,
+      team: createContext.team,
+      areaPath: createContext.areaPath,
+      iterationPath: createContext.iterationPath,
       parent: opts.parent ? Number(opts.parent) : null,
       warnings,
     };
@@ -97,7 +99,7 @@ export function registerWiCreateCommand(wi: Command): void {
         [
           `${color.green('Created')} ${opts.type} ${color.bold(`#${result.id}`)}`,
           `  ${color.dim(result.url)}`,
-          `  Project: ${result.project}   Team: ${result.team}`,
+          `  Project: ${result.project}${result.team ? `   Team: ${result.team}` : ''}`,
           `  Area: ${result.areaPath}`,
           `  Iteration: ${result.iterationPath}`,
           result.parent ? `  Parent: #${result.parent}` : undefined,

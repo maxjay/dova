@@ -9,10 +9,12 @@ import {
   resolveAreaPath,
   resolveIterationPath,
   resolveTeamContext,
+  resolveCreateContext,
   type TeamResolverPrompts,
 } from '../src/lib/team-resolver.js';
 import { setCacheInstance, type DovaCacheSchema } from '../src/lib/config.js';
 import { NotFoundError, UserError } from '../src/lib/errors.js';
+import type { AzWorkItem } from '../src/types/azure-devops.js';
 import { createFakeRunner, ok, okJson, fail } from './fixtures/fake-runner.js';
 import {
   oneTeam,
@@ -265,5 +267,140 @@ describe('resolveTeamContext (with caching)', () => {
 
     expect(second.fromCache).toBe(false);
     expect(az).toHaveBeenCalled();
+  });
+});
+
+function exampleWorkItem(id: number, areaPath: string | undefined, iterationPath: string | undefined): AzWorkItem {
+  return {
+    id,
+    url: '',
+    fields: {
+      'System.Title': 'Example',
+      ...(areaPath !== undefined ? { 'System.AreaPath': areaPath } : {}),
+      ...(iterationPath !== undefined ? { 'System.IterationPath': iterationPath } : {}),
+    },
+  };
+}
+
+describe('resolveCreateContext', () => {
+  let tmpDir: string;
+
+  afterEach(() => {
+    setCacheInstance(null);
+    if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  function freshCache(): void {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dova-cache-test-'));
+    setCacheInstance(new Conf<DovaCacheSchema>({ cwd: tmpDir, configName: 'cache', defaults: { teamContext: {} } }));
+  }
+
+  it('--like copies area/iteration straight off the example ticket, bypassing team resolution', async () => {
+    const az = vi.fn((args: string[]) =>
+      args.join(' ').startsWith('boards work-item show')
+        ? okJson(exampleWorkItem(4821, 'MyProject\\Data\\ETL', 'MyProject\\Sprint 3'))
+        : fail(`unexpected az call: ${args.join(' ')}`)
+    );
+    const runner = createFakeRunner({ git: gitConfigRunner({ 'dova.team': 'Platform' }).git, az });
+
+    const result = await resolveCreateContext(runner, 'contoso', ORG_URL, PROJECT, {}, { like: '4821' });
+
+    expect(result).toEqual({
+      team: null,
+      areaPath: 'MyProject\\Data\\ETL',
+      iterationPath: 'MyProject\\Sprint 3',
+      warnings: [],
+      fromCache: false,
+      source: 'like',
+    });
+    expect(az).toHaveBeenCalledTimes(1);
+  });
+
+  it('--like --save persists the copied area/iteration as repo-local git config', async () => {
+    const sets: Record<string, string> = {};
+    const az = () => okJson(exampleWorkItem(4821, 'MyProject\\Data\\ETL', 'MyProject\\Sprint 3'));
+    const runner = createFakeRunner({ git: gitConfigRunner({}, sets).git, az });
+
+    await resolveCreateContext(runner, 'contoso', ORG_URL, PROJECT, {}, { like: '4821', save: true });
+
+    expect(sets['dova.area']).toBe('MyProject\\Data\\ETL');
+    expect(sets['dova.iteration']).toBe('MyProject\\Sprint 3');
+  });
+
+  it('a saved dova.area/dova.iteration wins over team resolution, with no az calls', async () => {
+    const az = vi.fn(() => fail('az should not have been called'));
+    const runner = createFakeRunner({
+      git: gitConfigRunner({ 'dova.area': 'MyProject\\Data\\ETL', 'dova.iteration': 'MyProject\\Sprint 3', 'dova.team': 'Platform' }).git,
+      az,
+    });
+
+    const result = await resolveCreateContext(runner, 'contoso', ORG_URL, PROJECT, {});
+
+    expect(result).toEqual({
+      team: null,
+      areaPath: 'MyProject\\Data\\ETL',
+      iterationPath: 'MyProject\\Sprint 3',
+      warnings: [],
+      fromCache: true,
+      source: 'repo-local-area',
+    });
+    expect(az).not.toHaveBeenCalled();
+  });
+
+  it('falls back to team-based resolution when nothing is saved', async () => {
+    freshCache();
+    const runner = createFakeRunner({
+      git: gitConfigRunner({ 'dova.team': 'MyTeam' }).git,
+      az: (args) => {
+        const joined = args.join(' ');
+        if (joined.startsWith('boards area team list')) return okJson(areaWithDefault);
+        if (joined.startsWith('boards iteration team list')) return okJson(currentIteration);
+        return fail(`unexpected az call: ${joined}`);
+      },
+    });
+
+    const result = await resolveCreateContext(runner, 'contoso', ORG_URL, PROJECT, {});
+
+    expect(result.source).toBe('team');
+    expect(result.team).toBe('MyTeam');
+    expect(result.areaPath).toBe('MyProject\\MyTeam');
+  });
+
+  it('--reresolve skips the saved dova.area/dova.iteration override too', async () => {
+    freshCache();
+    const runner = createFakeRunner({
+      git: gitConfigRunner({ 'dova.area': 'Stale\\Area', 'dova.iteration': 'Stale\\Iter' }).git,
+      az: (args) => {
+        const joined = args.join(' ');
+        if (joined.startsWith('boards area team list')) return okJson(areaWithDefault);
+        if (joined.startsWith('boards iteration team list')) return okJson(currentIteration);
+        return fail(`unexpected az call: ${joined}`);
+      },
+    });
+
+    const result = await resolveCreateContext(runner, 'contoso', ORG_URL, PROJECT, { team: 'MyTeam' }, { reresolve: true });
+
+    expect(result.source).toBe('team');
+    expect(result.areaPath).toBe('MyProject\\MyTeam');
+  });
+
+  it('rejects --save without --like', async () => {
+    const runner = gitConfigRunner({});
+    await expect(resolveCreateContext(runner, 'contoso', ORG_URL, PROJECT, {}, { save: true })).rejects.toBeInstanceOf(UserError);
+  });
+
+  it('rejects --like combined with --team', async () => {
+    const runner = gitConfigRunner({});
+    await expect(
+      resolveCreateContext(runner, 'contoso', ORG_URL, PROJECT, { team: 'MyTeam' }, { like: '4821' })
+    ).rejects.toBeInstanceOf(UserError);
+  });
+
+  it('throws NotFoundError when the example ticket has no area/iteration path', async () => {
+    const az = () => okJson(exampleWorkItem(4821, undefined, undefined));
+    const runner = createFakeRunner({ git: gitConfigRunner({}).git, az });
+    await expect(resolveCreateContext(runner, 'contoso', ORG_URL, PROJECT, {}, { like: '4821' })).rejects.toBeInstanceOf(
+      NotFoundError
+    );
   });
 });

@@ -10,10 +10,12 @@ export function addContextOptions(cmd: Command): Command {
     .option('--repo <repo>', 'Azure Repos repository name (overrides context resolution)');
 }
 
-/** --team / --reresolve — for commands that need team-level (area/iteration) resolution. */
+/** --team / --like / --save / --reresolve — for commands that need team-level (area/iteration) resolution. */
 export function addTeamOptions(cmd: Command): Command {
   return cmd
     .option('--team <team>', 'team name (overrides team resolution)')
+    .option('--like <id>', 'copy area/iteration from an existing work item instead of resolving a team')
+    .option('--save', "--like only: persist that area/iteration as this repo's default")
     .option('--reresolve', 'ignore cached/saved team & area/iteration resolution and re-resolve');
 }
 

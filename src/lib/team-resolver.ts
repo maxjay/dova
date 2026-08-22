@@ -2,6 +2,7 @@ import { select as inquirerSelect, confirm as inquirerConfirm } from '@inquirer/
 import type { Runner } from './exec.js';
 import { runAzJson, runAzRestJson } from './exec.js';
 import { gitConfigGet, gitConfigSet, getCache, teamContextCacheKey } from './config.js';
+import { fetchWorkItem, fieldValue } from './work-items.js';
 import { NotFoundError, UserError } from './errors.js';
 
 /* ------------------------------------------------------------------ *
@@ -345,5 +346,107 @@ export async function resolveTeamContext(
     iterationPath: iteration.iterationPath,
     warnings,
     fromCache: false,
+  };
+}
+
+/* ------------------------------------------------------------------ *
+ * Create-context resolution: what --area/--iteration a *new* work item
+ * should get. Layers two tiers on top of resolveTeamContext() that skip
+ * team resolution entirely — team is only ever a means to an area/
+ * iteration pair (`az boards work-item create` takes --area/--iteration,
+ * not --team), so once area/iteration are already known there's no
+ * reason to resolve, cache, or even ask about a team name.
+ *
+ * This matters when a repo's tickets aren't all the same team as the
+ * repo's own default team (a shared-library repo, a bug that's actually
+ * a different product area's territory), and it doubles as an escape
+ * hatch from resolveTeam's interactive picker for a non-interactive/
+ * agent caller that has a ticket id in hand but no TTY to answer a
+ * prompt with.
+ * ------------------------------------------------------------------ */
+
+export type CreateContextSource = 'like' | 'repo-local-area' | 'team';
+
+export interface ResolvedCreateContext {
+  /** null when area/iteration came from --like or a saved repo-local override — no team was ever resolved. */
+  team: string | null;
+  areaPath: string;
+  iterationPath: string;
+  warnings: string[];
+  fromCache: boolean;
+  source: CreateContextSource;
+}
+
+export interface ResolveCreateContextOptions extends ResolveTeamContextOptions {
+  /** Work item id to copy area/iteration path from directly, bypassing team resolution entirely. */
+  like?: string;
+  /** Persist the --like ticket's area/iteration as this repo's default (requires `like`). */
+  save?: boolean;
+}
+
+/**
+ * Resolution order: `--like <id>` (copies area/iteration straight off an
+ * existing work item — one `boards work-item show` call, no team
+ * involved) > `dova.area`+`dova.iteration` repo-local git config (set by
+ * a prior `--like ... --save`) > `resolveTeamContext()`'s team-based
+ * path. Once `dova.area`/`dova.iteration` are saved they supersede
+ * `dova.team` for future creates in this repo — that's intentional: a
+ * saved example ticket is a more specific answer than a team name.
+ */
+export async function resolveCreateContext(
+  runner: Runner,
+  org: string,
+  orgUrl: string,
+  project: string,
+  flags: { team?: string } = {},
+  opts: ResolveCreateContextOptions = {}
+): Promise<ResolvedCreateContext> {
+  if (opts.save && !opts.like) {
+    throw new UserError('--save only makes sense together with --like.', [
+      "Pass --like <id> --save to persist that ticket's area/iteration as this repo's default.",
+    ]);
+  }
+  if (opts.like && flags.team) {
+    throw new UserError('--like and --team are mutually exclusive.', [
+      '--like copies area/iteration straight from an existing ticket; --team resolves them from a team name. Use one or the other.',
+    ]);
+  }
+
+  if (opts.like) {
+    const exampleId = Number(opts.like);
+    if (!Number.isInteger(exampleId) || exampleId <= 0) {
+      throw new UserError(`"${opts.like}" is not a valid work item id.`);
+    }
+    const example = await fetchWorkItem(runner, orgUrl, exampleId);
+    const areaPath = fieldValue(example, 'System.AreaPath');
+    const iterationPath = fieldValue(example, 'System.IterationPath');
+    if (!areaPath || !iterationPath) {
+      throw new NotFoundError(`Work item #${exampleId} has no area/iteration path to copy.`);
+    }
+    if (opts.save) {
+      await gitConfigSet(runner, 'dova.area', areaPath, { cwd: opts.cwd });
+      await gitConfigSet(runner, 'dova.iteration', iterationPath, { cwd: opts.cwd });
+    }
+    return { team: null, areaPath, iterationPath, warnings: [], fromCache: false, source: 'like' };
+  }
+
+  if (!opts.reresolve) {
+    const [savedArea, savedIteration] = await Promise.all([
+      gitConfigGet(runner, 'dova.area', { cwd: opts.cwd }),
+      gitConfigGet(runner, 'dova.iteration', { cwd: opts.cwd }),
+    ]);
+    if (savedArea && savedIteration) {
+      return { team: null, areaPath: savedArea, iterationPath: savedIteration, warnings: [], fromCache: true, source: 'repo-local-area' };
+    }
+  }
+
+  const teamContext = await resolveTeamContext(runner, org, orgUrl, project, flags, opts);
+  return {
+    team: teamContext.team,
+    areaPath: teamContext.areaPath,
+    iterationPath: teamContext.iterationPath,
+    warnings: teamContext.warnings,
+    fromCache: teamContext.fromCache,
+    source: 'team',
   };
 }
