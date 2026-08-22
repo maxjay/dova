@@ -1,6 +1,6 @@
 import { select as inquirerSelect, confirm as inquirerConfirm } from '@inquirer/prompts';
 import type { Runner } from './exec.js';
-import { runAzJson } from './exec.js';
+import { runAzJson, runAzRestJson } from './exec.js';
 import { gitConfigGet, gitConfigSet, getCache, teamContextCacheKey } from './config.js';
 import { NotFoundError, UserError } from './errors.js';
 
@@ -267,7 +267,7 @@ async function fetchCurrentIterationViaRest(
   team: string
 ): Promise<AzTeamIteration[]> {
   const uri = `${orgUrl}/${encodeURIComponent(project)}/${encodeURIComponent(team)}/_apis/work/teamsettings/iterations?%24timeframe=current&api-version=7.1`;
-  const result = await runAzJson<{ value: AzTeamIteration[] }>(runner, ['rest', '--method', 'get', '--uri', uri]);
+  const result = await runAzRestJson<{ value: AzTeamIteration[] }>(runner, { method: 'get', uri });
   return result.value ?? [];
 }
 

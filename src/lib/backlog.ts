@@ -1,5 +1,5 @@
 import type { Runner } from './exec.js';
-import { runAzJson } from './exec.js';
+import { runAzRestJson } from './exec.js';
 
 /**
  * Team backlog configuration — this is how `dova start` tells "is this id
@@ -28,7 +28,7 @@ export async function fetchBacklogConfiguration(
   team: string
 ): Promise<BacklogConfiguration> {
   const uri = `${orgUrl}/${encodeURIComponent(project)}/${encodeURIComponent(team)}/_apis/work/backlogconfiguration?api-version=7.1`;
-  return runAzJson<BacklogConfiguration>(runner, ['rest', '--method', 'get', '--uri', uri]);
+  return runAzRestJson<BacklogConfiguration>(runner, { method: 'get', uri });
 }
 
 /** Is `typeName` one of this team's portfolio-level backlog types (Epic/Feature/etc, whatever this process calls them)? */
