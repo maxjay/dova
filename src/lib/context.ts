@@ -21,7 +21,7 @@ export interface ParsedOrgUrl {
  * URL so the rest of the parser can use `URL` uniformly for both HTTPS and
  * SSH remotes.
  */
-function normalizeToUrl(remote: string): URL | null {
+export function normalizeToUrl(remote: string): URL | null {
   let s = remote.trim();
   if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(s) && /^[^@/\s]+@[^:/\s]+:.+$/.test(s)) {
     const m = s.match(/^([^@]+)@([^:]+):(.+)$/);
@@ -40,8 +40,42 @@ function stripGitSuffix(name: string): string {
   return name.endsWith('.git') ? name.slice(0, -4) : name;
 }
 
-function pathSegments(url: URL): string[] {
+export function pathSegments(url: URL): string[] {
   return url.pathname.split('/').filter(Boolean).map((s) => decodeURIComponent(s));
+}
+
+export interface HostOrgSegments {
+  org: string;
+  orgUrl: string;
+  /** Path segments after the org (and a legacy /DefaultCollection/ segment, if present). */
+  rest: string[];
+}
+
+/**
+ * Shared org/host detection for any full Azure DevOps resource URL (not
+ * just a git remote) — used by lib/urls.ts to parse work item and PR
+ * links. Handles both dev.azure.com/{org}/... and {org}.visualstudio.com/...
+ * (legacy vs-ssh.visualstudio.com is a git-remote-only host, not a browser
+ * URL host, so it's deliberately not handled here).
+ */
+export function resolveHostOrgSegments(url: URL): HostOrgSegments | null {
+  const host = url.hostname.toLowerCase();
+  const segments = pathSegments(url);
+
+  if (host === 'dev.azure.com') {
+    const org = segments[0];
+    if (!org) return null;
+    return { org, orgUrl: `https://dev.azure.com/${org}`, rest: segments.slice(1) };
+  }
+
+  if (host.endsWith('.visualstudio.com')) {
+    const org = host.slice(0, -'.visualstudio.com'.length);
+    if (!org) return null;
+    const rest = segments[0] === 'DefaultCollection' ? segments.slice(1) : segments;
+    return { org, orgUrl: `https://${org}.visualstudio.com`, rest };
+  }
+
+  return null;
 }
 
 /**

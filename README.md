@@ -21,10 +21,20 @@ logic each command is built from:
   `src/lib/start.ts`'s doc comments for the full flow.
 - `dova bug` / `dova wi quick` — fast filing, sharing `src/lib/quick-create.ts`.
 - `dova wi create` — the fuller version, with `--assign-to`/`--parent`.
-- `dova wi view` / `dova wi search` — search builds WIQL from flags
-  (`src/lib/wiql.ts`) so nobody has to write it by hand.
+- `dova wi view` / `dova wi search` — view shows the item's parent and
+  *children* (e.g. a Feature's User Stories) in a table, generic across
+  every work item type — not just gated to portfolio levels; search
+  builds WIQL from flags (`src/lib/wiql.ts`) so nobody has to write it by
+  hand.
+- `dova view <id-or-url>` — the generic "read anything" entrypoint: given
+  a work item or PR link, or a bare id, view its full detail. A link
+  unambiguously says which kind of thing it is; a bare id tries as a
+  work item first, falling back to a PR. See "Reading things" below.
 - `dova pr create` / `dova pr view` / `dova pr comment` /
-  `dova pr comment resolve`.
+  `dova pr comment reply` / `dova pr comment resolve` — `comment` posts a
+  new thread, `reply` responds within an existing one, and `resolve`
+  takes an optional status (`resolved` by default, also `active`,
+  `won't-fix`, `closed`, `pending`) rather than only ever resolving.
 - `dova pipeline status` / `dova pipeline watch` — watch polls and exits,
   no daemon.
 - `dova api` — the raw REST escape hatch.
@@ -112,20 +122,21 @@ src/
     output.ts           --json / --jq / color / table rendering
     command-helpers.ts   shared flag-group builders (--org/--project/--repo, --json, --jq, --web, --no-color)
     completions/         tree -> {bash,zsh,fish,powershell} script generators
-    work-items.ts        fetch-by-id / batch-fetch-by-id / web URLs, shared by wi/pr/start
+    work-items.ts        fetch-by-id / batch-fetch-by-id / children / full detail+render, shared by wi/pr/start/view
     work-item-types.ts   state -> category, and the "what should dova start transition into" decision
     backlog.ts            team backlog config -> "is this a portfolio-level type" (never a hardcoded type name)
-    wiql.ts                small WIQL builder (wi search, batch id fetch, start's children query)
-    pr.ts                  PR fetch/threads/comment-post/thread-resolve, shared by status + pr *
+    wiql.ts                small WIQL builder (wi search, batch id fetch, start's + view's children query)
+    pr.ts                  PR fetch/threads/comment/reply/resolve/full detail+render, shared by status + pr * + view
     pipelines.ts            pipeline run fetch + web URL, shared by status + pipeline *
     branch-naming.ts        slug/prefix/branch-name for `dova start`
     quick-create.ts          shared guts of `dova bug` / `dova wi quick`
     start.ts                  `dova start`'s full implementation
+    urls.ts                    work item / PR link parsing, for "give dova a link or an id"
   types/azure-devops.ts  minimal REST object shapes (PR, WorkItem, Build, CommentThread)
 tests/
   context.test.ts        parseAzureRepoRemoteUrl + resolveContext, fully mocked
   team-resolver.test.ts   resolveProject/resolveTeam/resolveAreaPath/resolveIterationPath/resolveTeamContext, fully mocked
-  wiql.test.ts / branch-naming.test.ts / work-item-types.test.ts / backlog.test.ts / api.test.ts
+  wiql.test.ts / branch-naming.test.ts / work-item-types.test.ts / backlog.test.ts / api.test.ts / urls.test.ts / pr.test.ts
                           pure-logic unit tests for the modules above
   fixtures/               fabricated remote URLs + az JSON payloads (contoso/MyProject/my-repo placeholders — no real org anywhere)
 ```
@@ -202,6 +213,36 @@ Team/area/iteration resolution (`resolveTeamContext()`) is separate,
 shared plumbing used by any command that creates or files a work item —
 see the doc comment at the top of `team-resolver.ts` for its full
 resolution order and caching behavior.
+
+## Reading things
+
+`dova view`, `dova wi view`, and `dova pr view` all accept either a bare
+id or a link (`lib/urls.ts` parses both the work item and PR URL forms,
+including the legacy `.visualstudio.com` host). A link's org/project
+(and repo, for a PR link) override context resolution — pasting a link
+to a *different* org/project than the one you're standing in just works,
+the way `gh pr view <url>` does.
+
+`dova view` is the generic form for when the caller (a person, or an
+LLM driving dova) doesn't already know or care whether an id is a work
+item or a PR: a link says so unambiguously; a bare id tries as a work
+item first (falling back to a PR), since work item ids and PR ids are
+separate id spaces with no way to tell them apart from the number alone.
+
+Every "view" also resolves the item's immediate hierarchy, not just its
+own fields — generic across every work item type (a Feature's User
+Stories, an Epic's Features, a Bug's linked Tasks, whatever the process
+calls them), not gated to portfolio levels the way `dova start`'s
+expansion is:
+
+- **parent** — id, title, type, state (hydrated with one extra fetch when a parent exists)
+- **children** — same shape, one WIQL call on `[System.Parent] = <id>`
+
+That structure comes through in `--json` as `parent`/`children`
+directly (see `WorkItemDetail` in `lib/work-items.ts`) — a nav an LLM
+consuming `--json` can walk without a second `dova wi view` per child
+just to get titles/states, and a table in the human view for the same
+reason.
 
 ## Completions
 
