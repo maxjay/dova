@@ -25,7 +25,7 @@ describe('toAsciiSafeJson', () => {
 });
 
 describe('runAzRestJson', () => {
-  it('always passes --resource for Azure DevOps by default', async () => {
+  it('always passes --resource for Azure DevOps — dova never targets anything else', async () => {
     let seenArgs: string[] = [];
     const runner = createFakeRunner({
       az: (args) => {
@@ -38,20 +38,6 @@ describe('runAzRestJson', () => {
 
     expect(seenArgs).toContain('--resource');
     expect(seenArgs[seenArgs.indexOf('--resource') + 1]).toBe(AZURE_DEVOPS_AAD_RESOURCE);
-  });
-
-  it('lets the caller override the AAD resource', async () => {
-    let seenArgs: string[] = [];
-    const runner = createFakeRunner({
-      az: (args) => {
-        seenArgs = args;
-        return okJson({ ok: true });
-      },
-    });
-
-    await runAzRestJson(runner, { method: 'get', uri: 'https://management.azure.com/subscriptions?api-version=2020-01-01', resource: 'https://management.azure.com/' });
-
-    expect(seenArgs[seenArgs.indexOf('--resource') + 1]).toBe('https://management.azure.com/');
   });
 
   it('passes body and headers through when given', async () => {
