@@ -11,6 +11,8 @@ interface WiQuickFlags {
   project?: string;
   repo?: string;
   team?: string;
+  like?: string;
+  save?: boolean;
   reresolve?: boolean;
   at?: string;
   link?: boolean;
@@ -39,6 +41,8 @@ export function registerWiQuickCommand(wi: Command): void {
       at: opts.at,
       project: opts.project,
       team: opts.team,
+      like: opts.like,
+      save: opts.save,
       reresolve: opts.reresolve,
     });
 
@@ -47,7 +51,7 @@ export function registerWiQuickCommand(wi: Command): void {
         [
           `${color.green('Created')} ${type} ${color.bold(`#${result.id}`)}`,
           `  ${color.dim(result.url)}`,
-          `  Project: ${result.project}   Team: ${result.team}`,
+          `  Project: ${result.project}${result.team ? `   Team: ${result.team}` : ''}`,
           `  Area: ${result.areaPath}`,
           `  Iteration: ${result.iterationPath}`,
           ...result.warnings.map((w) => color.yellow(`  Warning: ${w}`)),

@@ -197,7 +197,7 @@ src/
   lib/
     exec.ts           the only place that shells out to az/git — everything else takes a Runner
     context.ts         org/project/repo/branch resolution
-    team-resolver.ts   team/area/iteration resolution + its on-disk cache
+    team-resolver.ts   team/area/iteration resolution + its on-disk cache + the --like/--save area override
     config.ts          git-config helpers + az devops's own config file + dova's cache dir
     output.ts           --json / --jq / color / table rendering
     command-helpers.ts   shared flag-group builders (--org/--project/--repo, --json, --jq, --web, --no-color)
@@ -213,7 +213,7 @@ src/
   types/azure-devops.ts  minimal REST object shapes (PR, WorkItem, Build, CommentThread)
 tests/
   context.test.ts        parseAzureRepoRemoteUrl + resolveContext, fully mocked
-  team-resolver.test.ts   resolveProject/resolveTeam/resolveAreaPath/resolveIterationPath/resolveTeamContext, fully mocked
+  team-resolver.test.ts   resolveProject/resolveTeam/resolveAreaPath/resolveIterationPath/resolveTeamContext/resolveCreateContext, fully mocked
   wiql.test.ts / work-item-types.test.ts / api.test.ts / urls.test.ts / pr.test.ts / exec.test.ts
                           pure-logic unit tests for the modules above
   fixtures/               fabricated remote URLs + az JSON payloads (contoso/MyProject/my-repo placeholders — no real org anywhere)
@@ -290,6 +290,21 @@ Team/area/iteration resolution (`resolveTeamContext()`) is separate,
 shared plumbing used by any command that creates or files a work item —
 see the doc comment at the top of `team-resolver.ts` for its full
 resolution order and caching behavior.
+
+That plumbing assumes a repo has one team. That breaks when a ticket
+genuinely belongs to a different team than the repo's own default (a
+shared-library repo, a bug that's actually another product area's
+territory) — and the assumption's own fallback (an interactive team
+picker) needs a TTY an agent doesn't have. `resolveCreateContext()`
+layers two tiers on top for exactly that: `--like <id>` copies
+`--area`/`--iteration` straight off an existing work item (one
+`boards work-item show` call, no team resolved at all — team was only
+ever a means to an area/iteration pair, and `work-item create` doesn't
+take `--team`), and `--like <id> --save` persists that pair as
+`dova.area`/`dova.iteration` repo-local git config, which from then on
+wins over `dova.team` for creates in that repo. Every command that
+creates a work item (`dova bug`, `dova wi quick`, `dova wi create`)
+takes `--like`/`--save` via `addTeamOptions()`.
 
 ## Reading things
 

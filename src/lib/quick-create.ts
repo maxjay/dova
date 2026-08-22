@@ -1,7 +1,7 @@
 import type { Runner } from './exec.js';
 import { runAzJson, tryGit } from './exec.js';
 import { resolveContext, type ResolvedContext } from './context.js';
-import { resolveProject, resolveTeamContext } from './team-resolver.js';
+import { resolveProject, resolveCreateContext } from './team-resolver.js';
 import { buildWiWebUrl } from './work-items.js';
 import { UserError } from './errors.js';
 import type { AzWorkItem } from '../types/azure-devops.js';
@@ -15,6 +15,10 @@ export interface QuickCreateOptions {
   project?: string;
   team?: string;
   reresolve?: boolean;
+  /** Work item id to copy area/iteration from directly — see resolveCreateContext(). */
+  like?: string;
+  /** Persist the --like ticket's area/iteration as this repo's default (requires `like`). */
+  save?: boolean;
   cwd?: string;
 }
 
@@ -22,7 +26,8 @@ export interface QuickCreateResult {
   id: number;
   url: string;
   project: string;
-  team: string;
+  /** null when area/iteration came from --like or a saved repo-local override — no team was ever resolved. */
+  team: string | null;
   areaPath: string;
   iterationPath: string;
   warnings: string[];
@@ -73,21 +78,21 @@ async function buildFoundInPermalink(runner: Runner, ctx: ResolvedContext, at: s
 export async function quickCreateWorkItem(runner: Runner, opts: QuickCreateOptions): Promise<QuickCreateResult> {
   const ctx = await resolveContext(runner, { project: opts.project }, { cwd: opts.cwd });
   const projectResult = await resolveProject(runner, ctx.project, { project: opts.project }, { cwd: opts.cwd });
-  const teamContext = await resolveTeamContext(
+  const createContext = await resolveCreateContext(
     runner,
     ctx.org,
     ctx.orgUrl,
     projectResult.project,
     { team: opts.team },
-    { cwd: opts.cwd, reresolve: opts.reresolve }
+    { cwd: opts.cwd, reresolve: opts.reresolve, like: opts.like, save: opts.save }
   );
 
   const args = [
     'boards', 'work-item', 'create',
     '--type', opts.type,
     '--title', opts.title,
-    '--area', teamContext.areaPath,
-    '--iteration', teamContext.iterationPath,
+    '--area', createContext.areaPath,
+    '--iteration', createContext.iterationPath,
     '--organization', ctx.orgUrl,
     '--project', projectResult.project,
   ];
@@ -102,9 +107,9 @@ export async function quickCreateWorkItem(runner: Runner, opts: QuickCreateOptio
     id: created.id,
     url: buildWiWebUrl(ctx.orgUrl, projectResult.project, created.id),
     project: projectResult.project,
-    team: teamContext.team,
-    areaPath: teamContext.areaPath,
-    iterationPath: teamContext.iterationPath,
-    warnings: teamContext.warnings,
+    team: createContext.team,
+    areaPath: createContext.areaPath,
+    iterationPath: createContext.iterationPath,
+    warnings: createContext.warnings,
   };
 }
