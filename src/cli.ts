@@ -2,6 +2,7 @@ import { Command } from 'commander';
 import { registerStatusCommand } from './commands/status.js';
 import { registerStartCommand } from './commands/start.js';
 import { registerBugCommand } from './commands/bug.js';
+import { registerViewCommand } from './commands/view.js';
 import { registerWiCommand } from './commands/wi/index.js';
 import { registerPrCommand } from './commands/pr/index.js';
 import { registerPipelineCommand } from './commands/pipeline/index.js';
@@ -29,6 +30,7 @@ export function buildProgram(): Command {
   registerStatusCommand(program);
   registerStartCommand(program);
   registerBugCommand(program);
+  registerViewCommand(program);
   registerWiCommand(program);
   registerPrCommand(program);
   registerPipelineCommand(program);
