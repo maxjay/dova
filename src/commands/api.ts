@@ -1,5 +1,5 @@
 import type { Command } from 'commander';
-import { defaultRunner, runAzRestJson, AZURE_DEVOPS_AAD_RESOURCE, type AzRestOptions } from '../lib/exec.js';
+import { defaultRunner, runAzRestJson, type AzRestOptions } from '../lib/exec.js';
 import { resolveContext } from '../lib/context.js';
 import { addContextOptions, addJqOption, addNoColorOption } from '../lib/command-helpers.js';
 import type { JqInput } from 'jq-wasm';
@@ -13,7 +13,6 @@ export interface ApiFlags {
   repo?: string;
   method: string;
   body?: string;
-  resource?: string;
   jq?: string;
 }
 
@@ -63,11 +62,7 @@ export function registerApiCommand(program: Command): void {
   addContextOptions(cmd);
   cmd
     .option('-X, --method <verb>', 'HTTP method', 'GET')
-    .option('-f, --body <json>', 'request body: inline JSON, or @path/to/file.json')
-    .option(
-      '--resource <aad-resource>',
-      `override the AAD resource az requests a token for (default: Azure DevOps, ${AZURE_DEVOPS_AAD_RESOURCE})`
-    );
+    .option('-f, --body <json>', 'request body: inline JSON, or @path/to/file.json');
   addJqOption(cmd);
   addNoColorOption(cmd);
 
@@ -88,7 +83,6 @@ export function registerApiCommand(program: Command): void {
       // the user's own raw text, which may already use az's own
       // @path/to/file.json syntax that must not be re-encoded.
       rawBody: opts.body,
-      resource: opts.resource,
     });
 
     if (opts.jq) {

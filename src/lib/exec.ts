@@ -107,16 +107,14 @@ export async function runAzJson<T>(runner: Runner, args: string[], opts?: { cwd?
 
 /**
  * The Azure DevOps (formerly VSTS) AAD app/resource id. `az rest` can't
- * derive an AAD resource to request a token for from a dev.azure.com (or
- * visualstudio.com) URL on its own — dev.azure.com isn't a recognized
- * Azure cloud endpoint the way management.azure.com is — so every `az
- * rest` call dova makes against Azure DevOps has to pass this explicitly
- * via `--resource`. Without it, az either fails outright or silently
- * requests a token for the wrong audience, and Azure DevOps hands back a
- * non-JSON (often HTML) response instead — which is what actually
- * triggers the Windows Unicode crash above (its content is what az's
- * "not a json response" fallback then tries, and fails, to print).
- * This is a well-known, stable resource id — not an org-specific value.
+ * derive an AAD resource to request a token for from a dev.azure.com URL
+ * on its own — dev.azure.com isn't a recognized Azure cloud endpoint the
+ * way management.azure.com is — so every `az rest` call needs it passed
+ * explicitly via `--resource`, or az either fails outright or requests a
+ * token for the wrong audience. dova only ever talks to Azure DevOps, so
+ * this is the one and only resource `runAzRestJson` uses — not something
+ * any caller needs, or should be able, to override. Well-known, stable —
+ * not an org-specific value.
  */
 export const AZURE_DEVOPS_AAD_RESOURCE = '499b84ac-1321-427f-aa17-267ca6975798';
 
@@ -150,14 +148,12 @@ export interface AzRestOptions {
    */
   rawBody?: string;
   headers?: string[];
-  /** Override the AAD resource `az rest` requests a token for. Defaults to Azure DevOps. */
-  resource?: string;
   cwd?: string;
 }
 
 /** `runAzJson`, specialized for `az rest` against Azure DevOps — see `AZURE_DEVOPS_AAD_RESOURCE`. */
 export async function runAzRestJson<T>(runner: Runner, opts: AzRestOptions): Promise<T> {
-  const args = ['rest', '--method', opts.method, '--uri', opts.uri, '--resource', opts.resource ?? AZURE_DEVOPS_AAD_RESOURCE];
+  const args = ['rest', '--method', opts.method, '--uri', opts.uri, '--resource', AZURE_DEVOPS_AAD_RESOURCE];
   if (opts.body !== undefined) args.push('--body', toAsciiSafeJson(opts.body));
   else if (opts.rawBody !== undefined) args.push('--body', opts.rawBody);
   for (const header of opts.headers ?? []) args.push('--headers', header);
