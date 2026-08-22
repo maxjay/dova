@@ -3,7 +3,7 @@ import { defaultRunner } from '../lib/exec.js';
 import { quickCreateWorkItem } from '../lib/quick-create.js';
 import { addContextOptions, addJsonOption, addTeamOptions } from '../lib/command-helpers.js';
 import { emit, getColor } from '../lib/output.js';
-import { runLink } from '../lib/link.js';
+import { runLink, renderLinkHuman, type LinkResult } from '../lib/link.js';
 
 interface BugFlags {
   org?: string;
@@ -47,7 +47,20 @@ export function registerBugCommand(program: Command): void {
       reresolve: opts.reresolve,
     });
 
-    await emit(result, opts, () => {
+    let link: LinkResult | undefined;
+    if (opts.link) {
+      link = await runLink({
+        ids: [String(result.id)],
+        org: opts.org,
+        orgUrl: opts.orgUrl,
+        project: result.project,
+        repo: opts.repo,
+        json: opts.json,
+        color,
+      });
+    }
+
+    await emit({ ...result, link }, opts, () => {
       process.stdout.write(
         [
           `${color.green('Created')} Bug ${color.bold(`#${result.id}`)}`,
@@ -58,18 +71,10 @@ export function registerBugCommand(program: Command): void {
           ...result.warnings.map((w) => color.yellow(`  Warning: ${w}`)),
         ].join('\n') + '\n'
       );
+      if (link) {
+        process.stdout.write('\n');
+        renderLinkHuman(link, color);
+      }
     });
-
-    if (opts.link) {
-      await runLink({
-        ids: [String(result.id)],
-        org: opts.org,
-        orgUrl: opts.orgUrl,
-        project: result.project,
-        repo: opts.repo,
-        json: opts.json,
-        color,
-      });
-    }
   });
 }

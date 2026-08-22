@@ -86,7 +86,7 @@ export async function gatherStatus(flags: StatusFlags, cwd?: string): Promise<St
   const pr = await fetchActivePrForBranch(runner, orgUrl, project, repo, branch);
 
   // Call 2: work items — from the PR when one exists, otherwise from what
-  // `dova start` tracked locally (see lib/config.ts's branch.<name>.dova-workitems).
+  // `dova link` tracked locally (see lib/config.ts's branch.<name>.dova-workitems).
   let workItems: WorkItemSummary[];
   if (pr) {
     const raw = await fetchPrWorkItems(runner, orgUrl, pr.pullRequestId);

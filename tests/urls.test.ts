@@ -46,15 +46,6 @@ describe('parseWorkItemUrl', () => {
     });
   });
 
-  it('parses the legacy visualstudio.com host', () => {
-    expect(parseWorkItemUrl('https://contoso.visualstudio.com/MyProject/_workitems/edit/456')).toEqual({
-      org: 'contoso',
-      orgUrl: 'https://contoso.visualstudio.com',
-      project: 'MyProject',
-      id: 456,
-    });
-  });
-
   it('handles a project name with spaces', () => {
     expect(parseWorkItemUrl('https://dev.azure.com/contoso/My%20Project/_workitems/edit/456')?.project).toBe('My Project');
   });
@@ -73,16 +64,6 @@ describe('parsePrUrl', () => {
     expect(parsePrUrl('https://dev.azure.com/contoso/MyProject/_git/my-repo/pullrequest/42')).toEqual({
       org: 'contoso',
       orgUrl: 'https://dev.azure.com/contoso',
-      project: 'MyProject',
-      repo: 'my-repo',
-      id: 42,
-    });
-  });
-
-  it('parses the legacy visualstudio.com host', () => {
-    expect(parsePrUrl('https://contoso.visualstudio.com/MyProject/_git/my-repo/pullrequest/42')).toEqual({
-      org: 'contoso',
-      orgUrl: 'https://contoso.visualstudio.com',
       project: 'MyProject',
       repo: 'my-repo',
       id: 42,

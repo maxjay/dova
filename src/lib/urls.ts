@@ -31,7 +31,7 @@ export function parseIdArgument(value: string): number | null {
  * Parses a work item URL in either form Azure Boards hands out:
  *   - https://dev.azure.com/{org}/{project}/_workitems/edit/{id}   (what your browser's address bar shows)
  *   - https://dev.azure.com/{org}/{project}/_workitems?id={id}     (the form dova's own buildWiWebUrl generates)
- * and their {org}.visualstudio.com equivalents. Returns null for anything else.
+ * Returns null for anything else.
  */
 export function parseWorkItemUrl(raw: string): ParsedWorkItemUrl | null {
   const url = normalizeToUrl(raw);
@@ -65,7 +65,7 @@ export function parseWorkItemUrl(raw: string): ParsedWorkItemUrl | null {
 /**
  * Parses a pull request URL:
  *   https://dev.azure.com/{org}/{project}/_git/{repo}/pullrequest/{id}
- * and its {org}.visualstudio.com equivalent. Returns null for anything else.
+ * Returns null for anything else.
  */
 export function parsePrUrl(raw: string): ParsedPrUrl | null {
   const url = normalizeToUrl(raw);

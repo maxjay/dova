@@ -47,16 +47,14 @@ export function pathSegments(url: URL): string[] {
 export interface HostOrgSegments {
   org: string;
   orgUrl: string;
-  /** Path segments after the org (and a legacy /DefaultCollection/ segment, if present). */
+  /** Path segments after the org. */
   rest: string[];
 }
 
 /**
  * Shared org/host detection for any full Azure DevOps resource URL (not
  * just a git remote) — used by lib/urls.ts to parse work item and PR
- * links. Handles both dev.azure.com/{org}/... and {org}.visualstudio.com/...
- * (legacy vs-ssh.visualstudio.com is a git-remote-only host, not a browser
- * URL host, so it's deliberately not handled here).
+ * links. dova only recognizes dev.azure.com.
  */
 export function resolveHostOrgSegments(url: URL): HostOrgSegments | null {
   const host = url.hostname.toLowerCase();
@@ -68,20 +66,12 @@ export function resolveHostOrgSegments(url: URL): HostOrgSegments | null {
     return { org, orgUrl: `https://dev.azure.com/${org}`, rest: segments.slice(1) };
   }
 
-  if (host.endsWith('.visualstudio.com')) {
-    const org = host.slice(0, -'.visualstudio.com'.length);
-    if (!org) return null;
-    const rest = segments[0] === 'DefaultCollection' ? segments.slice(1) : segments;
-    return { org, orgUrl: `https://${org}.visualstudio.com`, rest };
-  }
-
   return null;
 }
 
 /**
  * Parses an org base URL (as stored by `az devops configure --defaults
  * organization=...`) into its short org name plus a normalized URL.
- * Handles both dev.azure.com/{org} and {org}.visualstudio.com.
  */
 export function parseOrgUrl(raw: string): ParsedOrgUrl | null {
   const url = normalizeToUrl(raw);
@@ -94,22 +84,14 @@ export function parseOrgUrl(raw: string): ParsedOrgUrl | null {
     return { org, orgUrl: `https://dev.azure.com/${org}` };
   }
 
-  if (host.endsWith('.visualstudio.com')) {
-    const org = host.slice(0, -'.visualstudio.com'.length);
-    if (!org) return null;
-    return { org, orgUrl: `https://${org}.visualstudio.com` };
-  }
-
   return null;
 }
 
 /**
- * Parses a git remote URL for an Azure Repos repo, in any of the four forms
- * Azure DevOps hands out:
+ * Parses a git remote URL for an Azure Repos repo, in either form
+ * dev.azure.com hands out:
  *   - https://dev.azure.com/{org}/{project}/_git/{repo}
  *   - git@ssh.dev.azure.com:v3/{org}/{project}/{repo}
- *   - https://{org}.visualstudio.com[/DefaultCollection]/{project}/_git/{repo}   (legacy)
- *   - {org}@vs-ssh.visualstudio.com:v3/{org}/{project}/{repo}                    (legacy)
  * Returns null for anything else (e.g. a GitHub remote) rather than guessing.
  */
 export function parseAzureRepoRemoteUrl(remoteUrl: string): AzureRepoRemote | null {
@@ -135,31 +117,6 @@ export function parseAzureRepoRemoteUrl(remoteUrl: string): AzureRepoRemote | nu
       const project = segments[2]!;
       const repo = stripGitSuffix(segments[3]!);
       return { org, project, repo, orgUrl: `https://dev.azure.com/${org}` };
-    }
-    return null;
-  }
-
-  // Checked before the generic `.visualstudio.com` suffix below, since
-  // "vs-ssh.visualstudio.com" would otherwise match that too (and wrongly
-  // treat "vs-ssh" as the org name).
-  if (host === 'vs-ssh.visualstudio.com') {
-    if (segments[0] === 'v3' && segments.length >= 4) {
-      const org = segments[1]!;
-      const project = segments[2]!;
-      const repo = stripGitSuffix(segments[3]!);
-      return { org, project, repo, orgUrl: `https://${org}.visualstudio.com` };
-    }
-    return null;
-  }
-
-  if (host.endsWith('.visualstudio.com')) {
-    const org = host.slice(0, -'.visualstudio.com'.length);
-    const rest = segments[0] === 'DefaultCollection' ? segments.slice(1) : segments;
-    const gitIdx = rest.indexOf('_git');
-    if (org && gitIdx >= 1 && rest.length > gitIdx + 1) {
-      const project = rest.slice(0, gitIdx).join('/');
-      const repo = stripGitSuffix(rest[gitIdx + 1]!);
-      return { org, project, repo, orgUrl: `https://${org}.visualstudio.com` };
     }
     return null;
   }
