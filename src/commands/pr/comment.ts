@@ -10,6 +10,7 @@ import {
   resolveThreadStatusInput,
   gatherThreadDetail,
   renderThreadDetailHuman,
+  type AzThreadStatusApi,
 } from '../../lib/pr.js';
 import { addContextOptions, addJsonOption, addJqOption, addNoColorOption } from '../../lib/command-helpers.js';
 import { emit, getColor } from '../../lib/output.js';
@@ -23,6 +24,11 @@ interface PrCommentFlags {
   json?: string | boolean;
   jq?: string;
   color: boolean;
+}
+
+interface PrCommentReplyFlags extends PrCommentFlags {
+  /** `true` for a bare --resolve (defaults to "resolved"), a string for --resolve <status>. */
+  resolve?: string | boolean;
 }
 
 async function resolveRepoForPr(runner: Runner, orgUrl: string, id: number, fallbackRepo?: string, fallbackProject?: string) {
@@ -91,10 +97,11 @@ export function registerPrCommentCommand(pr: Command): void {
 
   const replyCmd = comment
     .command('reply <id> <thread-id> <text>')
-    .description('Reply within an existing comment thread (a response, not a new thread)');
+    .description('Reply within an existing comment thread (a response, not a new thread)')
+    .option('--resolve [status]', "also resolve the thread after replying (default: resolved; same status values as `comment resolve`) — the reply is usually the reason it's now resolved");
   addContextOptions(replyCmd);
   addJsonOption(replyCmd);
-  replyCmd.action(async (idArg: string, threadIdArg: string, text: string, opts: PrCommentFlags) => {
+  replyCmd.action(async (idArg: string, threadIdArg: string, text: string, opts: PrCommentReplyFlags) => {
     const runner = defaultRunner;
     const color = getColor(opts.color === false);
     const ctx = await resolveContext(runner, { org: opts.org, orgUrl: opts.orgUrl, project: opts.project, repo: opts.repo });
@@ -104,8 +111,17 @@ export function registerPrCommentCommand(pr: Command): void {
 
     const posted = await replyToPrThread(runner, ctx.orgUrl, project, repo, id, threadId, text);
 
-    await emit({ commentId: posted.id, threadId, prId: id }, opts, () => {
+    let status: AzThreadStatusApi | undefined;
+    if (opts.resolve !== undefined) {
+      status = resolveThreadStatusInput(typeof opts.resolve === 'string' ? opts.resolve : 'resolved');
+      await setPrThreadStatus(runner, ctx.orgUrl, project, repo, id, threadId, status);
+    }
+
+    await emit({ commentId: posted.id, threadId, prId: id, status }, opts, () => {
       process.stdout.write(`${color.green('Replied')} in thread #${threadId} on PR #${id}.\n`);
+      if (status) {
+        process.stdout.write(`${color.green('Set')} thread #${threadId} on PR #${id} to "${status}".\n`);
+      }
     });
   });
 

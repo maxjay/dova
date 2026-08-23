@@ -218,7 +218,7 @@ src/auth.ts | 2 ++
 | `dova pr view [id\|url]` | A PR's detail, including comment threads. |
 | `dova pr comment <id> <text>` | Post a new comment thread. |
 | `dova pr comment show <id> <thread-id>` | Read a thread's full conversation — every comment, not just the last one. |
-| `dova pr comment reply <id> <thread-id> <text>` | Reply within an existing thread. |
+| `dova pr comment reply <id> <thread-id> <text>` | Reply within an existing thread. `--resolve [status]` also resolves it in the same call. |
 | `dova pr comment resolve <id> <thread-id> [status]` | Change a thread's status (`resolved` by default). |
 | **Pipelines** | |
 | `dova pipeline status` | Recent runs for a branch. |
