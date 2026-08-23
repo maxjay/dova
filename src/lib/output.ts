@@ -29,6 +29,42 @@ export function renderTable(headers: string[], rows: string[][]): string {
 }
 
 /* ------------------------------------------------------------------ *
+ * Diff coloring — same convention as `git diff`/`git log -p`: added
+ * lines green, removed lines red, hunk headers cyan, file headers
+ * bold. Applied only at render time, never to the value handed to
+ * --json, so JSON/--jq output stays plain-text.
+ * ------------------------------------------------------------------ */
+
+export function colorizeDiff(patch: string, color: ChalkInstance): string {
+  if (!patch) return patch;
+  return patch
+    .split('\n')
+    .map((line) => {
+      if (line.startsWith('diff --git') || line.startsWith('index ')) return color.dim(line);
+      if (line.startsWith('--- ') || line.startsWith('+++ ')) return color.bold(line);
+      if (line.startsWith('@@')) return color.cyan(line);
+      if (line.startsWith('+')) return color.green(line);
+      if (line.startsWith('-')) return color.red(line);
+      return line;
+    })
+    .join('\n');
+}
+
+/** Colors just the trailing `+++--` bar of each `git diff --stat` file line, not the filename. */
+export function colorizeDiffStat(stat: string, color: ChalkInstance): string {
+  if (!stat) return stat;
+  return stat
+    .split('\n')
+    .map((line) => {
+      const match = line.match(/^(.*\|\s*\d+\s+)([+-]+)$/);
+      if (!match) return line;
+      const [, prefix, bar] = match;
+      return prefix + bar!.replace(/\+/g, (m) => color.green(m)).replace(/-/g, (m) => color.red(m));
+    })
+    .join('\n');
+}
+
+/* ------------------------------------------------------------------ *
  * --json / --jq, mirroring gh's pattern:
  *   --json field1,field2   restrict (and select) the JSON output to
  *                          just those top-level fields
