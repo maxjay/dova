@@ -5,7 +5,7 @@ import { gitConfigGet } from '../lib/config.js';
 import { fetchActivePrForBranch } from '../lib/pr.js';
 import { fetchWorkItemsByIds, fieldValue, stripHtml } from '../lib/work-items.js';
 import { addContextOptions, addJsonOption, addJqOption, addNoColorOption } from '../lib/command-helpers.js';
-import { emit, getColor, colorizeDiff, colorizeDiffStat } from '../lib/output.js';
+import { emit, getColor } from '../lib/output.js';
 import { UserError } from '../lib/errors.js';
 import type { AzGitRepository, AzWorkItem } from '../types/azure-devops.js';
 
@@ -226,9 +226,9 @@ function renderSummarizeHuman(result: SummarizeResult, full: boolean, color: Ret
 
   lines.push(color.bold('Diff'));
   if (full && result.fullDiff !== undefined) {
-    lines.push(colorizeDiff(result.fullDiff, color) || color.dim('  (no changes)'));
+    lines.push(result.fullDiff || color.dim('  (no changes)'));
   } else {
-    lines.push(colorizeDiffStat(result.diffStat.trim(), color) || color.dim('  (no changes)'));
+    lines.push(result.diffStat.trim() || color.dim('  (no changes)'));
   }
 
   process.stdout.write(`${lines.join('\n')}\n`);
