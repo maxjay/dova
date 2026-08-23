@@ -1,8 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { resolveThreadStatusInput, threadLocation, gatherThreadDetail } from '../src/lib/pr.js';
+import { resolveThreadStatusInput, threadLocation, gatherThreadDetail, gatherPrDiff } from '../src/lib/pr.js';
 import { UserError } from '../src/lib/errors.js';
-import { createFakeRunner, okJson, fail } from './fixtures/fake-runner.js';
-import type { AzCommentThread } from '../src/types/azure-devops.js';
+import { createFakeRunner, ok, okJson, fail } from './fixtures/fake-runner.js';
+import type { AzCommentThread, AzPullRequest } from '../src/types/azure-devops.js';
 
 const ORG_URL = 'https://dev.azure.com/contoso';
 const PROJECT = 'MyProject';
@@ -93,5 +93,58 @@ describe('gatherThreadDetail', () => {
         { id: 2, author: 'Jane Doe', publishedDate: '2026-08-22T10:15:00Z', content: 'Can you also handle the null case?', commentType: 'text' },
       ],
     });
+  });
+});
+
+function pr(overrides: Partial<AzPullRequest> = {}): AzPullRequest {
+  return {
+    pullRequestId: 612,
+    title: 'A PR',
+    status: 'active',
+    createdBy: { displayName: 'Jane' },
+    creationDate: '2026-01-01T00:00:00Z',
+    sourceRefName: 'refs/heads/feature/x',
+    targetRefName: 'refs/heads/main',
+    url: '',
+    ...overrides,
+  };
+}
+
+describe('gatherPrDiff', () => {
+  it('resolves both refs (fetching if needed) and returns the stat, not the patch, by default', async () => {
+    const fetched: string[] = [];
+    const runner = createFakeRunner({
+      git: (args) => {
+        if (args[0] === 'rev-parse' && args.includes('--verify') && args[args.length - 1] === 'refs/heads/feature/x') return ok('deadbeef');
+        if (args[0] === 'rev-parse' && args.includes('--verify')) return fail('', 1); // main not local
+        if (args[0] === 'fetch') {
+          fetched.push(args.join(' '));
+          return ok('');
+        }
+        if (args[0] === 'diff' && args.includes('--stat')) return ok(' src/auth.ts | 4 +++-');
+        if (args[0] === 'diff') return fail('should not fetch the full patch by default');
+        return fail(`unexpected git call: ${args.join(' ')}`);
+      },
+    });
+
+    const result = await gatherPrDiff(runner, pr());
+
+    expect(result).toEqual({ id: 612, sourceBranch: 'feature/x', targetBranch: 'main', stat: 'src/auth.ts | 4 +++-' });
+    expect(fetched).toEqual(['fetch origin main:refs/remotes/origin/main']);
+  });
+
+  it('also fetches the full patch when full is requested', async () => {
+    const runner = createFakeRunner({
+      git: (args) => {
+        if (args[0] === 'rev-parse' && args.includes('--verify')) return ok('deadbeef'); // both local
+        if (args[0] === 'diff' && args.includes('--stat')) return ok(' a.ts | 1 +');
+        if (args[0] === 'diff') return ok('diff --git a/a.ts b/a.ts\n+added line');
+        return fail(`unexpected git call: ${args.join(' ')}`);
+      },
+    });
+
+    const result = await gatherPrDiff(runner, pr(), { full: true });
+
+    expect(result.patch).toBe('diff --git a/a.ts b/a.ts\n+added line');
   });
 });

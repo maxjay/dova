@@ -205,7 +205,7 @@ src/auth.ts | 2 ++
 | **Status & discovery** | |
 | `dova status` | Active PR, linked work items, recent pipeline runs, comment threads — one screen. |
 | `dova list` | Every branch with a linked ticket, most recently active first. |
-| `dova summarize <branch>` | A catch-up report: linked tickets, commit log, diff stat since it diverged. |
+| `dova summarize <branch>` | A catch-up report: linked tickets, commit log, diff stat since it diverged. Fetches the branch first if it's not local. |
 | `dova view <id\|url>` | Read a work item or PR from a bare id or a pasted link — detects which. |
 | **Work items** | |
 | `dova bug <title>` | File a Bug fast. `--at file:line` for a permalink, `--link` to link it in the same call. |
@@ -216,6 +216,7 @@ src/auth.ts | 2 ++
 | **Pull requests** | |
 | `dova pr create` | Open a PR; auto-attaches whatever `dova link` recorded. |
 | `dova pr view [id\|url]` | A PR's detail, including comment threads. |
+| `dova pr diff [id\|url]` | The actual code diff — yours or someone else's, fetched if it's not local. `--stat` for compact. |
 | `dova pr comment <id> <text>` | Post a new comment thread. |
 | `dova pr comment show <id> <thread-id>` | Read a thread's full conversation — every comment, not just the last one. |
 | `dova pr comment reply <id> <thread-id> <text>` | Reply within an existing thread. `--resolve [status]` also resolves it in the same call. |
@@ -226,6 +227,7 @@ src/auth.ts | 2 ++
 | `dova pipeline log [run-id]` | The failing task's own log — not just "it failed." |
 | **Linking** | |
 | `dova link <id...>` | Associate the current branch with one or more work items. |
+| `dova unlink [id...]` | Undo it — remove id(s) from the current branch (`--all` for everything). |
 | **Everything else** | |
 | `dova api <path>` | An authenticated REST call, for anything not wrapped above. |
 | `dova completion <shell>` | Shell completions, generated from the live command tree. |
@@ -252,7 +254,18 @@ repo's usual one; `--team <name>` does the same by team name.
 neither git nor Azure DevOps tracks on its own — written by `dova
 link`, read back by `dova pr create`, and surfaced later by `dova
 list`/`dova summarize`. It lives in that branch's own git config, so it
-never needs a server round-trip and travels with the branch.
+never needs a server round-trip and travels with the branch. `dova
+unlink` undoes it.
+
+**Reading a diff** — `dova pr diff` and `dova summarize` both need one
+— works the same way `az repos pr checkout` does under the hood
+(confirmed from source: a plain fetch of the PR's own branch name, no
+special merge ref). `az` itself has no diff command at all. Both
+commands resolve the branch(es) involved to a usable ref — local if
+it's already there, the existing remote-tracking ref if it's already
+been fetched, or one fresh `git fetch origin <branch>` if neither —
+then diff locally. Nothing is checked out, so this works for a PR you
+never touched as readily as your own.
 
 ## Contributing
 

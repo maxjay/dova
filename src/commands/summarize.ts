@@ -1,5 +1,5 @@
 import type { Command } from 'commander';
-import { defaultRunner, runAzJson, tryGit, type Runner } from '../lib/exec.js';
+import { defaultRunner, runAzJson, tryGit, resolveOrFetchBranchRef, type Runner } from '../lib/exec.js';
 import { resolveContext, type ResolvedContext } from '../lib/context.js';
 import { gitConfigGet } from '../lib/config.js';
 import { fetchActivePrForBranch } from '../lib/pr.js';
@@ -142,9 +142,10 @@ export async function gatherSummary(
 ): Promise<SummarizeResult> {
   const cwd = opts.cwd;
 
-  if (!(await tryGit(runner, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`], { cwd }))) {
-    throw new UserError(`No local branch named "${branch}".`);
-  }
+  // Fetches `branch` from origin first if it isn't already local — so
+  // this works for a PR that was never checked out here, not just your
+  // own already-local branches.
+  const headRef = await resolveOrFetchBranchRef(runner, branch, cwd);
 
   const ctx = await resolveContext(runner, { org: flags.org, orgUrl: flags.orgUrl, project: flags.project, repo: flags.repo }, { cwd });
 
@@ -164,7 +165,7 @@ export async function gatherSummary(
 
   const diffable = await resolveDiffableRef(runner, base.ref, cwd);
 
-  const logRaw = (await tryGit(runner, ['log', '--pretty=format:%H%x09%s', `${diffable}..${branch}`], { cwd })) ?? '';
+  const logRaw = (await tryGit(runner, ['log', '--pretty=format:%H%x09%s', `${diffable}..${headRef}`], { cwd })) ?? '';
   const commits: SummarizeCommit[] = logRaw
     .split('\n')
     .filter(Boolean)
@@ -173,7 +174,7 @@ export async function gatherSummary(
       return { sha: sha ?? '', subject: subject ?? '' };
     });
 
-  const diffStat = (await tryGit(runner, ['diff', '--stat', `${diffable}...${branch}`], { cwd })) ?? '';
+  const diffStat = (await tryGit(runner, ['diff', '--stat', `${diffable}...${headRef}`], { cwd })) ?? '';
 
   const result: SummarizeResult = {
     branch,
@@ -188,8 +189,8 @@ export async function gatherSummary(
   };
 
   if (opts.full) {
-    result.fullLog = (await tryGit(runner, ['log', `${diffable}..${branch}`], { cwd })) ?? '';
-    result.fullDiff = (await tryGit(runner, ['diff', `${diffable}...${branch}`], { cwd })) ?? '';
+    result.fullLog = (await tryGit(runner, ['log', `${diffable}..${headRef}`], { cwd })) ?? '';
+    result.fullDiff = (await tryGit(runner, ['diff', `${diffable}...${headRef}`], { cwd })) ?? '';
   }
 
   return result;
