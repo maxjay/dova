@@ -8,7 +8,7 @@ import { openInBrowser } from '../lib/browser.js';
 import { NotFoundError, UserError } from '../lib/errors.js';
 import { fetchRecentRuns, buildRunWebUrl } from '../lib/pipelines.js';
 import { fetchWorkItemsByIds, fieldValue } from '../lib/work-items.js';
-import { fetchActivePrForBranch, fetchPrWorkItems, fetchDiscussionThreads, isUnresolvedThreadStatus } from '../lib/pr.js';
+import { fetchActivePrForBranch, fetchPrWorkItems, fetchDiscussionThreads, isUnresolvedThreadStatus, threadLocation, type ThreadLocation } from '../lib/pr.js';
 
 export interface StatusFlags {
   org?: string;
@@ -42,6 +42,7 @@ interface ThreadSummary {
   id: number;
   status: string;
   unresolved: boolean;
+  location: ThreadLocation | null;
   commentCount: number;
   lastAuthor: string | null;
   lastComment: string | null;
@@ -143,6 +144,7 @@ export async function gatherStatus(flags: StatusFlags, cwd?: string): Promise<St
           id: t.id,
           status: t.status,
           unresolved: isUnresolvedThreadStatus(t.status),
+          location: threadLocation(t),
           commentCount: t.comments.length,
           lastAuthor: last?.author?.displayName ?? null,
           lastComment: last?.content ?? null,
@@ -221,10 +223,11 @@ function renderStatusHuman(result: StatusResult, color: ReturnType<typeof getCol
     } else {
       const rows = result.threads.map((t) => [
         t.unresolved ? color.yellow('open') : color.dim('resolved'),
+        t.location ? `${t.location.file}:${t.location.line}` : color.dim('—'),
         t.lastAuthor ?? color.dim('?'),
         (t.lastComment ?? '').slice(0, 60),
       ]);
-      lines.push(renderTable(['Status', 'Last author', 'Last comment'], rows));
+      lines.push(renderTable(['Status', 'Location', 'Last author', 'Last comment'], rows));
     }
   }
 

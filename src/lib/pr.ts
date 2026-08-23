@@ -6,6 +6,21 @@ import { renderTable } from './output.js';
 import { UserError, NotFoundError, looksLikeAzNotFoundError } from './errors.js';
 import type { AzPullRequest, AzWorkItem, AzCommentThread, AzComment } from '../types/azure-devops.js';
 
+export interface ThreadLocation {
+  file: string;
+  /** 1-based. The PR's proposed version of the file when available, otherwise the base version's. */
+  line: number;
+}
+
+/** null for a general PR comment not anchored to any file. */
+export function threadLocation(thread: AzCommentThread): ThreadLocation | null {
+  const ctx = thread.threadContext;
+  if (!ctx) return null;
+  const line = ctx.rightFileStart?.line ?? ctx.leftFileStart?.line;
+  if (line === undefined) return null;
+  return { file: ctx.filePath, line };
+}
+
 export async function fetchActivePrForBranch(
   runner: Runner,
   orgUrl: string,
@@ -189,6 +204,7 @@ export interface ThreadSummary {
   id: number;
   status: string;
   unresolved: boolean;
+  location: ThreadLocation | null;
   commentCount: number;
   lastAuthor: string | null;
   lastComment: string | null;
@@ -255,6 +271,7 @@ export async function gatherPrDetail(
           id: t.id,
           status: t.status,
           unresolved: isUnresolvedThreadStatus(t.status),
+          location: threadLocation(t),
           commentCount: t.comments.length,
           lastAuthor: last?.author?.displayName ?? null,
           lastComment: last?.content ?? null,
@@ -262,6 +279,72 @@ export async function gatherPrDetail(
       })
       .sort((a, b) => Number(b.unresolved) - Number(a.unresolved)),
   };
+}
+
+/* ------------------------------------------------------------------ *
+ * Full thread detail — every comment in one thread, in order. The
+ * summary tables above only ever show the last comment; this is for
+ * actually reading a thread's conversation before acting on it (e.g. a
+ * quality-gate finding a human already replied to).
+ * ------------------------------------------------------------------ */
+
+export interface ThreadCommentDetail {
+  id: number;
+  author: string | null;
+  publishedDate: string | null;
+  content: string | null;
+  /** "text" | "codeChange" | "system" */
+  commentType: string | null;
+}
+
+export interface ThreadDetail {
+  id: number;
+  prId: number;
+  status: string;
+  unresolved: boolean;
+  location: ThreadLocation | null;
+  comments: ThreadCommentDetail[];
+}
+
+export async function gatherThreadDetail(
+  runner: Runner,
+  orgUrl: string,
+  project: string,
+  repo: string,
+  prId: number,
+  threadId: number
+): Promise<ThreadDetail> {
+  const thread = await fetchThreadById(runner, orgUrl, project, repo, prId, threadId);
+  return {
+    id: thread.id,
+    prId,
+    status: thread.status,
+    unresolved: isUnresolvedThreadStatus(thread.status),
+    location: threadLocation(thread),
+    comments: thread.comments.map((c) => ({
+      id: c.id,
+      author: c.author?.displayName ?? null,
+      publishedDate: c.publishedDate ?? null,
+      content: c.content ?? null,
+      commentType: c.commentType ?? null,
+    })),
+  };
+}
+
+export function renderThreadDetailHuman(detail: ThreadDetail, color: ChalkInstance): void {
+  const lines: string[] = [
+    `${color.bold(`Thread #${detail.id}`)} on PR #${detail.prId}`,
+    detail.location ? `${detail.location.file}:${detail.location.line}` : color.dim('(general comment, not anchored to a file)'),
+    `Status: ${detail.unresolved ? color.yellow(detail.status) : color.dim(detail.status)}`,
+    '',
+  ];
+  for (const c of detail.comments) {
+    const header = [c.author ?? 'Unknown', c.publishedDate].filter(Boolean).join(' · ');
+    lines.push(color.bold(header));
+    lines.push(`  ${(c.content ?? '').split('\n').join('\n  ')}`);
+    lines.push('');
+  }
+  process.stdout.write(`${lines.join('\n').replace(/\n+$/, '')}\n`);
 }
 
 export function renderPrDetailHuman(detail: PrDetail, color: ChalkInstance): void {
@@ -289,10 +372,11 @@ export function renderPrDetailHuman(detail: PrDetail, color: ChalkInstance): voi
   } else {
     lines.push(
       renderTable(
-        ['ID', 'Status', 'Last author', 'Last comment'],
+        ['ID', 'Status', 'Location', 'Last author', 'Last comment'],
         detail.threads.map((t) => [
           String(t.id),
           t.unresolved ? color.yellow('open') : color.dim('resolved'),
+          t.location ? `${t.location.file}:${t.location.line}` : color.dim('—'),
           t.lastAuthor ?? '?',
           (t.lastComment ?? '').slice(0, 60),
         ])

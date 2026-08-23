@@ -128,15 +128,31 @@ Pipeline Runs
 └──────────┴────────┴────────┴──────────────────────────────────────────┘
 
 Comment Threads
-┌──────────┬─────────────┬──────────────────────────────────────────────┐
-│ Status   │ Last author │ Last comment                                 │
-├──────────┼─────────────┼──────────────────────────────────────────────┤
-│ open     │ Jane Doe    │ Can you add a test for the empty-string case?│
-├──────────┼─────────────┼──────────────────────────────────────────────┤
-│ resolved │ Jane Doe    │ Looks good now                               │
-├──────────┼─────────────┼──────────────────────────────────────────────┤
-│ resolved │ Bot         │ Nice catch                                   │
-└──────────┴─────────────┴──────────────────────────────────────────────┘
+┌──────────┬─────────────────┬─────────────┬────────────────────────────────────┐
+│ Status   │ Location        │ Last author │ Last comment                       │
+├──────────┼─────────────────┼─────────────┼────────────────────────────────────┤
+│ open     │ /src/auth.ts:42 │ Jane Doe    │ Can you also handle the null case..│
+├──────────┼─────────────────┼─────────────┼────────────────────────────────────┤
+│ resolved │ —               │ Bot         │ Nice catch                         │
+└──────────┴─────────────────┴─────────────┴────────────────────────────────────┘
+```
+
+A thread anchored to a line of code (a quality-gate finding, say) carries
+its file and line; a general comment doesn't. The table only ever shows
+the *last* comment, though — to actually read the conversation before
+acting on it:
+
+```console
+$ dova pr comment show 612 4
+Thread #4 on PR #612
+/src/auth.ts:42
+Status: active
+
+SonarQube · 2026-08-22T10:00:00Z
+  Fix this cognitive complexity issue by extracting the validation logic.
+
+Jane Doe · 2026-08-22T10:15:00Z
+  Can you also handle the null case here while you're at it?
 ```
 
 CI is red — find out why without opening a browser:
@@ -201,6 +217,7 @@ src/auth.ts | 2 ++
 | `dova pr create` | Open a PR; auto-attaches whatever `dova link` recorded. |
 | `dova pr view [id\|url]` | A PR's detail, including comment threads. |
 | `dova pr comment <id> <text>` | Post a new comment thread. |
+| `dova pr comment show <id> <thread-id>` | Read a thread's full conversation — every comment, not just the last one. |
 | `dova pr comment reply <id> <thread-id> <text>` | Reply within an existing thread. |
 | `dova pr comment resolve <id> <thread-id> [status]` | Change a thread's status (`resolved` by default). |
 | **Pipelines** | |
