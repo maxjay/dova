@@ -1,6 +1,6 @@
 import type { ChalkInstance } from 'chalk';
 import type { Runner } from './exec.js';
-import { runAzJson, runAzRestJson, resolveOrFetchBranchRef, tryGit } from './exec.js';
+import { runAzJson, runAzRestJson } from './exec.js';
 import { buildPrWebUrl } from './context.js';
 import { renderTable } from './output.js';
 import { UserError, NotFoundError, looksLikeAzNotFoundError } from './errors.js';
@@ -382,64 +382,6 @@ export function renderPrDetailHuman(detail: PrDetail, color: ChalkInstance): voi
         ])
       )
     );
-  }
-  process.stdout.write(`${lines.join('\n')}\n`);
-}
-
-/* ------------------------------------------------------------------ *
- * PR diff — the actual code change, not just metadata. `az repos pr`
- * has no diff command at all (confirmed absent from the extension's
- * command registry — the group is create/update/show/list/checkout/
- * reviewer/work-item/set-vote/policy, nothing diff-shaped). `az repos
- * pr checkout` itself just fetches the PR's own sourceRefName and
- * checks it out (confirmed from source — no special merge ref
- * involved), so reading the diff is the same fetch, minus the
- * checkout: resolveOrFetchBranchRef() on both source and target,
- * then a plain local `git diff` between them. Works for a PR you
- * opened as readily as one you didn't — nothing here assumes the
- * source branch was ever checked out locally before this call.
- * ------------------------------------------------------------------ */
-
-export interface PrDiffResult {
-  id: number;
-  sourceBranch: string;
-  targetBranch: string;
-  stat: string;
-  /** Only populated when the full patch was requested. */
-  patch?: string;
-}
-
-export async function gatherPrDiff(
-  runner: Runner,
-  pullRequest: AzPullRequest,
-  opts: { cwd?: string; full?: boolean } = {}
-): Promise<PrDiffResult> {
-  const sourceBranch = pullRequest.sourceRefName.replace(/^refs\/heads\//, '');
-  const targetBranch = pullRequest.targetRefName.replace(/^refs\/heads\//, '');
-
-  const [headRef, baseRef] = await Promise.all([
-    resolveOrFetchBranchRef(runner, sourceBranch, opts.cwd),
-    resolveOrFetchBranchRef(runner, targetBranch, opts.cwd),
-  ]);
-
-  const result: PrDiffResult = {
-    id: pullRequest.pullRequestId,
-    sourceBranch,
-    targetBranch,
-    stat: (await tryGit(runner, ['diff', '--stat', `${baseRef}...${headRef}`], { cwd: opts.cwd })) ?? '',
-  };
-  if (opts.full) {
-    result.patch = (await tryGit(runner, ['diff', `${baseRef}...${headRef}`], { cwd: opts.cwd })) ?? '';
-  }
-  return result;
-}
-
-export function renderPrDiffHuman(result: PrDiffResult, full: boolean, color: ChalkInstance): void {
-  const lines: string[] = [color.bold(`#${result.id}`) + ` ${result.sourceBranch} -> ${result.targetBranch}`, ''];
-  if (full && result.patch !== undefined) {
-    lines.push(result.patch || color.dim('(no changes)'));
-  } else {
-    lines.push(result.stat.trim() || color.dim('(no changes)'));
   }
   process.stdout.write(`${lines.join('\n')}\n`);
 }

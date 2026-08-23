@@ -2,8 +2,9 @@ import type { Command } from 'commander';
 import { defaultRunner, runAzJson, tryGit, resolveOrFetchBranchRef, type Runner } from '../lib/exec.js';
 import { resolveContext, type ResolvedContext } from '../lib/context.js';
 import { gitConfigGet } from '../lib/config.js';
-import { fetchActivePrForBranch } from '../lib/pr.js';
+import { fetchActivePrForBranch, fetchPrById } from '../lib/pr.js';
 import { fetchWorkItemsByIds, fieldValue, stripHtml } from '../lib/work-items.js';
+import { parsePrUrl, parseIdArgument, looksLikeUrl } from '../lib/urls.js';
 import { addContextOptions, addJsonOption, addJqOption, addNoColorOption } from '../lib/command-helpers.js';
 import { emit, getColor } from '../lib/output.js';
 import { UserError } from '../lib/errors.js';
@@ -236,8 +237,10 @@ function renderSummarizeHuman(result: SummarizeResult, full: boolean, color: Ret
 
 export function registerSummarizeCommand(program: Command): void {
   const cmd = program
-    .command('summarize <branch>')
-    .description("Catch up on a branch: its linked tickets' descriptions, commit log, and diff shape since it diverged")
+    .command('summarize [branch-or-id-or-url]')
+    .description(
+      "Catch up on a branch or a PR: linked tickets' descriptions, commit log, and diff shape since it diverged (default: current branch)"
+    )
     .option('--base <ref>', 'compare against this branch instead of auto-detecting (PR target, then repo default)')
     .option('--full', 'show full commit messages and the full diff, not just the compact form');
 
@@ -246,10 +249,52 @@ export function registerSummarizeCommand(program: Command): void {
   addJqOption(cmd);
   addNoColorOption(cmd);
 
-  cmd.action(async (branch: string, opts: SummarizeFlags & { full?: boolean }) => {
+  cmd.action(async (arg: string | undefined, opts: SummarizeFlags & { full?: boolean }) => {
     const runner = defaultRunner;
     const color = getColor(opts.color === false);
-    const result = await gatherSummary(runner, branch, opts, { full: opts.full });
+
+    const fromUrl = arg && looksLikeUrl(arg) ? parsePrUrl(arg) : null;
+    if (arg && looksLikeUrl(arg) && !fromUrl) {
+      throw new UserError(`"${arg}" looks like a URL, but not one dova recognizes as a pull request link.`);
+    }
+    const bareId = !arg || fromUrl ? null : parseIdArgument(arg);
+
+    let branch: string;
+    let flags: SummarizeFlags = opts;
+
+    if (fromUrl || bareId !== null) {
+      // A PR id or url — resolve it directly, then diff its own source
+      // against its own target (unless --base overrides that), rather
+      // than looking a branch's active PR back up.
+      const ctx = await resolveContext(runner, {
+        org: opts.org ?? fromUrl?.org,
+        orgUrl: opts.orgUrl ?? fromUrl?.orgUrl,
+        project: opts.project ?? fromUrl?.project,
+        repo: opts.repo ?? fromUrl?.repo,
+      });
+      const pullRequest = await fetchPrById(runner, ctx.orgUrl, fromUrl?.id ?? bareId!);
+      branch = pullRequest.sourceRefName.replace(/^refs\/heads\//, '');
+      flags = {
+        ...opts,
+        org: ctx.org,
+        orgUrl: ctx.orgUrl,
+        project: ctx.project,
+        repo: ctx.repo,
+        base: opts.base ?? pullRequest.targetRefName.replace(/^refs\/heads\//, ''),
+      };
+    } else if (arg) {
+      branch = arg;
+    } else {
+      const currentBranch = await tryGit(runner, ['rev-parse', '--abbrev-ref', 'HEAD']);
+      if (!currentBranch || currentBranch === 'HEAD') {
+        throw new UserError('Not currently on a branch (detached HEAD?).', [
+          'Pass a branch name, PR id, or PR url explicitly.',
+        ]);
+      }
+      branch = currentBranch;
+    }
+
+    const result = await gatherSummary(runner, branch, flags, { full: opts.full });
     await emit(result, opts, () => renderSummarizeHuman(result, Boolean(opts.full), color));
   });
 }
