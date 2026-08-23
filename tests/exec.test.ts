@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { runAzRestJson, runAzRestText, toAsciiSafeJson, AZURE_DEVOPS_AAD_RESOURCE } from '../src/lib/exec.js';
-import { createFakeRunner, ok, okJson } from './fixtures/fake-runner.js';
+import { runAzRestJson, runAzRestText, toAsciiSafeJson, resolveOrFetchBranchRef, AZURE_DEVOPS_AAD_RESOURCE } from '../src/lib/exec.js';
+import { NotFoundError } from '../src/lib/errors.js';
+import { createFakeRunner, ok, okJson, fail } from './fixtures/fake-runner.js';
 
 describe('toAsciiSafeJson', () => {
   it('leaves plain-ASCII JSON untouched', () => {
@@ -96,5 +97,50 @@ describe('runAzRestText', () => {
     expect(text).toBe('2024-01-01T00:00:00Z Starting task\nnot valid json {{{\nBuild failed with exit code 1');
     expect(seenArgs).not.toContain('--output');
     expect(seenArgs).toContain('--resource');
+  });
+});
+
+describe('resolveOrFetchBranchRef', () => {
+  it('returns the bare branch name when it already exists locally, no fetch attempted', async () => {
+    const runner = createFakeRunner({
+      git: (args) => {
+        if (args[0] === 'rev-parse' && args[args.length - 1] === 'refs/heads/feature/x') return ok('deadbeef');
+        return fail('should not be called');
+      },
+    });
+    expect(await resolveOrFetchBranchRef(runner, 'feature/x')).toBe('feature/x');
+  });
+
+  it('returns origin/<branch> when already fetched, no new fetch attempted', async () => {
+    const runner = createFakeRunner({
+      git: (args) => {
+        if (args[0] === 'rev-parse' && args[args.length - 1] === 'refs/heads/feature/x') return fail('', 1);
+        if (args[0] === 'rev-parse' && args[args.length - 1] === 'refs/remotes/origin/feature/x') return ok('deadbeef');
+        if (args[0] === 'fetch') return fail('should not fetch — already resolved');
+        return fail('unexpected');
+      },
+    });
+    expect(await resolveOrFetchBranchRef(runner, 'feature/x')).toBe('origin/feature/x');
+  });
+
+  it('fetches from origin when the branch is not local and not already fetched', async () => {
+    let fetchArgs: string[] | undefined;
+    const runner = createFakeRunner({
+      git: (args) => {
+        if (args[0] === 'rev-parse') return fail('', 1);
+        if (args[0] === 'fetch') {
+          fetchArgs = args;
+          return ok('');
+        }
+        return fail('unexpected');
+      },
+    });
+    expect(await resolveOrFetchBranchRef(runner, 'feature/x')).toBe('origin/feature/x');
+    expect(fetchArgs).toEqual(['fetch', 'origin', 'feature/x:refs/remotes/origin/feature/x']);
+  });
+
+  it('throws NotFoundError when the branch exists nowhere', async () => {
+    const runner = createFakeRunner({ git: () => fail('fatal: couldn\'t find remote ref feature/ghost', 128) });
+    await expect(resolveOrFetchBranchRef(runner, 'feature/ghost')).rejects.toBeInstanceOf(NotFoundError);
   });
 });

@@ -1,5 +1,5 @@
 import { execa, type Options as ExecaOptions } from 'execa';
-import { PrereqError, ExternalCommandError } from './errors.js';
+import { PrereqError, ExternalCommandError, NotFoundError } from './errors.js';
 
 export interface ProcessResult {
   stdout: string;
@@ -189,6 +189,32 @@ export async function tryGit(runner: Runner, args: string[], opts?: { cwd?: stri
   if (result.exitCode !== 0) return null;
   const out = result.stdout.trim();
   return out.length > 0 ? out : null;
+}
+
+/**
+ * Resolves `branch` to a ref usable in a git diff/log range: the local
+ * branch if it exists, an already-fetched remote-tracking branch if
+ * that exists, or one fresh `git fetch origin <branch>` into a
+ * remote-tracking ref if neither does yet — the same thing `az repos pr
+ * checkout` itself does under the hood (confirmed from source: it's a
+ * plain fetch of the PR's own sourceRefName, no special merge ref).
+ * Never checks anything out — this is for reading, not switching
+ * branches, so it works for someone else's PR without touching your
+ * working tree.
+ */
+export async function resolveOrFetchBranchRef(runner: Runner, branch: string, cwd?: string): Promise<string> {
+  if (await tryGit(runner, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`], { cwd })) {
+    return branch;
+  }
+  if (await tryGit(runner, ['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${branch}`], { cwd })) {
+    return `origin/${branch}`;
+  }
+  const fetch = await runner.git(['fetch', 'origin', `${branch}:refs/remotes/origin/${branch}`], { cwd });
+  if (fetch.exitCode !== 0) {
+    const firstLine = fetch.stderr.trim().split('\n')[0];
+    throw new NotFoundError(`No branch named "${branch}" found locally or on origin.`, firstLine ? [`git fetch said: ${firstLine}`] : []);
+  }
+  return `origin/${branch}`;
 }
 
 export type { ExecaOptions };

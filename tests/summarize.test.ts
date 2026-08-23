@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { resolveBase, resolveDiffableRef, gatherSummary } from '../src/commands/summarize.js';
-import { UserError } from '../src/lib/errors.js';
+import { UserError, NotFoundError } from '../src/lib/errors.js';
 import { createFakeRunner, ok, okJson, fail } from './fixtures/fake-runner.js';
 import type { AzWorkItem, AzPullRequest, AzGitRepository } from '../src/types/azure-devops.js';
 import type { ResolvedContext } from '../src/lib/context.js';
@@ -174,8 +174,34 @@ describe('gatherSummary', () => {
     expect(result.fullDiff).toBe('full diff text');
   });
 
-  it('throws UserError for a branch that does not exist locally', async () => {
+  it('throws NotFoundError for a branch that does not exist locally or on origin', async () => {
     const runner = createFakeRunner({ git: () => fail('', 1) });
-    await expect(gatherSummary(runner, 'no-such-branch', { org: 'contoso', project: 'MyProject' })).rejects.toBeInstanceOf(UserError);
+    await expect(gatherSummary(runner, 'no-such-branch', { org: 'contoso', project: 'MyProject' })).rejects.toBeInstanceOf(NotFoundError);
+  });
+
+  it('fetches a branch that only exists on origin, then diffs against the fetched ref', async () => {
+    let fetchedInto: string | undefined;
+    const runner = createFakeRunner({
+      git: (args) => {
+        if (args[0] === 'rev-parse' && args.includes('--verify') && args[args.length - 1] === 'refs/heads/feature/other') return fail('', 1);
+        if (args[0] === 'rev-parse' && args.includes('--verify') && args[args.length - 1] === 'refs/remotes/origin/feature/other') return fail('', 1);
+        if (args[0] === 'fetch' && args[1] === 'origin') {
+          fetchedInto = args[2];
+          return ok('');
+        }
+        if (args[0] === 'config' && args.includes('--get')) return fail('', 1);
+        if (args[0] === 'rev-parse' && args.includes('--verify') && args[args.length - 1] === 'origin/develop') return ok('deadbeef');
+        if (args[0] === 'log') return ok('abc123\tSome commit');
+        if (args[0] === 'diff' && args.includes('--stat')) return ok(' a.ts | 1 +');
+        return fail(`unexpected git call: ${args.join(' ')}`);
+      },
+      az: () => fail('should not be called — no linked work items'),
+    });
+
+    const result = await gatherSummary(runner, 'feature/other', { org: 'contoso', project: 'MyProject', base: 'develop' });
+
+    expect(fetchedInto).toBe('feature/other:refs/remotes/origin/feature/other');
+    expect(result.commits).toEqual([{ sha: 'abc123', subject: 'Some commit' }]);
+    expect(result.diffStat).toContain('a.ts');
   });
 });

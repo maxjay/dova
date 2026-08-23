@@ -7,7 +7,7 @@ import { gitConfigGet, gitConfigSet } from './config.js';
 import { fetchWorkItemsByIds, fieldValue } from './work-items.js';
 import { buildWiql } from './wiql.js';
 import { fetchWorkItemTypeStates, categoryOf } from './work-item-types.js';
-import { UserError } from './errors.js';
+import { UserError, NotFoundError } from './errors.js';
 import type { AzWorkItem } from '../types/azure-devops.js';
 
 export interface LinkPrompts {
@@ -265,6 +265,148 @@ export function renderLinkHuman(result: LinkResult, color: ChalkInstance): void 
   for (const wi of result.workItems) {
     const marker = wi.primary ? color.cyan(' (primary)') : '';
     lines.push(`  #${wi.id} [${wi.type}] ${wi.title}${marker}`);
+  }
+  if (result.warnings.length > 0) {
+    lines.push('');
+    for (const w of result.warnings) lines.push(color.yellow(`Warning: ${w}`));
+  }
+  process.stdout.write(`${lines.join('\n')}\n`);
+}
+
+export interface UnlinkOptions {
+  /** Ids to remove. Ignored (may be empty) when `all` is set. */
+  ids: string[];
+  /** Remove every linked id from this branch, instead of just the given ones. */
+  all?: boolean;
+  /** Which id to keep as primary among what remains, if not implied. */
+  primary?: string;
+  org?: string;
+  orgUrl?: string;
+  project?: string;
+  repo?: string;
+  json?: string | boolean;
+  color: ChalkInstance;
+  cwd?: string;
+  runner?: Runner;
+}
+
+export interface UnlinkResult {
+  branch: string;
+  removedIds: number[];
+  workItems: LinkWorkItemSummary[];
+  warnings: string[];
+}
+
+/**
+ * `dova unlink` — the undo for a bad `dova link`. Same git-config-only
+ * scope as `link`: removes id(s) from the branch you're already on,
+ * picks a new primary if the old one got removed, and clears the config
+ * entirely once nothing's left linked. No az calls beyond hydrating
+ * titles for the remaining items, for a confirmation that reads the
+ * same way `link`'s own output does.
+ */
+export async function runUnlink(opts: UnlinkOptions): Promise<UnlinkResult> {
+  const runner = opts.runner ?? defaultRunner;
+  const cwd = opts.cwd;
+  const warnings: string[] = [];
+
+  if (!opts.all && opts.ids.length === 0) {
+    throw new UserError('Nothing to unlink — pass one or more ids, or --all.');
+  }
+
+  const currentBranch = await tryGit(runner, ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd });
+  if (!currentBranch || currentBranch === 'HEAD') {
+    throw new UserError('Not currently on a branch (detached HEAD?).', [
+      "dova unlink removes ids from the branch you're already on — check one out first.",
+    ]);
+  }
+
+  const existingRaw = await gitConfigGet(runner, `branch.${currentBranch}.dova-workitems`, { cwd });
+  const existingIds = existingRaw ? existingRaw.split(',').map(Number) : [];
+  if (existingIds.length === 0) {
+    throw new NotFoundError(`Branch "${currentBranch}" has no linked work items.`);
+  }
+  const existingPrimary = await gitConfigGet(runner, `branch.${currentBranch}.dova-primary`, { cwd });
+
+  let removedIds: number[];
+  if (opts.all) {
+    removedIds = existingIds;
+  } else {
+    const requestedIds = [...new Set(opts.ids.map((s) => Number(s)))];
+    if (requestedIds.some((n) => !Number.isInteger(n) || n <= 0)) {
+      throw new UserError(`One or more ids are not valid work item ids: ${opts.ids.join(', ')}`);
+    }
+    removedIds = requestedIds.filter((id) => existingIds.includes(id));
+    const notFound = requestedIds.filter((id) => !existingIds.includes(id));
+    if (notFound.length > 0) {
+      warnings.push(`Not currently linked to this branch, nothing to remove: ${notFound.map((id) => `#${id}`).join(', ')}`);
+    }
+    if (removedIds.length === 0) {
+      throw new UserError(`None of the given ids are linked to branch "${currentBranch}".`, [
+        `Currently linked: ${existingIds.map((id) => `#${id}`).join(', ')}`,
+      ]);
+    }
+  }
+
+  const remainingIds = existingIds.filter((id) => !removedIds.includes(id));
+
+  if (remainingIds.length === 0) {
+    await tryGit(runner, ['config', '--unset', `branch.${currentBranch}.dova-workitems`], { cwd });
+    await tryGit(runner, ['config', '--unset', `branch.${currentBranch}.dova-primary`], { cwd });
+    return { branch: currentBranch, removedIds, workItems: [], warnings };
+  }
+
+  let primaryId: number;
+  if (opts.primary) {
+    primaryId = Number(opts.primary);
+    if (!remainingIds.includes(primaryId)) {
+      throw new UserError(`--primary ${opts.primary} is not among the remaining linked ids.`, [
+        `Remaining: ${remainingIds.map((id) => `#${id}`).join(', ')}`,
+      ]);
+    }
+  } else if (existingPrimary && remainingIds.includes(Number(existingPrimary))) {
+    primaryId = Number(existingPrimary);
+  } else {
+    primaryId = remainingIds[0]!;
+  }
+
+  await gitConfigSet(runner, `branch.${currentBranch}.dova-workitems`, remainingIds.join(','), { cwd });
+  await gitConfigSet(runner, `branch.${currentBranch}.dova-primary`, String(primaryId), { cwd });
+
+  const ctx = await resolveContext(runner, { org: opts.org, orgUrl: opts.orgUrl, project: opts.project, repo: opts.repo }, { cwd });
+  const hydrated = await fetchWorkItemsByIds(runner, ctx.orgUrl, remainingIds);
+  const byId = new Map(hydrated.map((i) => [i.id, i]));
+
+  return {
+    branch: currentBranch,
+    removedIds,
+    workItems: remainingIds.map((id) => {
+      const item = byId.get(id);
+      return {
+        id,
+        title: item ? itemTitle(item) : `#${id}`,
+        type: item ? itemType(item) : 'Unknown',
+        primary: id === primaryId,
+      };
+    }),
+    warnings,
+  };
+}
+
+export function renderUnlinkHuman(result: UnlinkResult, color: ChalkInstance): void {
+  const lines: string[] = [
+    `${color.bold('Removed:')} ${result.removedIds.map((id) => `#${id}`).join(', ')}`,
+    `${color.bold('Branch:')} ${result.branch}`,
+    '',
+  ];
+  if (result.workItems.length === 0) {
+    lines.push(color.dim('No work items linked to this branch anymore.'));
+  } else {
+    lines.push(color.bold('Still linked:'));
+    for (const wi of result.workItems) {
+      const marker = wi.primary ? color.cyan(' (primary)') : '';
+      lines.push(`  #${wi.id} [${wi.type}] ${wi.title}${marker}`);
+    }
   }
   if (result.warnings.length > 0) {
     lines.push('');
