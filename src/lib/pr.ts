@@ -2,7 +2,7 @@ import type { ChalkInstance } from 'chalk';
 import type { Runner } from './exec.js';
 import { runAzJson, runAzRestJson, resolveOrFetchBranchRef, tryGit } from './exec.js';
 import { buildPrWebUrl } from './context.js';
-import { renderTable } from './output.js';
+import { renderTable, colorizeDiff, colorizeDiffStat } from './output.js';
 import { UserError, NotFoundError, looksLikeAzNotFoundError } from './errors.js';
 import type { AzPullRequest, AzWorkItem, AzCommentThread, AzComment } from '../types/azure-devops.js';
 
@@ -437,9 +437,9 @@ export async function gatherPrDiff(
 export function renderPrDiffHuman(result: PrDiffResult, full: boolean, color: ChalkInstance): void {
   const lines: string[] = [color.bold(`#${result.id}`) + ` ${result.sourceBranch} -> ${result.targetBranch}`, ''];
   if (full && result.patch !== undefined) {
-    lines.push(result.patch || color.dim('(no changes)'));
+    lines.push(colorizeDiff(result.patch, color) || color.dim('(no changes)'));
   } else {
-    lines.push(result.stat.trim() || color.dim('(no changes)'));
+    lines.push(colorizeDiffStat(result.stat.trim(), color) || color.dim('(no changes)'));
   }
   process.stdout.write(`${lines.join('\n')}\n`);
 }
