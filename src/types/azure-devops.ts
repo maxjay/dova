@@ -68,6 +68,27 @@ export interface AzBuild {
   url: string;
 }
 
+/** A thread's position in a file — CommentPosition, from the git API models. Line numbers are 1-based. */
+export interface AzCommentPosition {
+  line: number;
+  offset?: number;
+}
+
+/**
+ * CommentThreadContext — present only on a thread anchored to a specific
+ * line of a file (a code-review comment); absent on a general top-level
+ * PR comment. `right*` is the PR's proposed version of the file, `left*`
+ * the base version (used for a comment on a line only the base side has,
+ * e.g. one that got deleted).
+ */
+export interface AzCommentThreadContext {
+  filePath: string;
+  rightFileStart?: AzCommentPosition;
+  rightFileEnd?: AzCommentPosition;
+  leftFileStart?: AzCommentPosition;
+  leftFileEnd?: AzCommentPosition;
+}
+
 /** GitPullRequestCommentThread, from `az rest` against the PR threads endpoint. */
 export interface AzCommentThread {
   id: number;
@@ -76,6 +97,8 @@ export interface AzCommentThread {
   isDeleted?: boolean;
   comments: AzComment[];
   publishedDate?: string;
+  /** null/absent for a general PR comment not anchored to any file. */
+  threadContext?: AzCommentThreadContext | null;
 }
 
 export interface AzComment {
