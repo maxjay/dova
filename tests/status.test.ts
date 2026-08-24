@@ -26,7 +26,11 @@ function statusRunner(events: string[], opts: { pr?: boolean } = {}) {
       const kind = joined.includes('repos pr list')
         ? 'pr'
         : joined.includes('build') || joined.includes('pipelines')
-          ? 'runs'
+          ? // The branch query and the PR build-validation query are both
+            // `pipelines runs list`; only the ref tells them apart.
+            joined.includes('refs/pull')
+            ? 'prruns'
+            : 'runs'
           : joined.includes('work-item')
             ? 'workitems'
             : 'threads';
@@ -69,16 +73,21 @@ describe('gatherStatus call scheduling', () => {
     expect(new Set([events[0], events[1]])).toEqual(new Set(['start:pr', 'start:runs']));
   });
 
-  it('then fetches the PR work items and its comment threads together', async () => {
+  it('then fetches work items, threads and the PR validation runs together', async () => {
     const events: string[] = [];
     await gatherStatus({ color: true } as never, undefined, statusRunner(events));
 
-    const secondWave = events.slice(events.indexOf('end:pr') + 1).filter((e) => e.startsWith('start:'));
-    expect(secondWave).toHaveLength(2);
-    // Both of the PR-dependent calls started before either finished.
-    const firstEnd = events.findIndex((e) => e === 'end:workitems' || e === 'end:threads');
-    const startsBeforeFirstEnd = events.slice(0, firstEnd).filter((e) => e === 'start:workitems' || e === 'start:threads');
-    expect(startsBeforeFirstEnd).toHaveLength(2);
+    // Three calls need the PR id: its work items, its threads, and the
+    // build-validation runs (which report refs/pull/<id>/merge, so the
+    // branch query in wave 1 never returns them). All three go at once.
+    // Only these three depend on the PR; wave 1's branch-runs call may
+    // still be in flight and finish among them, which is fine.
+    const wave2 = ['workitems', 'threads', 'prruns'];
+    const own = events.filter((e) => wave2.some((k) => e.endsWith(`:${k}`)));
+
+    expect(own.filter((e) => e.startsWith('start:'))).toHaveLength(3);
+    // All three started before any of the three finished.
+    expect(own.slice(0, 3).every((e) => e.startsWith('start:'))).toBe(true);
   });
 
   it('makes no work-item or thread call at all when there is no PR and nothing linked', async () => {
