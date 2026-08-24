@@ -3,7 +3,7 @@ import type { Runner } from '../../lib/exec.js';
 import { defaultRunner, runAzJson, tryGit } from '../../lib/exec.js';
 import { readTextArg, stdinHasData } from '../../lib/stdin.js';
 import { gitConfigGet } from '../../lib/config.js';
-import { resolveContext, buildPrWebUrl } from '../../lib/context.js';
+import { resolveContext, buildPrWebUrl, resolveDefaultBranch } from '../../lib/context.js';
 import { addContextOptions, addJsonOption, addNoColorOption } from '../../lib/command-helpers.js';
 import { emit, getColor } from '../../lib/output.js';
 import { UserError } from '../../lib/errors.js';
@@ -46,7 +46,7 @@ export function registerPrCreateCommand(pr: Command): void {
     )
     .option('--title <title>', "title (default: last commit subject; use '-' to read it from stdin)")
     .option('--description <text>', "description/body (use '-' to read it from stdin)")
-    .option('--target <branch>', "branch to merge into (default: the repo's default branch)")
+    .option('--target <branch>', "branch to merge into (default: resolved from the repo — you shouldn't need this)")
     .option('--draft', 'create as a draft PR');
 
   addContextOptions(cmd);
@@ -108,7 +108,15 @@ export function registerPrCreateCommand(pr: Command): void {
     // newlines on its side — but a single argument containing newlines
     // survives that join unchanged, so pass it whole.
     if (description) args.push('--description', description);
-    if (opts.target) args.push('--target-branch', opts.target);
+
+    // Resolved, not asked for. `origin/HEAD` already says what this repo
+    // merges into — `dova summarize` has always read it to pick a diff
+    // base — so a PR has no business making the caller name it. Left to
+    // az's own default this silently targets the repo default branch,
+    // which is wrong wherever a team integrates into `develop`.
+    const target = opts.target ?? (await resolveDefaultBranch(runner, ctx))?.branch;
+    if (target) args.push('--target-branch', target);
+
     if (workItems.length > 0) args.push('--work-items', ...workItems);
     if (opts.draft) args.push('--draft', 'true');
 

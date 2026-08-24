@@ -1,5 +1,5 @@
 import type { Runner } from './exec.js';
-import { tryGit, runGit } from './exec.js';
+import { tryGit, runGit, runAzJson } from './exec.js';
 import { isInsideGitRepo, readAzDevopsDefaults } from './config.js';
 import { UserError } from './errors.js';
 
@@ -232,3 +232,44 @@ export function buildPrWebUrl(ctx: Pick<ResolvedContext, 'orgUrl' | 'project' | 
 }
 
 export { runGit };
+
+/**
+ * The branch this repo's work merges into — the target for a new PR,
+ * and the base to diff a branch against.
+ *
+ * `origin/HEAD` first, because it is local, free, and reflects what the
+ * remote actually points at (a repo whose default is `develop` says so
+ * there). Falls back to one `az repos show` when a plain clone hasn't
+ * populated the symref.
+ *
+ * Returns null rather than throwing: callers differ on whether not
+ * knowing is fatal.
+ */
+export interface ResolvedDefaultBranch {
+  branch: string;
+  /** Which of the two answered — surfaced in `--json` so it's auditable. */
+  source: 'origin-head' | 'repo-default';
+}
+
+export async function resolveDefaultBranch(
+  runner: Runner,
+  ctx: { orgUrl: string; project: string; repo?: string },
+  cwd?: string
+): Promise<ResolvedDefaultBranch | null> {
+  const originHead = await tryGit(runner, ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'], { cwd });
+  if (originHead) return { branch: originHead.replace(/^origin\//, ''), source: 'origin-head' };
+
+  if (ctx.repo) {
+    const repository = await runAzJson<{ defaultBranch?: string }>(runner, [
+      'repos', 'show',
+      '--repository', ctx.repo,
+      '--organization', ctx.orgUrl,
+      '--project', ctx.project,
+    ]);
+    if (repository.defaultBranch) {
+      return { branch: repository.defaultBranch.replace(/^refs\/heads\//, ''), source: 'repo-default' };
+    }
+  }
+
+  return null;
+}
