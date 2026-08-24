@@ -228,7 +228,7 @@ src/auth.ts | 2 ++
 | `dova link <id...>` | Associate the current branch with one or more work items. |
 | `dova unlink [id...]` | Undo it — remove id(s) from the current branch (`--all` for everything). |
 | **Agent setup** | |
-| `dova instructions init` | Teach Windsurf/Copilot to use dova — writes `AGENTS.md` and `.github/copilot-instructions.md`. |
+| `dova instructions init` | Teach Devin Desktop/Copilot to use dova — writes `AGENTS.md` and `.github/copilot-instructions.md`. |
 | **Everything else** | |
 | `dova api <path>` | An authenticated REST call, for anything not wrapped above. |
 | `dova completion <shell>` | Shell completions, generated from the live command tree. |
@@ -294,21 +294,24 @@ and the stdin rule above. `dova instructions init` writes that down:
 ```console
 $ dova instructions init
 Wrote:
-  ✓ AGENTS.md  — Windsurf (also Cursor, Devin, Codex)
+  ✓ AGENTS.md  — Devin Desktop / Windsurf (also Cursor, Codex)
       created
   ✓ .github/copilot-instructions.md  — GitHub Copilot in VS Code
       created
 ```
 
 Two files rather than one because neither target reads the other's by
-default: Windsurf reads a root `AGENTS.md` always-on (it replaced
-`.windsurfrules` as the maintained convention), while VS Code's
-`AGENTS.md` support is experimental and off behind
-`chat.useAgentsMdFile` — there, `.github/copilot-instructions.md` is
-what works out of the box. Same content in both, generated from one
-source rather than maintained twice, and not a symlink because a
-Windows checkout with `core.symlinks=false` turns one into a text file
-containing a path, silently.
+default. Devin Desktop — what Windsurf was renamed to in June 2026,
+after which its Cascade agent was retired in favour of Devin Local —
+reads a root `AGENTS.md` as an always-on rule, feeding it into the same
+rules engine behind `.devin/rules/`, so there's no need to write that
+directory too. VS Code's `AGENTS.md` support, by contrast, is
+experimental and off behind `chat.useAgentsMdFile`; there,
+`.github/copilot-instructions.md` is what works out of the box. Same
+content in both, generated from one source rather than maintained
+twice, and not a symlink because a Windows checkout with
+`core.symlinks=false` turns one into a text file containing a path,
+silently.
 
 It's `instructions`, not `agents`, because that's what these files are —
 VS Code and GitHub both call them "custom instructions". An *agent*

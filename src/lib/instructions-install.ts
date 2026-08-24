@@ -12,12 +12,15 @@ import instructionsBlock from '../instructions/block.md';
  * model. This command writes neither of those.
  *
  * Two files, not one, because no single file is read by default by both
- * targets: Windsurf reads a root AGENTS.md always-on (it replaced
- * .windsurfrules as the maintained convention), while VS Code's
- * AGENTS.md support is experimental and off behind `chat.useAgentsMdFile`
- * — there, `.github/copilot-instructions.md` is what works out of the
- * box. The same content goes in both, generated from one source rather
- * than maintained twice.
+ * targets. Devin Desktop (what Windsurf became in June 2026; its Cascade
+ * agent reached end-of-life that July, replaced by Devin Local) reads a
+ * root AGENTS.md as an always-on rule, feeding it into the same rules
+ * engine that backs .devin/rules/ — so there's no need to also write
+ * .devin/rules/, and the legacy .windsurf/ directory is superseded.
+ * VS Code's AGENTS.md support, by contrast, is experimental and off
+ * behind `chat.useAgentsMdFile`; there `.github/copilot-instructions.md`
+ * is what works out of the box. The same content goes in both,
+ * generated from one source rather than maintained twice.
  *
  * Deliberately not a symlink: a Windows checkout with
  * core.symlinks=false turns one into a text file containing a path,
@@ -37,9 +40,22 @@ export interface InstructionsTarget {
 }
 
 export const TARGETS: InstructionsTarget[] = [
-  { file: 'AGENTS.md', read_by: 'Windsurf (also Cursor, Devin, Codex)' },
+  { file: 'AGENTS.md', read_by: 'Devin Desktop / Windsurf (also Cursor, Codex)' },
   { file: path.join('.github', 'copilot-instructions.md'), read_by: 'GitHub Copilot in VS Code' },
 ];
+
+/**
+ * Devin Desktop accepts `agents.md` as well as `AGENTS.md`. On a
+ * case-sensitive filesystem, writing the canonical spelling into a repo
+ * that already uses the lowercase one would leave two rule files both
+ * being read — so an existing variant wins over our preferred casing.
+ */
+export function resolveAgentsFile(fsLike: FileSystemLike, root: string): string {
+  for (const variant of ['AGENTS.md', 'agents.md']) {
+    if (fsLike.readFile(path.join(root, variant)) !== null) return variant;
+  }
+  return 'AGENTS.md';
+}
 
 export type BlockAction = 'created' | 'updated' | 'appended' | 'unchanged';
 
@@ -126,13 +142,14 @@ export function runInstructionsInstall(opts: {
   const files: InstructionsInstallResult['files'] = [];
 
   for (const target of TARGETS) {
-    const absolute = path.join(opts.root, target.file);
+    const file = target.file === 'AGENTS.md' ? resolveAgentsFile(fsLike, opts.root) : target.file;
+    const absolute = path.join(opts.root, file);
     const { content, action } = applyBlock(fsLike.readFile(absolute), block);
     if (!opts.dryRun && action !== 'unchanged') {
       fsLike.mkdirp(path.dirname(absolute));
       fsLike.writeFile(absolute, content);
     }
-    files.push({ file: target.file, read_by: target.read_by, action });
+    files.push({ file, read_by: target.read_by, action });
   }
 
   const warnings: string[] = [];

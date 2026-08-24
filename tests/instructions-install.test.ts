@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   applyBlock,
+  resolveAgentsFile,
   runInstructionsInstall,
   checkCopilotDisabled,
   BLOCK_START,
@@ -87,6 +88,25 @@ describe('checkCopilotDisabled', () => {
   });
 });
 
+describe('resolveAgentsFile', () => {
+  it('prefers the canonical AGENTS.md when the repo has neither', () => {
+    expect(resolveAgentsFile(fakeFs({}).fs, '/repo')).toBe('AGENTS.md');
+  });
+
+  it('writes into an existing lowercase agents.md rather than creating a second file', () => {
+    // Devin Desktop reads either spelling, so on a case-sensitive
+    // filesystem creating AGENTS.md alongside agents.md would leave two
+    // rule files both being fed to the agent.
+    const { fs } = fakeFs({ '/repo/agents.md': '# existing\n' });
+    expect(resolveAgentsFile(fs, '/repo')).toBe('agents.md');
+  });
+
+  it('keeps AGENTS.md when that is the one that exists', () => {
+    const { fs } = fakeFs({ '/repo/AGENTS.md': '# existing\n' });
+    expect(resolveAgentsFile(fs, '/repo')).toBe('AGENTS.md');
+  });
+});
+
 describe('runInstructionsInstall', () => {
   it('writes both files — neither target reads the other one by default', () => {
     const { fs, files } = fakeFs();
@@ -95,6 +115,16 @@ describe('runInstructionsInstall', () => {
     expect(result.files.map((f) => f.file)).toEqual(['AGENTS.md', '.github/copilot-instructions.md']);
     expect(files['/repo/AGENTS.md']).toContain(BLOCK);
     expect(files['/repo/.github/copilot-instructions.md']).toContain(BLOCK);
+  });
+
+  it('appends into an existing lowercase agents.md instead of making a duplicate', () => {
+    const { fs, files } = fakeFs({ '/repo/agents.md': '# Our repo\n' });
+    const result = runInstructionsInstall({ root: '/repo', fs, block: BLOCK });
+
+    expect(result.files[0]!.file).toBe('agents.md');
+    expect(result.files[0]!.action).toBe('appended');
+    expect(files['/repo/AGENTS.md']).toBeUndefined();
+    expect(files['/repo/agents.md']).toContain(BLOCK);
   });
 
   it('writes nothing at all on --dry-run', () => {
