@@ -216,9 +216,9 @@ src/auth.ts | 2 ++
 | **Pull requests** | |
 | `dova pr create` | Open a PR; auto-attaches whatever `dova link` recorded. |
 | `dova pr view [id\|url]` | A PR's detail, including comment threads. |
-| `dova pr comment <id> <text>` | Post a new comment thread. |
+| `dova pr comment <id> <text>` | Post a new comment thread. Omit `<text>` or pass `-` to read it from stdin. |
 | `dova pr comment show <id> <thread-id>` | Read a thread's full conversation — every comment, not just the last one. |
-| `dova pr comment reply <id> <thread-id> <text>` | Reply within an existing thread. `--resolve [status]` also resolves it in the same call. |
+| `dova pr comment reply <id> <thread-id> <text>` | Reply within an existing thread. `--resolve [status]` also resolves it in the same call; `-` reads the reply from stdin. |
 | `dova pr comment resolve <id> <thread-id> [status]` | Change a thread's status (`resolved` by default). |
 | **Pipelines** | |
 | `dova pipeline status` | Recent runs for a branch. |
@@ -233,7 +233,53 @@ src/auth.ts | 2 ++
 
 Every read command accepts `--json [fields]` and `--jq <expr>`; most
 accept `--web` to open the browser instead. `--no-color`/`$NO_COLOR`
-are respected everywhere.
+are respected everywhere, and `--no-color`'s sibling `--no-input` is
+covered under [Running without a terminal](#running-without-a-terminal).
+
+## Running without a terminal
+
+Agents, CI jobs, and anything on the end of a pipe have no one to answer
+a question. dova never prompts in that situation — it fails immediately
+instead, naming the flag that would have answered it and listing the
+real values to choose from:
+
+```console
+$ dova bug 'Null check missing'
+Error: Multiple teams in "MyProject" — which one?
+  Pass --team <name>.
+  Available: Platform, Payments
+  (dova is running without a terminal, so it cannot ask.)
+```
+
+An error costs milliseconds; a prompt nobody can answer hangs until
+something times out. `--team`, `--area`, `--iteration`, and `--like
+<id>` are the escape hatches, and `--area`/`--iteration` together skip
+team resolution altogether. Prompts that are *conveniences* rather than
+decisions — "save this to git config?", "switch to the branch that
+already links this?" — quietly take the safe answer instead of erroring,
+so nothing is written or checked out that wasn't asked for.
+
+This is detected from `stdin` not being a TTY; `--no-input` or
+`DOVA_NO_INPUT=1` force it on regardless.
+
+**Free text goes on stdin.** Anything typed on a command line is parsed
+by the shell before dova ever sees it — in bash `"...$total..."`
+expands to nothing and ``"...`npm test`..."`` *runs npm test*. dova
+can't recover text that was destroyed before it started, so anything
+containing backticks, `$`, or quotes should be piped in:
+
+```console
+$ dova pr comment 612 - <<'EOF'
+Use `npm test` to verify — the "total" field is $null.
+EOF
+Posted comment on PR #612 (thread #14).
+```
+
+Nothing in there is escaped, by you or by dova's caller. Short titles
+are fine inline as long as they're **single**-quoted (literal in bash,
+zsh and PowerShell alike); reach for stdin when the text contains an
+apostrophe or runs long. Every command taking free text accepts `-`,
+and `--title -` does the same for the flag form.
 
 ## How it resolves context
 

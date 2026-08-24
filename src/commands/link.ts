@@ -1,5 +1,5 @@
 import type { Command } from 'commander';
-import { addContextOptions, addJsonOption, addNoColorOption } from '../lib/command-helpers.js';
+import { addContextOptions, addJsonOption, addNoColorOption, addNoInputOption } from '../lib/command-helpers.js';
 import { emit, getColor } from '../lib/output.js';
 import { runLink, renderLinkHuman } from '../lib/link.js';
 
@@ -30,6 +30,7 @@ export function registerLinkCommand(program: Command): void {
   addContextOptions(cmd);
   addJsonOption(cmd);
   addNoColorOption(cmd);
+  addNoInputOption(cmd);
 
   cmd.action(async (ids: string[], opts: LinkFlags) => {
     const color = getColor(opts.color === false);

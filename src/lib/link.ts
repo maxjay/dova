@@ -8,6 +8,7 @@ import { fetchWorkItemsByIds, fieldValue } from './work-items.js';
 import { buildWiql } from './wiql.js';
 import { fetchWorkItemTypeStates, categoryOf } from './work-item-types.js';
 import { UserError, NotFoundError } from './errors.js';
+import { isInteractive, nonInteractiveError } from './interactive.js';
 import type { AzWorkItem } from '../types/azure-devops.js';
 
 export interface LinkPrompts {
@@ -15,12 +16,23 @@ export interface LinkPrompts {
   checkbox(config: {
     message: string;
     choices: Array<{ name: string; value: string; checked?: boolean }>;
+    /** Flag(s)/args that would have answered this, quoted back when dova can't prompt. */
+    nonInteractiveHint?: string[];
   }): Promise<string[]>;
 }
 
 const defaultLinkPrompts: LinkPrompts = {
-  confirm: (c) => inquirerConfirm(c),
-  checkbox: (c) => inquirerCheckbox(c),
+  // A "no" here means: don't switch branches. Checking out another
+  // branch unasked would move the working tree out from under whoever
+  // called us mid-task, so non-interactively this must never be a yes,
+  // even though the interactive default is.
+  confirm: (c) => (isInteractive() ? inquirerConfirm(c) : Promise.resolve(false)),
+  checkbox: ({ nonInteractiveHint, ...c }) => {
+    if (!isInteractive()) {
+      return Promise.reject(nonInteractiveError(c.message, nonInteractiveHint, c.choices.map((choice) => `#${choice.value}`)));
+    }
+    return inquirerCheckbox(c);
+  },
 };
 
 export interface LinkOptions {
@@ -150,6 +162,7 @@ export async function runLink(opts: LinkOptions): Promise<LinkResult> {
         value: String(c.id),
         checked: true,
       })),
+      nonInteractiveHint: ['Pass the ids you want directly, e.g. `dova link ' + openChildren.map((c) => c.id).join(' ') + '`.'],
     });
     finalIds.push(...selected.map(Number));
   }

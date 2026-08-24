@@ -14,6 +14,9 @@ export interface QuickCreateOptions {
   /** Re-run project/team resolution against a different project (e.g. a bug whose root cause is a shared library). */
   project?: string;
   team?: string;
+  /** Area/iteration set outright, skipping team-based resolution — see resolveCreateContext(). */
+  area?: string;
+  iteration?: string;
   reresolve?: boolean;
   /** Work item id to copy area/iteration from directly — see resolveCreateContext(). */
   like?: string;
@@ -83,7 +86,7 @@ export async function quickCreateWorkItem(runner: Runner, opts: QuickCreateOptio
     runner,
     ctx.orgUrl,
     projectResult.project,
-    { team: opts.team },
+    { team: opts.team, area: opts.area, iteration: opts.iteration },
     { cwd: opts.cwd, reresolve: opts.reresolve, like: opts.like, save: opts.save }
   );
 

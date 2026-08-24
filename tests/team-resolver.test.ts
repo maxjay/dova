@@ -203,6 +203,53 @@ function teamResolutionAz(teams = oneTeam) {
   };
 }
 
+describe('resolveCreateContext with --area/--iteration', () => {
+  it('given both, resolves nothing at all — no team lookup, no az call, no prompt', async () => {
+    const az = vi.fn(() => fail('should not call az when both paths are given outright'));
+    const runner = createFakeRunner({ git: gitConfigRunner({ 'dova.team': 'Platform' }).git, az });
+
+    const result = await resolveCreateContext(
+      runner,
+      ORG_URL,
+      PROJECT,
+      { area: 'MyProject\\Platform', iteration: 'MyProject\\Sprint 14' },
+      {}
+    );
+
+    expect(result).toEqual({
+      team: null,
+      areaPath: 'MyProject\\Platform',
+      iterationPath: 'MyProject\\Sprint 14',
+      warnings: [],
+      fromCache: false,
+      source: 'flags',
+    });
+    expect(az).not.toHaveBeenCalled();
+  });
+
+  it('given only --area, still resolves the iteration from the team but never re-resolves the area', async () => {
+    const az = vi.fn((args: string[]) => {
+      const joined = args.join(' ');
+      if (joined.startsWith('boards area team list')) return fail('area was given explicitly — should not be looked up');
+      if (joined.startsWith('boards iteration team list')) return okJson(currentIteration);
+      return fail(`unexpected az call: ${joined}`);
+    });
+    const runner = createFakeRunner({ git: gitConfigRunner({ 'dova.team': 'Platform' }).git, az });
+
+    const result = await resolveCreateContext(runner, ORG_URL, PROJECT, { area: 'MyProject\\Override' }, {});
+
+    expect(result.areaPath).toBe('MyProject\\Override');
+    expect(result.iterationPath).toBe('MyProject\\Sprint 3');
+  });
+
+  it('rejects --like together with --area, since --like already supplies both', async () => {
+    const runner = createFakeRunner({ git: gitConfigRunner({}).git, az: () => fail('should not reach az') });
+    await expect(
+      resolveCreateContext(runner, ORG_URL, PROJECT, { area: 'X' }, { like: '4821' })
+    ).rejects.toBeInstanceOf(UserError);
+  });
+});
+
 describe('resolveCreateContext', () => {
   it('--like copies area/iteration straight off the example ticket, bypassing team resolution', async () => {
     const az = vi.fn((args: string[]) =>
