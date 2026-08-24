@@ -106,11 +106,45 @@ export interface WorkItemRef {
   state: string | null;
 }
 
+/**
+ * Where a work item's actual content lives depends on its type and the
+ * project's process template. Reading only `System.Description` misses
+ * the point of the ticket for most types: an Agile Bug puts the detail
+ * in ReproSteps and often leaves Description empty, and a User Story or
+ * Feature states its real objective in AcceptanceCriteria. All three
+ * are stock fields across the out-of-box templates, and any that a
+ * given project doesn't use simply comes back absent.
+ */
+export const BODY_FIELDS: ReadonlyArray<{ field: string; label: string }> = [
+  { field: 'System.Description', label: 'Description' },
+  { field: 'Microsoft.VSTS.Common.AcceptanceCriteria', label: 'Acceptance Criteria' },
+  { field: 'Microsoft.VSTS.TCM.ReproSteps', label: 'Repro Steps' },
+];
+
+export interface WorkItemBody {
+  label: string;
+  text: string;
+}
+
+/** Every body field this item actually has, in the order above, HTML stripped. */
+export function workItemBody(item: AzWorkItem): WorkItemBody[] {
+  const body: WorkItemBody[] = [];
+  for (const { field, label } of BODY_FIELDS) {
+    const raw = fieldValue(item, field);
+    if (!raw) continue;
+    const text = stripHtml(raw).trim();
+    if (text) body.push({ label, text });
+  }
+  return body;
+}
+
 export interface WorkItemDetail extends WorkItemRef {
   assignedTo: string | null;
   areaPath: string | null;
   iterationPath: string | null;
   description: string | null;
+  /** Description, acceptance criteria, repro steps — whichever this item has. */
+  body: WorkItemBody[];
   parent: WorkItemRef | null;
   /** Direct children (e.g. a Feature's User Stories) — populated for any type, not just portfolio levels. */
   children: WorkItemRef[];
@@ -156,6 +190,7 @@ export async function gatherWorkItemDetail(
     areaPath: fieldValue(item, 'System.AreaPath'),
     iterationPath: fieldValue(item, 'System.IterationPath'),
     description: fieldValue(item, 'System.Description'),
+    body: workItemBody(item),
     parent: parentItem ? toRef(parentItem) : parentId ? { id: parentId, title: null, type: null, state: null } : null,
     children: children.map(toRef),
     url: buildWiWebUrl(orgUrl, project, item.id),
@@ -163,7 +198,10 @@ export async function gatherWorkItemDetail(
 }
 
 /** Human rendering of `WorkItemDetail`, shared by `dova wi view` and `dova view`. */
-export function renderWorkItemDetailHuman(detail: WorkItemDetail, color: ChalkInstance): void {
+/** Body text is the reason to read a ticket at all, so it's shown in full past this only with --full. */
+const BODY_TRUNCATE = 800;
+
+export function renderWorkItemDetailHuman(detail: WorkItemDetail, color: ChalkInstance, full = false): void {
   const lines: string[] = [
     `${color.bold(`#${detail.id}`)} ${detail.title ?? color.dim('(no title)')}`,
     `${color.dim(String(detail.type))} · ${color.dim(String(detail.state))}${detail.assignedTo ? ` · ${color.dim(`assigned to ${detail.assignedTo}`)}` : color.dim(' · unassigned')}`,
@@ -176,6 +214,19 @@ export function renderWorkItemDetailHuman(detail: WorkItemDetail, color: ChalkIn
     lines.push(`Parent:    #${p.id}${p.title ? ` ${p.title}` : ''}${p.type ? color.dim(` [${p.type}]`) : ''}`);
   }
   lines.push('', color.dim(detail.url));
+
+  // What the ticket actually asks for. Without this, `wi view` reports
+  // a ticket's metadata and none of its substance, which sends the
+  // reader straight back to the browser.
+  for (const section of detail.body) {
+    lines.push('', color.bold(section.label));
+    if (full || section.text.length <= BODY_TRUNCATE) {
+      lines.push(section.text);
+    } else {
+      lines.push(`${section.text.slice(0, BODY_TRUNCATE).trimEnd()}…`);
+      lines.push(color.dim('  … truncated — pass --full for the rest'));
+    }
+  }
 
   if (detail.children.length > 0) {
     lines.push('', color.bold(`Children (${detail.children.length})`));

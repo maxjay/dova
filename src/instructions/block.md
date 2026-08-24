@@ -39,6 +39,14 @@ contain. Anything still in the working tree appears below it under
 have just edited files and want them reflected in `Diff`, commit
 first; don't assume an empty `Diff` means you changed nothing.
 
+**`summarize` already includes each linked ticket's body** under a
+`Description:` (or `Acceptance Criteria:`) heading beneath its title.
+That is the ticket — you have read it. Don't follow a `summarize` with
+`dova wi view` on the same ids to "get the details"; there are no more
+details, and it costs an `az` call per ticket. Reach for `wi view` only
+for an id `summarize` didn't cover, or when you need a ticket's parent
+and children.
+
 ### Worked example: implement a ticket
 
 ```console
@@ -218,8 +226,15 @@ iteration from an existing ticket) are the escape hatches; `--area` and
 
 ### Parsing output
 
-Add `--json` (optionally `--json <fields>`, plus `--jq <expr>`) to any
-read command when parsing — the human output is for humans and its
-shape is not a contract. Exit codes distinguish causes: `1` bad input,
-`2` not found, `3` `az` missing or logged out, `4` an `az`/`git` call
-failed.
+`--json` (optionally `--json <fields>`, plus `--jq <expr>`) is available
+on every read command, for when something downstream has to parse the
+result rather than read it — the human output is for humans and its
+shape is not a contract.
+
+Pick one **before** you run the command. Running a command and then
+re-running it with `--json` pays for the whole thing twice, `az` call
+included, for output you already have. If you can read the human output,
+you don't need the JSON.
+
+Exit codes distinguish causes: `1` bad input, `2` not found, `3` `az`
+missing or logged out, `4` an `az`/`git` call failed.
