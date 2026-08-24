@@ -22,6 +22,11 @@ link. If `dova` is not installed, stop and say so.
 
 Add `--full` to `view` or `summarize` when text is truncated.
 
+Depth lives in `.agents/skills/dova/references/` (or
+`~/.agents/skills/dova/references/`). Open `work-items.md`,
+`pull-requests.md`, `automation.md` or `pipelines.md` when working on
+that area — never all of them.
+
 ### Start work
 
 ```console

@@ -355,3 +355,18 @@ describe('the shipped instructions block', () => {
     expect(instructions).toMatch(/\bNever\b/);
   });
 });
+
+describe('the block and the skill agree', () => {
+  it('every reference the block names is one the installer actually writes', async () => {
+    const { default: block } = await import('../src/instructions/block.md');
+    const { SKILL_FILES } = await import('../src/lib/instructions-install.js');
+
+    // The block points at these paths so an agent whose host doesn't
+    // auto-load skills can still open them with its own file tools. A
+    // name that drifts out of the skill tree sends it to a 404.
+    const named = [...block.matchAll(/`([a-z-]+\.md)`/g)].map((m) => m[1]!);
+    expect(named.length).toBeGreaterThan(0);
+    const shipped = SKILL_FILES.map((f) => f.relative.replace('references/', ''));
+    for (const name of named) expect(shipped).toContain(name);
+  });
+});
