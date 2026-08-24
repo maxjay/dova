@@ -19,7 +19,7 @@ export function registerInstructionsCommand(program: Command): void {
   const instructions = program
     .command('instructions')
     .alias('agents')
-    .description('Set up coding agents (Windsurf, GitHub Copilot) to use dova correctly');
+    .description('Set up coding agents (Devin Desktop/Windsurf, GitHub Copilot) to use dova correctly');
 
   const init = instructions
     .command('init')
