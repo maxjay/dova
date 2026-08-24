@@ -259,60 +259,40 @@ describe('the shipped instructions block', () => {
     expect(instructions).not.toMatch(/dev\.azure\.com\/(?!contoso)/);
   });
 
-  it('the global block fits the 6,000-character cap on a global rules file', async () => {
-    const { default: globalBlock } = await import('../src/instructions/global-block.md');
+  it('fits the tightest cap it is installed under, so one block serves both scopes', async () => {
+    const { default: instructions } = await import('../src/instructions/block.md');
 
-    // Devin's global rules file is capped at 6,000 — half the workspace
-    // limit — which is why the global install ships a separate, shorter
-    // block rather than the same text.
+    // A workspace rule file allows 12,000; a global rules file only
+    // 6,000. Holding the single block to the smaller number is what
+    // removes the need for a second, shorter copy to keep in step.
     //
     // Measured wrapped and in *bytes*. Wrapped because the markers and
     // generated-by note are part of what gets loaded; bytes because the
-    // cap comes from a secondary source that doesn't say whether it
-    // counts bytes or characters, and this block is full of multi-byte
-    // glyphs (✗ ✓ — ·) — 58 bytes' worth. Bytes is the stricter reading,
-    // so it's the safe one to hold ourselves to.
-    const wrapped = applyBlock(null, globalBlock).content;
+    // cap comes from a secondary source that doesn't say which it
+    // counts, and the block carries multi-byte glyphs (✗ ✓ —). Bytes is
+    // the stricter reading.
+    const wrapped = applyBlock(null, instructions).content;
     expect(Buffer.byteLength(wrapped, 'utf8')).toBeLessThan(6_000);
-    // States the rule outright rather than making it conditional on the
-    // remote: a condition would have the agent check where the repo is
-    // hosted before it can act, every time, for no gain.
-    expect(globalBlock).not.toMatch(/when a repo'?s git remote/i);
-    // The rules that cannot be enforced in code survive the condensing.
-    expect(globalBlock).toMatch(/dova link[\s\S]*dova pr create/);
-    expect(globalBlock).toMatch(/az boards work-item update/);
-    // And so does the few-shot. Asserted structurally rather than by
-    // heading text, which is presentation and gets reworded.
-    expect(countWorkedExamples(globalBlock)).toBeGreaterThanOrEqual(3);
-    expect(countWrongRightPairs(globalBlock)).toBeGreaterThanOrEqual(3);
   });
 
-  it('stays under the 12,000-character cap a workspace rule file is allowed', async () => {
+  it('shows worked examples and states prohibitions outright', async () => {
     const { default: instructions } = await import('../src/instructions/block.md');
 
-    // AGENTS.md feeds the same rules engine as .devin/rules/, where a
-    // workspace rule file is capped at 12,000 characters. Going over
-    // doesn't error — the content is just not all there — so this is
-    // the only thing that would catch it.
-    expect(instructions.length).toBeLessThan(12_000);
-  });
-
-  it('teaches by worked example, not by rules alone', async () => {
-    const { default: instructions } = await import('../src/instructions/block.md');
-
-    expect(countWorkedExamples(instructions)).toBeGreaterThanOrEqual(4);
-    expect(countWrongRightPairs(instructions)).toBeGreaterThanOrEqual(4);
+    // Deliberately few: two command-and-output walkthroughs for the
+    // flows an agent actually runs, and the prohibitions as a bare list
+    // rather than a worked example each. Examples are the expensive
+    // form; spend them only where output shape is the lesson.
+    expect(countWorkedExamples(instructions)).toBeGreaterThanOrEqual(2);
+    expect(countWrongRightPairs(instructions)).toBeGreaterThanOrEqual(1);
+    expect((instructions.match(/\*\*Never\*\*/g) ?? []).length).toBeGreaterThanOrEqual(5);
   });
 
   it('commands rather than explains — imperative, not hedged', async () => {
     const { default: instructions } = await import('../src/instructions/block.md');
-    const { default: globalBlock } = await import('../src/instructions/global-block.md');
 
     // Hedging wastes the budget and reads as optional. An instruction
-    // block should tell the agent what to do, not reason with it.
-    for (const block of [instructions, globalBlock]) {
-      expect(block).not.toMatch(/\byou may want to\b|\bit'?s worth\b|\bconsider (?:using|running)\b/i);
-      expect(block).toMatch(/\bNever\b/);
-    }
+    // block tells the agent what to do; it does not reason with it.
+    expect(instructions).not.toMatch(/\byou may want to\b|\bit'?s worth\b|\bconsider (?:using|running)\b/i);
+    expect(instructions).toMatch(/\bNever\b/);
   });
 });

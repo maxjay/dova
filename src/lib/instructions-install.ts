@@ -3,7 +3,6 @@ import os from 'node:os';
 import fs from 'node:fs';
 import { UserError } from './errors.js';
 import instructionsBlock from '../instructions/block.md';
-import globalInstructionsBlock from '../instructions/global-block.md';
 
 /* ------------------------------------------------------------------ *
  * `dova instructions init` — writes dova's usage rules into the files
@@ -125,9 +124,9 @@ export const nodeFs: FileSystemLike = {
  * per-repo install (--repo) is for committing them so teammates get
  * them too, which is a different job.
  *
- * The global block is a separate, shorter file rather than the same
- * text, because Devin's global rules file is capped at 6,000
- * characters — half the workspace limit, and less than the repo block.
+ * One block serves both scopes. Devin's global rules file is capped at
+ * 6,000 — half the workspace limit — which the block fits with room to
+ * spare, so there is no second, shorter version to keep in step.
  * ------------------------------------------------------------------ */
 
 /** Where each editor keeps its user-level settings, per platform. */
@@ -246,7 +245,7 @@ export function runInstructionsInstall(opts: {
 
   if (scope === 'global') {
     const home = opts.home ?? os.homedir();
-    const block = opts.block ?? globalInstructionsBlock;
+    const block = opts.block ?? instructionsBlock;
     for (const target of resolveGlobalTargets(fsLike, home)) {
       const action = writeTarget(fsLike, target.path, block, target.preamble, dryRun);
       files.push({ file: target.label, read_by: target.read_by, action });
