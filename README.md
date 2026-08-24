@@ -227,6 +227,8 @@ src/auth.ts | 2 ++
 | **Linking** | |
 | `dova link <id...>` | Associate the current branch with one or more work items. |
 | `dova unlink [id...]` | Undo it — remove id(s) from the current branch (`--all` for everything). |
+| **Agents** | |
+| `dova agents init` | Teach Windsurf/Copilot to use dova — writes `AGENTS.md` and `.github/copilot-instructions.md`. |
 | **Everything else** | |
 | `dova api <path>` | An authenticated REST call, for anything not wrapped above. |
 | `dova completion <shell>` | Shell completions, generated from the live command tree. |
@@ -280,6 +282,40 @@ are fine inline as long as they're **single**-quoted (literal in bash,
 zsh and PowerShell alike); reach for stdin when the text contains an
 apostrophe or runs long. Every command taking free text accepts `-`,
 and `--title -` does the same for the flag form.
+
+## Teaching a coding agent to use it
+
+`dova` is already usable by anything that can run a shell command. What
+an agent can't get from `--help` is the ordering that matters (`dova
+link` before `dova pr create`, or the PR opens with no ticket attached
+and no error), the boundaries it shouldn't route around with raw `az`,
+and the stdin rule above. `dova agents init` writes that down:
+
+```console
+$ dova agents init
+Wrote:
+  ✓ AGENTS.md  — Windsurf (also Cursor, Devin, Codex)
+      created
+  ✓ .github/copilot-instructions.md  — GitHub Copilot in VS Code
+      created
+```
+
+Two files rather than one because neither target reads the other's by
+default: Windsurf reads a root `AGENTS.md` always-on (it replaced
+`.windsurfrules` as the maintained convention), while VS Code's
+`AGENTS.md` support is experimental and off behind
+`chat.useAgentsMdFile` — there, `.github/copilot-instructions.md` is
+what works out of the box. Same content in both, generated from one
+source rather than maintained twice, and not a symlink because a
+Windows checkout with `core.symlinks=false` turns one into a text file
+containing a path, silently.
+
+Content goes inside a `<!-- dova:start -->` / `<!-- dova:end -->` block,
+so re-running updates it in place and never disturbs anything else in
+those files. `--dry-run` shows what would change. If a
+`.vscode/settings.json` in the repo has switched Copilot's instruction
+files off, it says so — otherwise everything would be written correctly
+and silently ignored.
 
 ## How it resolves context
 
