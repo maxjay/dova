@@ -212,7 +212,7 @@ src/auth.ts | 2 ++
 | **Status & discovery** | |
 | `dova status` | Active PR, linked work items, recent pipeline runs, comment threads — one screen. |
 | `dova list` | Every branch with a linked ticket, most recently active first. |
-| `dova summarize [branch\|id\|url]` | A catch-up report: linked tickets, commit log, diff stat since it diverged — for a branch or a PR. Default: current branch. Fetches first if it's not local. |
+| `dova summarize [branch\|id\|url]` | A catch-up report: linked tickets, commit log, diff stat since it diverged — for a branch or a PR. Default: current branch. Fetches first if it's not local, and reports uncommitted work separately. |
 | `dova view <id\|url>` | Read a work item or PR from a bare id or a pasted link — detects which. |
 | **Work items** | |
 | `dova bug <title>` | File a Bug fast. `--at file:line` for a permalink, `--link` to link it in the same call. |

@@ -205,3 +205,75 @@ describe('gatherSummary', () => {
     expect(result.diffStat).toContain('a.ts');
   });
 });
+
+/* ------------------------------------------------------------------ *
+ * Uncommitted work. `diffStat` compares commits, so work still in the
+ * tree is invisible to it — which reads as "no changes" on a branch
+ * you're actively working on.
+ * ------------------------------------------------------------------ */
+
+describe('gatherSummary uncommitted changes', () => {
+  function runnerOn(currentBranch: string, tree: { stat?: string; untracked?: string; patch?: string } = {}) {
+    return createFakeRunner({
+      git: (args) => {
+        if (args[0] === 'rev-parse' && args.includes('--abbrev-ref')) return ok(currentBranch);
+        if (args[0] === 'rev-parse' && args.includes('--verify') && args[args.length - 1] === 'refs/heads/fix/200') return ok('deadbeef');
+        if (args[0] === 'rev-parse' && args.includes('--verify') && args[args.length - 1] === 'origin/develop') return ok('deadbeef');
+        if (args[0] === 'config') return fail('', 1);
+        if (args[0] === 'log') return ok('');
+        if (args[0] === 'ls-files') return ok(tree.untracked ?? '');
+        // Working-tree diffs are the ones against HEAD; the branch diff
+        // uses a base...head range.
+        if (args[0] === 'diff' && args.includes('HEAD') && args.includes('--stat')) return ok(tree.stat ?? '');
+        if (args[0] === 'diff' && args.includes('HEAD')) return ok(tree.patch ?? '');
+        if (args[0] === 'diff' && args.includes('--stat')) return ok(' src/committed.ts | 1 +');
+        if (args[0] === 'diff') return ok('committed patch');
+        return fail(`unexpected git call: ${args.join(' ')}`);
+      },
+      az: () => okJson([]),
+    });
+  }
+
+  it('reports staged and unstaged work separately from the branch diff', async () => {
+    const runner = runnerOn('fix/200', { stat: ' src/a.ts | 2 +-\n 1 file changed' });
+    const result = await gatherSummary(runner, 'fix/200', { org: 'contoso', project: 'MyProject', base: 'develop' });
+
+    expect(result.uncommitted?.stat).toContain('src/a.ts');
+    // Not folded into the committed diff — that would misrepresent the branch.
+    expect(result.diffStat).toContain('src/committed.ts');
+    expect(result.diffStat).not.toContain('src/a.ts');
+  });
+
+  it('lists untracked files, which git diff cannot see at all', async () => {
+    const runner = runnerOn('fix/200', { untracked: 'notes.txt\nscratch/tmp.ts' });
+    const result = await gatherSummary(runner, 'fix/200', { org: 'contoso', project: 'MyProject', base: 'develop' });
+
+    expect(result.uncommitted?.untracked).toEqual(['notes.txt', 'scratch/tmp.ts']);
+  });
+
+  it('omits the section entirely when the tree is clean', async () => {
+    const runner = runnerOn('fix/200');
+    const result = await gatherSummary(runner, 'fix/200', { org: 'contoso', project: 'MyProject', base: 'develop' });
+
+    expect(result.uncommitted).toBeUndefined();
+  });
+
+  it('says nothing about the working tree when summarizing a branch you are not on', async () => {
+    // There is no working tree for another branch (or a PR) to inspect —
+    // reporting this one's changes against it would be plainly wrong.
+    const runner = runnerOn('some-other-branch', { stat: ' src/a.ts | 2 +-' });
+    const result = await gatherSummary(runner, 'fix/200', { org: 'contoso', project: 'MyProject', base: 'develop' });
+
+    expect(result.uncommitted).toBeUndefined();
+  });
+
+  it('includes the working-tree patch only with --full', async () => {
+    const runner = runnerOn('fix/200', { stat: ' src/a.ts | 2 +-', patch: 'working tree patch' });
+
+    const compact = await gatherSummary(runner, 'fix/200', { org: 'contoso', project: 'MyProject', base: 'develop' });
+    expect(compact.uncommitted?.patch).toBeUndefined();
+
+    const full = await gatherSummary(runner, 'fix/200', { org: 'contoso', project: 'MyProject', base: 'develop' }, { full: true });
+    expect(full.uncommitted?.patch).toBe('working tree patch');
+  });
+});
