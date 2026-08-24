@@ -33,6 +33,12 @@ you.
 url, or a branch name, and fetches the branch first if it isn't local,
 so it works on a PR nobody here has checked out.
 
+Its `Diff` section is **committed work only** — that's what a PR would
+contain. Anything still in the working tree appears below it under
+`Uncommitted`, and only when summarizing the branch you're on. If you
+have just edited files and want them reflected in `Diff`, commit
+first; don't assume an empty `Diff` means you changed nothing.
+
 ### Worked example: implement a ticket
 
 ```console
