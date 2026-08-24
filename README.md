@@ -51,6 +51,13 @@ az login
 `dova` reads your `az` credentials and configuration; it doesn't manage
 its own.
 
+Working with a coding agent? Run this once per repo, and commit what it
+writes — see [Teaching a coding agent to use it](#teaching-a-coding-agent-to-use-it):
+
+```sh
+dova instructions init
+```
+
 ## Usage
 
 Read the ticket, then start work — `dova` records the link, git does
