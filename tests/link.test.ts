@@ -187,3 +187,85 @@ describe('runLink without a terminal', () => {
     expect(result.switchedToExisting).toBeFalsy();
   });
 });
+
+/* ------------------------------------------------------------------ *
+ * Concurrency. Every `az` invocation starts a Python interpreter —
+ * ~2-3s on Windows before any network — so independent calls running
+ * one after another, rather than the requests themselves, dominate how
+ * long `dova link` takes. These assert overlap, not just correctness:
+ * re-serializing the calls would still return the right answer.
+ * ------------------------------------------------------------------ */
+
+function linkGit() {
+  return (args: string[]) => {
+    if (args[0] === 'rev-parse' && args.includes('--is-inside-work-tree')) return ok('true');
+    if (args[0] === 'remote') return ok('https://dev.azure.com/contoso/MyProject/_git/my-repo');
+    if (args[0] === 'rev-parse' && args.includes('--abbrev-ref')) return ok('fix/200');
+    if (args[0] === 'config' && args.includes('--get-regexp')) return fail('', 1);
+    if (args[0] === 'config') return ok('');
+    return fail(`unexpected git call: ${args.join(' ')}`);
+  };
+}
+
+function child(id: number, type: string, parent: number): AzWorkItem {
+  return {
+    id,
+    url: '',
+    fields: { 'System.Title': `child ${id}`, 'System.WorkItemType': type, 'System.State': 'Active', 'System.Parent': parent },
+  };
+}
+
+describe('runLink az call scheduling', () => {
+  it('starts the seed fetch and the children query together — neither needs the other', async () => {
+    const events: string[] = [];
+    const runner = createFakeRunner({
+      git: linkGit(),
+      az: async (args) => {
+        const kind = args.join(' ').includes('System.Parent') ? 'children' : 'seeds';
+        events.push(`start:${kind}`);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        events.push(`end:${kind}`);
+        return okJson(kind === 'children' ? [] : [item(200, 'A')]);
+      },
+    });
+
+    await runLink({ ids: ['200'], runner, org: 'contoso', project: 'MyProject', color: COLOR });
+
+    // Both started before either finished.
+    expect(events[0]!.startsWith('start:')).toBe(true);
+    expect(events[1]!.startsWith('start:')).toBe(true);
+  });
+
+  it("fetches every child type's state schema at once, not one type at a time", async () => {
+    const events: string[] = [];
+    const runner = createFakeRunner({
+      git: linkGit(),
+      az: async (args) => {
+        const joined = args.join(' ');
+        if (joined.includes('System.Parent')) return okJson([child(201, 'Bug', 200), child(202, 'Task', 200)]);
+        if (joined.includes('workitemtypes')) {
+          const type = joined.includes('Bug') ? 'Bug' : 'Task';
+          events.push(`start:${type}`);
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          events.push(`end:${type}`);
+          return okJson({ value: [{ name: 'Active', category: 'InProgress' }] });
+        }
+        return okJson([item(200, 'A')]);
+      },
+    });
+
+    await runLink({
+      ids: ['200'],
+      runner,
+      org: 'contoso',
+      project: 'MyProject',
+      color: COLOR,
+      prompts: { confirm: async () => false, checkbox: async () => ['201', '202'] },
+    });
+
+    // Two distinct types, both schema fetches in flight before either returned.
+    expect(events.filter((e) => e.startsWith('start:'))).toHaveLength(2);
+    expect(events[0]!.startsWith('start:')).toBe(true);
+    expect(events[1]!.startsWith('start:')).toBe(true);
+  });
+});
