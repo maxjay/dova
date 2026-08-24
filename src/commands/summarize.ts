@@ -47,6 +47,17 @@ export interface SummarizeResult {
   diffStat: string;
   fullLog?: string;
   fullDiff?: string;
+  /**
+   * Work in the tree that isn't committed yet, and so isn't in `diffStat`
+   * — which compares commits. Only present when summarizing the branch
+   * currently checked out; there's no working tree to inspect for any
+   * other branch, or for a PR.
+   */
+  uncommitted?: {
+    stat: string;
+    untracked: string[];
+    patch?: string;
+  };
 }
 
 const DESCRIPTION_TRUNCATE = 500;
@@ -194,6 +205,27 @@ export async function gatherSummary(
     result.fullDiff = (await tryGit(runner, ['diff', `${diffable}...${headRef}`], { cwd })) ?? '';
   }
 
+  // `diffStat` above compares commits, so anything still in the working
+  // tree is invisible to it — which reads as "no changes" on a branch
+  // you're actively working on. Report it, but separately: folding
+  // uncommitted work into the branch's diff would misrepresent what's
+  // actually on the branch. Only possible for the checked-out branch.
+  const currentBranch = await tryGit(runner, ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd });
+  if (currentBranch === branch) {
+    // `diff HEAD` covers staged and unstaged together; untracked files
+    // are invisible to git diff entirely, so they're listed separately.
+    const [stat, untrackedRaw, patch] = await Promise.all([
+      tryGit(runner, ['diff', '--stat', 'HEAD'], { cwd }),
+      tryGit(runner, ['ls-files', '--others', '--exclude-standard'], { cwd }),
+      opts.full ? tryGit(runner, ['diff', 'HEAD'], { cwd }) : Promise.resolve(null),
+    ]);
+    const untracked = (untrackedRaw ?? '').split('\n').filter(Boolean);
+    if (stat || untracked.length > 0) {
+      result.uncommitted = { stat: stat ?? '', untracked };
+      if (patch) result.uncommitted.patch = patch;
+    }
+  }
+
   return result;
 }
 
@@ -230,6 +262,18 @@ function renderSummarizeHuman(result: SummarizeResult, full: boolean, color: Ret
     lines.push(result.fullDiff || color.dim('  (no changes)'));
   } else {
     lines.push(result.diffStat.trim() || color.dim('  (no changes)'));
+  }
+
+  if (result.uncommitted) {
+    lines.push('', color.bold('Uncommitted') + color.dim(' — in the working tree, not in the diff above'));
+    if (full && result.uncommitted.patch !== undefined) {
+      lines.push(result.uncommitted.patch);
+    } else if (result.uncommitted.stat.trim()) {
+      lines.push(result.uncommitted.stat.trim());
+    }
+    for (const file of result.uncommitted.untracked) {
+      lines.push(`  ${color.green('?')} ${file}${color.dim(' (untracked)')}`);
+    }
   }
 
   process.stdout.write(`${lines.join('\n')}\n`);

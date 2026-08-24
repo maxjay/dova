@@ -1,5 +1,5 @@
 import type { Command } from 'commander';
-import { defaultRunner } from '../lib/exec.js';
+import { defaultRunner, type Runner } from '../lib/exec.js';
 import { gitConfigGet } from '../lib/config.js';
 import { resolveContext, buildPrWebUrl } from '../lib/context.js';
 import { addContextOptions, addJsonOption, addJqOption, addNoColorOption, addWebOption } from '../lib/command-helpers.js';
@@ -64,8 +64,13 @@ export interface StatusResult {
   warnings: string[];
 }
 
-export async function gatherStatus(flags: StatusFlags, cwd?: string): Promise<StatusResult> {
-  const runner = defaultRunner;
+export async function gatherStatus(
+  flags: StatusFlags,
+  cwd?: string,
+  // Injectable like every other gather function here, so the call
+  // scheduling below can be asserted without a real az.
+  runner: Runner = defaultRunner
+): Promise<StatusResult> {
   const ctx = await resolveContext(runner, {
     org: flags.org,
     orgUrl: flags.orgUrl,
@@ -83,15 +88,49 @@ export async function gatherStatus(flags: StatusFlags, cwd?: string): Promise<St
   }
   const { orgUrl, project, repo, branch } = { ...ctx, repo: ctx.repo, branch: ctx.branch };
 
-  // Call 1: the active PR for this branch, if any.
-  const pr = await fetchActivePrForBranch(runner, orgUrl, project, repo, branch);
+  // Wave 1 — everything that doesn't need to know whether a PR exists.
+  // Each `az` invocation pays for a Python interpreter start (~2-3s on
+  // Windows before any network), so what matters here is the number of
+  // *sequential* calls, not the number of calls. Pipeline runs need only
+  // the branch, and the tracked-id config reads are git, not az.
+  const [pr, runs, tracked, primary] = await Promise.all([
+    fetchActivePrForBranch(runner, orgUrl, project, repo, branch),
+    fetchRecentRuns(runner, orgUrl, project, branch, 3),
+    gitConfigGet(runner, `branch.${branch}.dova-workitems`, { cwd }),
+    gitConfigGet(runner, `branch.${branch}.dova-primary`, { cwd }),
+  ]);
 
-  // Call 2: work items — from the PR when one exists, otherwise from what
-  // `dova link` tracked locally (see lib/config.ts's branch.<name>.dova-workitems).
+  const pipelineRuns: PipelineRunSummary[] = runs.map((r) => ({
+    id: r.id,
+    name: r.definition?.name ?? `#${r.buildNumber}`,
+    status: r.status,
+    result: r.result,
+    queueTime: r.queueTime ?? null,
+    url: r._links?.web?.href ?? buildRunWebUrl(orgUrl, project, r.id),
+  }));
+
+  // Wave 2 — the two calls that genuinely need the PR, together. Work
+  // items come from the PR when there is one, otherwise from what `dova
+  // link` recorded locally; comment threads only exist with a PR, and
+  // have no native `az` command, so they go through `az rest`.
+  const trackedIds = (tracked ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map(Number);
+
+  const [rawWorkItems, rawThreads] = await Promise.all([
+    pr
+      ? fetchPrWorkItems(runner, orgUrl, pr.pullRequestId)
+      : trackedIds.length > 0
+        ? fetchWorkItemsByIds(runner, orgUrl, trackedIds)
+        : Promise.resolve([]),
+    pr ? fetchDiscussionThreads(runner, orgUrl, project, repo, pr.pullRequestId) : Promise.resolve([]),
+  ]);
+
   let workItems: WorkItemSummary[];
   if (pr) {
-    const raw = await fetchPrWorkItems(runner, orgUrl, pr.pullRequestId);
-    workItems = raw.map((w) => ({
+    workItems = rawWorkItems.map((w) => ({
       id: w.id,
       title: w.fields?.['System.Title'] ?? null,
       state: w.fields?.['System.State'] ?? null,
@@ -99,16 +138,8 @@ export async function gatherStatus(flags: StatusFlags, cwd?: string): Promise<St
       primary: false,
     }));
   } else {
-    const tracked = await gitConfigGet(runner, `branch.${branch}.dova-workitems`, { cwd });
-    const primary = await gitConfigGet(runner, `branch.${branch}.dova-primary`, { cwd });
-    const ids = (tracked ?? '')
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean)
-      .map(Number);
-    const hydrated = ids.length > 0 ? await fetchWorkItemsByIds(runner, orgUrl, ids) : [];
-    const byId = new Map(hydrated.map((w) => [w.id, w]));
-    workItems = ids.map((id) => {
+    const byId = new Map(rawWorkItems.map((w) => [w.id, w]));
+    workItems = trackedIds.map((id) => {
       const w = byId.get(id);
       return {
         id,
@@ -120,23 +151,9 @@ export async function gatherStatus(flags: StatusFlags, cwd?: string): Promise<St
     });
   }
 
-  // Call 3: last 3 pipeline runs for this branch.
-  const runs = await fetchRecentRuns(runner, orgUrl, project, branch, 3);
-  const pipelineRuns: PipelineRunSummary[] = runs.map((r) => ({
-    id: r.id,
-    name: r.definition?.name ?? `#${r.buildNumber}`,
-    status: r.status,
-    result: r.result,
-    queueTime: r.queueTime ?? null,
-    url: r._links?.web?.href ?? buildRunWebUrl(orgUrl, project, r.id),
-  }));
-
-  // Call 4: comment threads (only meaningful once there's a PR). The
-  // azure-devops CLI extension has no native `pr thread list` command, so
-  // this goes through `az rest` against the PR threads endpoint.
   let threads: ThreadSummary[] = [];
-  if (pr) {
-    const raw = await fetchDiscussionThreads(runner, orgUrl, project, repo, pr.pullRequestId);
+  {
+    const raw = rawThreads;
     threads = raw
       .map((t) => {
         const last = t.comments[t.comments.length - 1];
