@@ -195,7 +195,8 @@ describe('runInstructionsInstall (--repo)', () => {
 
     expect(result.scope).toBe('repo');
 
-    expect(result.files.map((f) => f.file)).toEqual(['AGENTS.md', '.github/copilot-instructions.md']);
+    expect(result.files.map((f) => f.file)).toContain('AGENTS.md');
+    expect(result.files.map((f) => f.file)).toContain('.github/copilot-instructions.md');
     expect(files['/repo/AGENTS.md']).toContain(BLOCK);
     expect(files['/repo/.github/copilot-instructions.md']).toContain(BLOCK);
   });
@@ -246,6 +247,64 @@ function countWorkedExamples(block: string): number {
 function countWrongRightPairs(block: string): number {
   return (block.match(/^✗ /gm) ?? []).length;
 }
+
+describe('the skill', () => {
+  it('installs beside the always-on block, in the cross-agent location', () => {
+    const { fs, files } = fakeFs({}, [vscodeUserDir('/home/u')]);
+    const result = runInstructionsInstall({ home: '/home/u', fs, block: BLOCK });
+
+    // ~/.agents/skills is what Devin Desktop and Copilot both read.
+    expect(files['/home/u/.agents/skills/dova/SKILL.md']).toBeDefined();
+    expect(files['/home/u/.agents/skills/dova/references/work-items.md']).toBeDefined();
+    expect(result.files.some((f) => f.file.endsWith('.agents/skills/dova/'))).toBe(true);
+  });
+
+  it('writes the skill for a --repo install too', () => {
+    const { fs, files } = fakeFs();
+    runInstructionsInstall({ scope: 'repo', root: '/repo', fs, block: BLOCK });
+    expect(files['/repo/.agents/skills/dova/SKILL.md']).toBeDefined();
+  });
+
+  it('writes nothing on --dry-run', () => {
+    const { fs, files } = fakeFs({}, [vscodeUserDir('/home/u')]);
+    runInstructionsInstall({ home: '/home/u', dryRun: true, fs, block: BLOCK });
+    expect(Object.keys(files)).toHaveLength(0);
+  });
+
+  it('is a no-op on re-run', () => {
+    const { fs } = fakeFs({}, [vscodeUserDir('/home/u')]);
+    runInstructionsInstall({ home: '/home/u', fs, block: BLOCK });
+    const second = runInstructionsInstall({ home: '/home/u', fs, block: BLOCK });
+    expect(second.files.find((f) => f.file.endsWith('skills/dova/'))!.action).toBe('unchanged');
+  });
+
+  it('keeps SKILL.md surface-level and puts the depth in references', async () => {
+    const { SKILL_FILES } = await import('../src/lib/instructions-install.js');
+    const skill = SKILL_FILES.find((f) => f.relative === 'SKILL.md')!;
+    const references = SKILL_FILES.filter((f) => f.relative.startsWith('references/'));
+
+    // The point of the split: SKILL.md is what gets loaded when the
+    // skill matches, so depth belongs one level further down where it
+    // costs nothing until a reference is actually opened.
+    const depth = references.reduce((n, f) => n + f.content.length, 0);
+    expect(depth).toBeGreaterThan(skill.content.length * 3);
+
+    // A description is what hosts show always-on; without one the skill
+    // never triggers at all.
+    expect(skill.content).toMatch(/^---\nname: dova\ndescription: .+/);
+    // Sharp conditions, not "read everything" — that defeats the point.
+    expect(skill.content).toMatch(/references\/work-items\.md/);
+    expect(skill.content).toMatch(/Do not read them all/i);
+  });
+
+  it('never sends the reader to the browser or to raw az', async () => {
+    const { SKILL_FILES } = await import('../src/lib/instructions-install.js');
+    for (const file of SKILL_FILES) {
+      expect(file.content).not.toMatch(/dev\.azure\.com\/(?!contoso)/);
+      expect(file.content).not.toMatch(/\byou may want to\b|\bit'?s worth\b/i);
+    }
+  });
+});
 
 describe('the shipped instructions block', () => {
   it('imports as real content and carries the rules that cannot be enforced in code', async () => {

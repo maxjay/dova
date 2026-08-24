@@ -3,6 +3,11 @@ import os from 'node:os';
 import fs from 'node:fs';
 import { UserError } from './errors.js';
 import instructionsBlock from '../instructions/block.md';
+import skillMd from '../instructions/skill/SKILL.md';
+import skillWorkItems from '../instructions/skill/references/work-items.md';
+import skillPullRequests from '../instructions/skill/references/pull-requests.md';
+import skillAutomation from '../instructions/skill/references/automation.md';
+import skillPipelines from '../instructions/skill/references/pipelines.md';
 
 /* ------------------------------------------------------------------ *
  * `dova instructions init` — writes dova's usage rules into the files
@@ -177,6 +182,51 @@ export function resolveGlobalTargets(fsLike: FileSystemLike, home: string): Reso
   return targets;
 }
 
+/* ------------------------------------------------------------------ *
+ * The skill.
+ *
+ * The always-on block above has to carry only what must never fail to
+ * load — the prohibitions, and which command answers which question.
+ * It is capped, and everything that doesn't fit was being cut.
+ *
+ * Depth goes here instead: full worked scenarios, per-area detail, the
+ * behaviour of every flag that matters. SKILL.md stays surface-level
+ * and says when to open which reference; hosts show only its name and
+ * description until the agent decides it applies, so this costs
+ * nothing until it's needed and has no size limit when it is.
+ *
+ * `.agents/skills/` is the cross-agent location: Devin Desktop reads
+ * it and `~/.agents/skills/`, and Copilot reads both plus
+ * `~/.copilot/skills/`. One tree serves both editors.
+ * ------------------------------------------------------------------ */
+
+export const SKILL_FILES: ReadonlyArray<{ relative: string; content: string }> = [
+  { relative: 'SKILL.md', content: skillMd },
+  { relative: 'references/work-items.md', content: skillWorkItems },
+  { relative: 'references/pull-requests.md', content: skillPullRequests },
+  { relative: 'references/automation.md', content: skillAutomation },
+  { relative: 'references/pipelines.md', content: skillPipelines },
+];
+
+/**
+ * Written whole rather than spliced into a marked block: unlike
+ * AGENTS.md, this tree is dova's alone, so there is no surrounding
+ * content of the user's to preserve.
+ */
+function writeSkill(fsLike: FileSystemLike, skillRoot: string, dryRun: boolean): BlockAction {
+  let action: BlockAction = 'unchanged';
+  for (const file of SKILL_FILES) {
+    const absolute = path.join(skillRoot, ...file.relative.split('/'));
+    if (fsLike.readFile(absolute) === file.content) continue;
+    action = action === 'unchanged' ? (fsLike.readFile(absolute) === null ? 'created' : 'updated') : action;
+    if (!dryRun) {
+      fsLike.mkdirp(path.dirname(absolute));
+      fsLike.writeFile(absolute, file.content);
+    }
+  }
+  return action;
+}
+
 export type InstallScope = 'global' | 'repo';
 
 export interface InstructionsInstallResult {
@@ -250,6 +300,11 @@ export function runInstructionsInstall(opts: {
       const action = writeTarget(fsLike, target.path, block, target.preamble, dryRun);
       files.push({ file: target.label, read_by: target.read_by, action });
     }
+    files.push({
+      file: '~/.agents/skills/dova/',
+      read_by: 'Devin Desktop and Copilot, on demand',
+      action: writeSkill(fsLike, path.join(home, '.agents', 'skills', 'dova'), dryRun),
+    });
     return { scope, root: home, files, warnings, dryRun };
   }
 
@@ -262,6 +317,12 @@ export function runInstructionsInstall(opts: {
     const action = writeTarget(fsLike, path.join(root, file), block, undefined, dryRun);
     files.push({ file, read_by: target.read_by, action });
   }
+
+  files.push({
+    file: '.agents/skills/dova/',
+    read_by: 'Devin Desktop and Copilot, on demand',
+    action: writeSkill(fsLike, path.join(root, '.agents', 'skills', 'dova'), dryRun),
+  });
 
   const copilotWarning = checkCopilotDisabled(fsLike, root);
   if (copilotWarning) warnings.push(copilotWarning);
