@@ -1,12 +1,12 @@
 import { describe, it, expect } from 'vitest';
 import {
   applyBlock,
-  runAgentsInstall,
+  runInstructionsInstall,
   checkCopilotDisabled,
   BLOCK_START,
   BLOCK_END,
   type FileSystemLike,
-} from '../src/lib/agents-install.js';
+} from '../src/lib/instructions-install.js';
 
 const BLOCK = 'RULES GO HERE';
 
@@ -87,10 +87,10 @@ describe('checkCopilotDisabled', () => {
   });
 });
 
-describe('runAgentsInstall', () => {
+describe('runInstructionsInstall', () => {
   it('writes both files — neither target reads the other one by default', () => {
     const { fs, files } = fakeFs();
-    const result = runAgentsInstall({ root: '/repo', fs, block: BLOCK });
+    const result = runInstructionsInstall({ root: '/repo', fs, block: BLOCK });
 
     expect(result.files.map((f) => f.file)).toEqual(['AGENTS.md', '.github/copilot-instructions.md']);
     expect(files['/repo/AGENTS.md']).toContain(BLOCK);
@@ -99,7 +99,7 @@ describe('runAgentsInstall', () => {
 
   it('writes nothing at all on --dry-run', () => {
     const { fs, files, made } = fakeFs();
-    const result = runAgentsInstall({ root: '/repo', dryRun: true, fs, block: BLOCK });
+    const result = runInstructionsInstall({ root: '/repo', dryRun: true, fs, block: BLOCK });
 
     expect(result.files.every((f) => f.action === 'created')).toBe(true);
     expect(Object.keys(files)).toHaveLength(0);
@@ -108,7 +108,7 @@ describe('runAgentsInstall', () => {
 
   it('creates .github/ when it does not exist', () => {
     const { fs, made } = fakeFs();
-    runAgentsInstall({ root: '/repo', fs, block: BLOCK });
+    runInstructionsInstall({ root: '/repo', fs, block: BLOCK });
     expect(made.some((d) => d.endsWith('.github'))).toBe(true);
   });
 
@@ -116,7 +116,7 @@ describe('runAgentsInstall', () => {
     const { fs } = fakeFs({
       '/repo/.vscode/settings.json': '{"github.copilot.chat.codeGeneration.useInstructionFiles": false}',
     });
-    const result = runAgentsInstall({ root: '/repo', fs, block: BLOCK });
+    const result = runInstructionsInstall({ root: '/repo', fs, block: BLOCK });
 
     // The files are still written correctly — they'd just be ignored.
     expect(result.files.every((f) => f.action === 'created')).toBe(true);
@@ -126,7 +126,7 @@ describe('runAgentsInstall', () => {
 
 describe('the shipped instructions block', () => {
   it('imports as real content and carries the rules that cannot be enforced in code', async () => {
-    const { default: instructions } = await import('../src/agents/instructions.md');
+    const { default: instructions } = await import('../src/instructions/block.md');
 
     expect(instructions.length).toBeGreaterThan(500);
     // The two irreducible rules — everything else became a guard in code.
