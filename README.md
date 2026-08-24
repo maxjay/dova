@@ -227,8 +227,8 @@ src/auth.ts | 2 ++
 | **Linking** | |
 | `dova link <id...>` | Associate the current branch with one or more work items. |
 | `dova unlink [id...]` | Undo it — remove id(s) from the current branch (`--all` for everything). |
-| **Agents** | |
-| `dova agents init` | Teach Windsurf/Copilot to use dova — writes `AGENTS.md` and `.github/copilot-instructions.md`. |
+| **Agent setup** | |
+| `dova instructions init` | Teach Windsurf/Copilot to use dova — writes `AGENTS.md` and `.github/copilot-instructions.md`. |
 | **Everything else** | |
 | `dova api <path>` | An authenticated REST call, for anything not wrapped above. |
 | `dova completion <shell>` | Shell completions, generated from the live command tree. |
@@ -289,10 +289,10 @@ and `--title -` does the same for the flag form.
 an agent can't get from `--help` is the ordering that matters (`dova
 link` before `dova pr create`, or the PR opens with no ticket attached
 and no error), the boundaries it shouldn't route around with raw `az`,
-and the stdin rule above. `dova agents init` writes that down:
+and the stdin rule above. `dova instructions init` writes that down:
 
 ```console
-$ dova agents init
+$ dova instructions init
 Wrote:
   ✓ AGENTS.md  — Windsurf (also Cursor, Devin, Codex)
       created
@@ -309,6 +309,12 @@ what works out of the box. Same content in both, generated from one
 source rather than maintained twice, and not a symlink because a
 Windows checkout with `core.symlinks=false` turns one into a text file
 containing a path, silently.
+
+It's `instructions`, not `agents`, because that's what these files are —
+VS Code and GitHub both call them "custom instructions". An *agent*
+(`.agent.md`, `.github/agents/`) is a different thing: a persona with its
+own role, tools, and model, which this doesn't write. `dova agents init`
+still works as an alias, since `AGENTS.md` is the name people know.
 
 Content goes inside a `<!-- dova:start -->` / `<!-- dova:end -->` block,
 so re-running updates it in place and never disturbs anything else in
