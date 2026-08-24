@@ -331,6 +331,15 @@ characters and a global rules file only 6,000; the block fits the
 smaller of the two with room to spare, so there is no second, shorter
 copy to keep in step.
 
+**The block is only the surface.** It carries what must never fail to
+load — the prohibitions, and which command answers which question —
+and nothing else, because it is capped. The depth ships as a skill at
+`~/.agents/skills/dova/` (`.agents/skills/dova/` for `--repo`), which
+Devin Desktop and Copilot both read: `SKILL.md` says when to open which
+reference, and `references/` holds the worked scenarios in full. Hosts
+show only the skill's name and description until the agent decides it
+applies, so ~12 KB of detail costs nothing until something needs it.
+
 It's `instructions`, not `agents`, because that's what these files are —
 VS Code and GitHub both call them "custom instructions". An *agent*
 (`.agent.md`, `.github/agents/`) is a different thing: a persona with its
