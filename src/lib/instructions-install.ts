@@ -126,9 +126,8 @@ export const nodeFs: FileSystemLike = {
  * them too, which is a different job.
  *
  * The global block is a separate, shorter file rather than the same
- * text: it's in context for *every* repo, including ones not hosted on
- * Azure DevOps, so it has to say when it applies — and Devin's global
- * rules file is capped at 6,000 characters, half the workspace limit.
+ * text, because Devin's global rules file is capped at 6,000
+ * characters — half the workspace limit, and less than the repo block.
  * ------------------------------------------------------------------ */
 
 /** Where each editor keeps its user-level settings, per platform. */

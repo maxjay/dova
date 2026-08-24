@@ -256,10 +256,10 @@ describe('the shipped instructions block', () => {
     // workspace limit — which is why the global install ships a separate,
     // shorter block rather than the same text.
     expect(globalBlock.length).toBeLessThan(6_000);
-    // It must say when it applies: unlike the repo-scoped block, it is in
-    // context for every repo, including ones not on Azure DevOps.
-    expect(globalBlock).toMatch(/dev\.azure\.com/);
-    expect(globalBlock).toMatch(/does not apply to repos hosted elsewhere/i);
+    // States the rule outright rather than making it conditional on the
+    // remote: a condition would have the agent check where the repo is
+    // hosted before it can act, every time, for no gain.
+    expect(globalBlock).not.toMatch(/when a repo'?s git remote/i);
     // The rules that cannot be enforced in code survive the condensing.
     expect(globalBlock).toMatch(/dova link[\s\S]*dova pr create/);
     expect(globalBlock).toMatch(/az boards work-item update/);

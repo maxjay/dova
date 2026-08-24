@@ -326,11 +326,10 @@ what works out of the box. Not a symlink between them, because a
 Windows checkout with `core.symlinks=false` turns one into a text file
 containing a path, silently.
 
-The global install ships a shorter, conditionally-framed block — it
-says to use `dova` *when a repo's remote points at Azure DevOps*, since
-unlike the repo-scoped one it's in context for every repo you open.
-Devin's global rules file is also capped at 6,000 characters, half the
-workspace limit.
+The global install ships a shorter block, because Devin's global rules
+file is capped at 6,000 characters — half the workspace limit, and less
+than the repo-scoped block needs. It keeps the command table, the
+link-before-PR rule, and the wrong/right pairs.
 
 It's `instructions`, not `agents`, because that's what these files are —
 VS Code and GitHub both call them "custom instructions". An *agent*

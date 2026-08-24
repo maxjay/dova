@@ -1,15 +1,13 @@
-## Azure DevOps repos: use `dova`
+## Azure DevOps work: use `dova`
 
-When a repo's git remote points at Azure DevOps (`dev.azure.com/…` or
-`…visualstudio.com`), use `dova` for work items, pull requests, and
-pipelines rather than calling `az boards` / `az repos` directly. It
-infers organization, project, and repo from the remote, so its commands
-need no `--org` or `--project` — and it records which branch corresponds
-to which work item, which raw `az` neither writes nor reads.
+Work items, pull requests, and pipelines live in Azure DevOps. Use
+`dova` for them rather than calling `az boards` / `az repos` directly:
+it infers organization, project, and repo from the git remote, so its
+commands need no `--org` or `--project` — and it records which branch
+corresponds to which work item, which raw `az` neither writes nor reads.
 
-This does not apply to repos hosted elsewhere. If `dova` is not
-installed, say so rather than falling back to `az` — the fallback looks
-like it worked and quietly loses the linkage.
+If `dova` is not installed, say so rather than falling back to `az` —
+the fallback looks like it worked and quietly loses the linkage.
 
 `dova <command> --help` lists flags. Below is what `--help` can't tell
 you.
