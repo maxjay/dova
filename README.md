@@ -326,10 +326,10 @@ what works out of the box. Not a symlink between them, because a
 Windows checkout with `core.symlinks=false` turns one into a text file
 containing a path, silently.
 
-The global install ships a shorter block, because Devin's global rules
-file is capped at 6,000 characters — half the workspace limit, and less
-than the repo-scoped block needs. It keeps the command table, the
-link-before-PR rule, and the wrong/right pairs.
+One block serves both scopes. A workspace rule file allows 12,000
+characters and a global rules file only 6,000; the block fits the
+smaller of the two with room to spare, so there is no second, shorter
+copy to keep in step.
 
 It's `instructions`, not `agents`, because that's what these files are —
 VS Code and GitHub both call them "custom instructions". An *agent*
