@@ -108,24 +108,6 @@ export async function runLink(opts: LinkOptions): Promise<LinkResult> {
     ]);
   }
 
-  // Call: fetch the seed items in one batch — also validates they exist.
-  const seedItems = await fetchWorkItemsByIds(runner, ctx.orgUrl, seedIds);
-  const seedById = new Map(seedItems.map((i) => [i.id, i]));
-  for (const id of seedIds) {
-    if (!seedById.has(id)) throw new UserError(`Work item #${id} was not found.`);
-  }
-  const workItemById = new Map<number, AzWorkItem>(seedItems.map((i) => [i.id, i]));
-
-  const statesByType = new Map<string, Awaited<ReturnType<typeof fetchWorkItemTypeStates>>>();
-  async function isCompletedOrRemoved(item: AzWorkItem): Promise<boolean> {
-    const type = itemType(item);
-    if (!statesByType.has(type)) {
-      statesByType.set(type, await fetchWorkItemTypeStates(runner, ctx.orgUrl, ctx.project, type));
-    }
-    const category = categoryOf(statesByType.get(type)!, itemState(item));
-    return category === 'Completed' || category === 'Removed';
-  }
-
   // Any id with open children (whatever it's called — Epic, Feature, or
   // just a Bug someone's been using as a checklist) expands into a
   // multi-select of them, straight off the ticket's own hierarchy.
@@ -133,10 +115,41 @@ export async function runLink(opts: LinkOptions): Promise<LinkResult> {
     fields: ['System.Id', 'System.Title', 'System.State', 'System.WorkItemType', 'System.Parent'],
     where: [{ field: 'System.Parent', op: 'IN', value: seedIds }],
   });
-  const children = (await runAzJson<AzWorkItem[] | null>(runner, [
-    'boards', 'query', '--wiql', childrenWiql, '--organization', ctx.orgUrl,
-  ])) ?? [];
+
+  // Both calls need only the seed ids and the already-resolved context,
+  // so neither has to wait for the other. Every `az` invocation pays for
+  // a Python interpreter start — around 2-3 seconds on Windows before
+  // any network happens — which makes serialized independent calls, not
+  // the requests themselves, the dominant cost of this command.
+  const [seedItems, children] = await Promise.all([
+    fetchWorkItemsByIds(runner, ctx.orgUrl, seedIds),
+    runAzJson<AzWorkItem[] | null>(runner, [
+      'boards', 'query', '--wiql', childrenWiql, '--organization', ctx.orgUrl,
+    ]).then((result) => result ?? []),
+  ]);
+
+  const seedById = new Map(seedItems.map((i) => [i.id, i]));
+  for (const id of seedIds) {
+    if (!seedById.has(id)) throw new UserError(`Work item #${id} was not found.`);
+  }
+  const workItemById = new Map<number, AzWorkItem>(seedItems.map((i) => [i.id, i]));
   for (const child of children) workItemById.set(child.id, child);
+
+  // One `az` call per distinct child type, all at once, rather than
+  // lazily inside the loop below where they'd go one at a time. No
+  // children means no types, and so no calls at all — the common case.
+  const uniqueChildTypes = [...new Set(children.map(itemType))];
+  const stateSchemas = await Promise.all(
+    uniqueChildTypes.map((type) => fetchWorkItemTypeStates(runner, ctx.orgUrl, ctx.project, type))
+  );
+  const statesByType = new Map(uniqueChildTypes.map((type, i) => [type, stateSchemas[i]!]));
+
+  function isCompletedOrRemoved(item: AzWorkItem): boolean {
+    const states = statesByType.get(itemType(item));
+    if (!states) return false;
+    const category = categoryOf(states, itemState(item));
+    return category === 'Completed' || category === 'Removed';
+  }
 
   let finalIds: number[] = [];
   for (const seedId of seedIds) {
@@ -146,10 +159,7 @@ export async function runLink(opts: LinkOptions): Promise<LinkResult> {
       continue;
     }
 
-    const openChildren: AzWorkItem[] = [];
-    for (const child of ownChildren) {
-      if (!(await isCompletedOrRemoved(child))) openChildren.push(child);
-    }
+    const openChildren = ownChildren.filter((child) => !isCompletedOrRemoved(child));
     if (openChildren.length === 0) {
       warnings.push(`#${seedId} (${itemTitle(seedById.get(seedId)!)}) has children, but none are open — nothing to link from it.`);
       continue;
