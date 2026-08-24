@@ -3,7 +3,7 @@ import { defaultRunner, runAzJson, tryGit, resolveOrFetchBranchRef, type Runner 
 import { resolveContext, type ResolvedContext } from '../lib/context.js';
 import { gitConfigGet } from '../lib/config.js';
 import { fetchActivePrForBranch, fetchPrById } from '../lib/pr.js';
-import { fetchWorkItemsByIds, fieldValue, stripHtml } from '../lib/work-items.js';
+import { fetchWorkItemsByIds, fieldValue, workItemBody, type WorkItemBody } from '../lib/work-items.js';
 import { parsePrUrl, parseIdArgument, looksLikeUrl } from '../lib/urls.js';
 import { addContextOptions, addJsonOption, addJqOption, addNoColorOption } from '../lib/command-helpers.js';
 import { emit, getColor } from '../lib/output.js';
@@ -27,6 +27,8 @@ export interface SummarizeWorkItem {
   state: string | null;
   title: string | null;
   description: string | null;
+  /** Description, acceptance criteria, repro steps — whichever the ticket has. */
+  body: WorkItemBody[];
   primary: boolean;
 }
 
@@ -124,13 +126,16 @@ export async function resolveDiffableRef(runner: Runner, base: string, cwd: stri
 }
 
 function toSummarizeWorkItem(item: AzWorkItem, primaryId: number | undefined): SummarizeWorkItem {
-  const description = fieldValue(item, 'System.Description');
+  const body = workItemBody(item);
   return {
     id: item.id,
     type: fieldValue(item, 'System.WorkItemType'),
     state: fieldValue(item, 'System.State'),
     title: fieldValue(item, 'System.Title'),
-    description: description ? stripHtml(description) : null,
+    // Kept for compatibility; `body` is the one that carries acceptance
+    // criteria and repro steps as well as the description.
+    description: body.length > 0 ? body.map((s) => s.text).join('\n\n') : null,
+    body,
     primary: item.id === primaryId,
   };
 }
@@ -194,7 +199,9 @@ export async function gatherSummary(
     baseSource: base.source,
     workItems: ids.map((id) => {
       const item = items.find((i) => i.id === id);
-      return item ? toSummarizeWorkItem(item, primaryId) : { id, type: null, state: null, title: null, description: null, primary: id === primaryId };
+      return item
+        ? toSummarizeWorkItem(item, primaryId)
+        : { id, type: null, state: null, title: null, description: null, body: [], primary: id === primaryId };
     }),
     commits,
     diffStat,
@@ -238,10 +245,14 @@ function renderSummarizeHuman(result: SummarizeResult, full: boolean, color: Ret
     for (const wi of result.workItems) {
       const marker = wi.primary ? color.cyan(' (primary)') : '';
       lines.push(color.bold(`#${wi.id} [${wi.type ?? '?'}/${wi.state ?? '?'}] ${wi.title ?? '(no title)'}${marker}`));
-      if (wi.description) {
-        const { shown, truncated } = full ? { shown: wi.description, truncated: false } : truncate(wi.description, DESCRIPTION_TRUNCATE);
+      // Labelled per section: for a User Story the objective is in the
+      // acceptance criteria, not the description, and running them
+      // together would hide which is which.
+      for (const section of wi.body) {
+        lines.push(color.dim(`${section.label}:`));
+        const { shown, truncated } = full ? { shown: section.text, truncated: false } : truncate(section.text, DESCRIPTION_TRUNCATE);
         lines.push(shown);
-        if (truncated) lines.push(color.dim('  … pass --full for the whole description'));
+        if (truncated) lines.push(color.dim('  … pass --full for the rest'));
       }
       lines.push('');
     }

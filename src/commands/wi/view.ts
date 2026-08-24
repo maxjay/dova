@@ -16,6 +16,7 @@ interface WiViewFlags {
   json?: string | boolean;
   jq?: string;
   web?: boolean;
+  full?: boolean;
   color: boolean;
 }
 
@@ -23,6 +24,8 @@ export function registerWiViewCommand(wi: Command): void {
   const cmd = wi
     .command('view <id-or-url>')
     .description("View a work item's detail (parent + children), given its id or a link to it");
+
+  cmd.option('--full', "show the ticket's description/acceptance criteria in full, not truncated");
 
   addContextOptions(cmd);
   addJsonOption(cmd);
@@ -58,6 +61,6 @@ export function registerWiViewCommand(wi: Command): void {
       return;
     }
 
-    await emit(detail, opts, () => renderWorkItemDetailHuman(detail, color));
+    await emit(detail, opts, () => renderWorkItemDetailHuman(detail, color, Boolean(opts.full)));
   });
 }

@@ -30,6 +30,7 @@ you.
 $ dova wi view 4821
 #4821 Login redirects to the wrong page after sign-in
 Bug · Active · assigned to Jane Doe
+Description: The session token isn't null-checked before...
 
 $ git checkout -b fix/4821-login   # git's job — dova never creates branches
 $ dova link 4821
@@ -52,13 +53,10 @@ error**.
 
 ```console
 $ dova status                     # lists open threads with their ids
-  ...
   Comment Threads
     #4  open  /src/auth.ts:42  Jane Doe  "Can you also handle the nu.."
 
 $ dova pr comment show 612 4      # read the WHOLE thread first
-Thread #4 on PR #612 · /src/auth.ts:42 · active
-
 SonarQube · 10:00Z
   Extract the validation logic — cognitive complexity.
 Jane Doe · 10:15Z
@@ -76,7 +74,7 @@ Set thread #4 on PR #612 to "fixed".
 The status table only shows the *last* comment — the earlier ones
 usually carry the actual request, so `comment show` before acting.
 
-### Red CI, and reviewing someone else's PR
+### Red CI
 
 ```console
 $ dova pipeline log
@@ -84,31 +82,15 @@ Task: npm test
 FAIL src/auth.test.ts
   ✕ redirects to /dashboard on valid token
   Expected: "/dashboard"  Received: "/undefined"
-
-$ dova summarize 785        # no checkout, no local branch needed
-Branch: feature/305-dark-mode
-compared against origin/main
-
-#305 [User Story/Active] Add dark mode (primary)
-
-Diff
-src/theme.ts | 42 ++++++++++++++
 ```
 
 Fix what `pipeline log` reports. Don't re-run hoping it passes.
 
-### Filing a bug mid-task
-
-```console
-$ dova bug 'Null check missing on empty session token' --at src/auth.ts:88 --link
-Created Bug #5219
-Linked work items:
-  #4821 [Bug] Login redirects to the wrong page (primary)
-  #5219 [Bug] Null check missing on empty session token
-```
-
-`--at` permalinks that line; `--link` attaches it to the current
-branch, so it rides along on the same PR.
+`dova summarize 785` reviews someone else's PR the same way — ticket
+bodies, commits and diff, with no checkout and no local branch. And
+`dova bug 'Null check missing' --at src/auth.ts:88 --link` files what
+you find as you go: `--at` permalinks that line, `--link` attaches it
+to the current branch so it rides along on the same PR.
 
 ### Common mistakes
 
@@ -122,6 +104,17 @@ branch, so it rides along on the same PR.
 **Expecting `summarize` to show uncommitted edits.** Its `Diff` is
 committed work only; anything still in the tree appears below under
 `Uncommitted`. An empty `Diff` doesn't mean you changed nothing.
+
+**Re-fetching what you already have.** `summarize` prints each linked
+ticket's body under its title — that *is* the ticket, don't go and open
+each one again. And choose human or `--json` output before running, not
+after; a second call re-pays the whole `az` cost for output you have.
+
+```console
+✗ dova summarize && dova wi view 3917455
+✗ dova wi view 3917455 && dova wi view 3917455 --json
+✓ dova summarize            # you now have all three tickets
+```
 
 **Closing a ticket after merge.** Don't. `dova pr create` passes
 `--transition-work-items`, so Azure DevOps moves linked items itself on
@@ -156,16 +149,12 @@ Every command taking free text accepts `-` for stdin (`--title -` for
 the flag form). Short titles are fine inline **single**-quoted.
 
 **Retrying a command that asked a question.** With no terminal, `dova`
-never prompts — it fails immediately, naming the flag that answers it
-and listing the real values. Read the error and re-run with that flag.
+never prompts — it fails naming the flag that answers it and listing
+the real values, so read the error and re-run with that flag.
 
 ```console
-$ dova bug 'Something broke'
 Error: Multiple teams in "MyProject" — which one?
-  Pass --team <name>.
-  Available: Platform, Payments
-
-✓ dova bug 'Something broke' --team Platform
+  Pass --team <name>.  Available: Platform, Payments
 ```
 
 `--team`, `--area`, `--iteration` and `--like <id>` are the escape

@@ -146,7 +146,17 @@ describe('gatherSummary', () => {
     expect(result.base).toBe('origin/develop');
     expect(result.baseSource).toBe('flag');
     expect(result.workItems).toEqual([
-      { id: 200, type: 'Bug', state: 'Active', title: 'Fix the bug', description: 'Root cause: null check', primary: true },
+      {
+        id: 200,
+        type: 'Bug',
+        state: 'Active',
+        title: 'Fix the bug',
+        description: 'Root cause: null check',
+        // Labelled sections, so a reader can tell the ticket's body from
+        // its metadata rather than going and re-opening the ticket.
+        body: [{ label: 'Description', text: 'Root cause: null check' }],
+        primary: true,
+      },
     ]);
     expect(result.commits).toEqual([
       { sha: 'abc123', subject: 'Fix the null check' },

@@ -252,12 +252,18 @@ describe('the shipped instructions block', () => {
   it('the global block fits the 6,000-character cap on a global rules file', async () => {
     const { default: globalBlock } = await import('../src/instructions/global-block.md');
 
-    // Devin's global rules file is capped at 6,000 characters — half the
-    // workspace limit — which is why the global install ships a separate,
-    // shorter block rather than the same text. Measured *wrapped*, since
-    // the markers and generated-by note are part of what gets loaded and
-    // the headroom here is thin.
-    expect(applyBlock(null, globalBlock).content.length).toBeLessThan(6_000);
+    // Devin's global rules file is capped at 6,000 — half the workspace
+    // limit — which is why the global install ships a separate, shorter
+    // block rather than the same text.
+    //
+    // Measured wrapped and in *bytes*. Wrapped because the markers and
+    // generated-by note are part of what gets loaded; bytes because the
+    // cap comes from a secondary source that doesn't say whether it
+    // counts bytes or characters, and this block is full of multi-byte
+    // glyphs (✗ ✓ — ·) — 58 bytes' worth. Bytes is the stricter reading,
+    // so it's the safe one to hold ourselves to.
+    const wrapped = applyBlock(null, globalBlock).content;
+    expect(Buffer.byteLength(wrapped, 'utf8')).toBeLessThan(6_000);
     // States the rule outright rather than making it conditional on the
     // remote: a condition would have the agent check where the repo is
     // hosted before it can act, every time, for no gain.
