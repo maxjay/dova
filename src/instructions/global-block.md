@@ -33,10 +33,8 @@ Bug · Active · assigned to Jane Doe
 
 $ git checkout -b fix/4821-login   # git's job — dova never creates branches
 $ dova link 4821
-Branch: fix/4821-login
-
 Linked work items:
-  #4821 [Bug] Login redirects to the wrong page after sign-in (primary)
+  #4821 [Bug] Login redirects to the wrong page (primary)
 
 # ...implement, commit...
 
@@ -61,10 +59,10 @@ $ dova status                     # lists open threads with their ids
 $ dova pr comment show 612 4      # read the WHOLE thread first
 Thread #4 on PR #612 · /src/auth.ts:42 · active
 
-SonarQube · 2026-08-22T10:00:00Z
-  Fix this cognitive complexity issue by extracting the validation logic.
-Jane Doe · 2026-08-22T10:15:00Z
-  Can you also handle the null case here while you're at it?
+SonarQube · 10:00Z
+  Extract the validation logic — cognitive complexity.
+Jane Doe · 10:15Z
+  Can you also handle the null case while you're here?
 
 # ...fix, commit, push...
 
@@ -105,12 +103,12 @@ Fix what `pipeline log` reports. Don't re-run hoping it passes.
 $ dova bug 'Null check missing on empty session token' --at src/auth.ts:88 --link
 Created Bug #5219
 Linked work items:
-  #4821 [Bug] Login redirects to the wrong page after sign-in (primary)
+  #4821 [Bug] Login redirects to the wrong page (primary)
   #5219 [Bug] Null check missing on empty session token
 ```
 
-`--at` builds a permalink to that line; `--link` attaches it to the
-current branch so it rides along on the same PR.
+`--at` permalinks that line; `--link` attaches it to the current
+branch, so it rides along on the same PR.
 
 ### Common mistakes
 
@@ -120,6 +118,10 @@ current branch so it rides along on the same PR.
 ✗ dova pr view 612          # threads and status — no code
 ✓ dova summarize 612        # the actual diff, fetched if not local
 ```
+
+**Expecting `summarize` to show uncommitted edits.** Its `Diff` is
+committed work only; anything still in the tree appears below under
+`Uncommitted`. An empty `Diff` doesn't mean you changed nothing.
 
 **Closing a ticket after merge.** Don't. `dova pr create` passes
 `--transition-work-items`, so Azure DevOps moves linked items itself on
@@ -166,8 +168,8 @@ Error: Multiple teams in "MyProject" — which one?
 ✓ dova bug 'Something broke' --team Platform
 ```
 
-`--team`, `--area`, `--iteration`, and `--like <id>` are the escape
-hatches; `--area` and `--iteration` together skip team resolution.
+`--team`, `--area`, `--iteration` and `--like <id>` are the escape
+hatches; the middle two together skip team resolution.
 
 ### Parsing output
 
