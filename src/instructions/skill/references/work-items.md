@@ -2,9 +2,9 @@
 
 ## Reading
 
-`dova view <id>` reads a work item or a PR — it detects which. It
-replaces `dova wi view`. Use `dova wi view` only when you specifically
-want a work item and the id might collide with a PR id.
+`dova view <id>` reads a work item or a PR — it detects which. Use it.
+`dova wi view` exists and behaves identically for work items; reach for
+it only when an id could be either and you mean the work item.
 
 ```console
 $ dova view 4821

@@ -54,7 +54,18 @@ EOF
 
 The quoted heredoc delimiter (`<<'EOF'`, not `<<EOF`) is what disables
 expansion. Every command taking free text accepts `-` for stdin;
-`--title -` does the same for the flag form.
+`--title -` and `--description -` do the same for the flag forms.
+
+Something has to be told to read it. Piping into a command where
+nothing asked for stdin is an error, not a silent drop:
+
+```console
+$ cat body.md | dova pr create --title 'feat: thing'
+Error: Something is piped into `dova pr create`, but nothing was told to read it.
+  Pass --description - to use it as the PR description (or --title - for the title).
+```
+
+Only one flag per command can read stdin — there is only one of it.
 
 Short titles are fine inline if **single**-quoted — single quotes are
 literal in bash, zsh and PowerShell alike. They cannot carry an

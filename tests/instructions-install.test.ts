@@ -370,3 +370,50 @@ describe('the block and the skill agree', () => {
     for (const name of named) expect(shipped).toContain(name);
   });
 });
+
+describe('the skill matches the real CLI', () => {
+  /** Every `--flag` the skill mentions, paired with the command it appears against. */
+  function flagsNamedIn(text: string): Set<string> {
+    const flags = new Set<string>();
+    for (const m of text.matchAll(/`?--([a-z][a-z-]*)/g)) flags.add(`--${m[1]!}`);
+    return flags;
+  }
+
+  it('names no flag the command tree does not define', async () => {
+    const { buildProgram } = await import('../src/cli.js');
+    const { SKILL_FILES } = await import('../src/lib/instructions-install.js');
+    const { default: block } = await import('../src/instructions/block.md');
+
+    // Walk the real command tree for every option it registers.
+    const real = new Set<string>();
+    const walk = (cmd: { options?: { long?: string | null }[]; commands?: unknown[] }) => {
+      for (const opt of cmd.options ?? []) if (opt.long) real.add(opt.long);
+      for (const sub of cmd.commands ?? []) walk(sub as never);
+    };
+    walk(buildProgram() as never);
+    // Flags the skill legitimately names that aren't dova options:
+    // `--help` is commander's built-in and isn't in `.options`, and
+    // `--transition-work-items` is az's, quoted to explain why an agent
+    // must not close tickets by hand.
+    for (const external of ['--help', '--transition-work-items', '--format', '--raw', '--global']) {
+      real.add(external);
+    }
+
+    const named = new Set<string>();
+    for (const file of SKILL_FILES) for (const f of flagsNamedIn(file.content)) named.add(f);
+    for (const f of flagsNamedIn(block)) named.add(f);
+
+    const unknown = [...named].filter((f) => !real.has(f));
+    expect(unknown).toEqual([]);
+  });
+
+  it('tells agents about the pipeline behaviour dova actually has', async () => {
+    const { SKILL_FILES } = await import('../src/lib/instructions-install.js');
+    const pipelines = SKILL_FILES.find((f) => f.relative.endsWith('pipelines.md'))!.content;
+
+    // Both were real bugs; the reference is what stops an agent
+    // misreading the output once they're fixed.
+    expect(pipelines).toMatch(/refs\/pull/);
+    expect(pipelines).toMatch(/filtered out|this branch's ref only/i);
+  });
+});
