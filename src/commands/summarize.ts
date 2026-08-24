@@ -1,6 +1,6 @@
 import type { Command } from 'commander';
 import { defaultRunner, runAzJson, tryGit, resolveOrFetchBranchRef, type Runner } from '../lib/exec.js';
-import { resolveContext, type ResolvedContext } from '../lib/context.js';
+import { resolveContext, resolveDefaultBranch, type ResolvedContext } from '../lib/context.js';
 import { gitConfigGet } from '../lib/config.js';
 import { fetchActivePrForBranch, fetchPrById } from '../lib/pr.js';
 import { fetchWorkItemsByIds, fieldValue, workItemBody, type WorkItemBody } from '../lib/work-items.js';
@@ -93,21 +93,11 @@ export async function resolveBase(
     }
   }
 
-  const originHead = await tryGit(runner, ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'], { cwd });
-  if (originHead) {
-    return { ref: originHead.replace(/^origin\//, ''), source: 'origin-head' };
-  }
-
-  if (ctx.repo) {
-    const repository = await runAzJson<AzGitRepository>(runner, [
-      'repos', 'show',
-      '--repository', ctx.repo,
-      '--organization', ctx.orgUrl,
-      '--project', ctx.project,
-    ]);
-    if (repository.defaultBranch) {
-      return { ref: repository.defaultBranch.replace(/^refs\/heads\//, ''), source: 'repo-default' };
-    }
+  // Same resolution `dova pr create` targets, so a branch is diffed
+  // against the branch its PR will actually merge into.
+  const fromRepo = await resolveDefaultBranch(runner, ctx, cwd);
+  if (fromRepo) {
+    return { ref: fromRepo.branch, source: fromRepo.source };
   }
 
   throw new UserError(`Could not determine what to compare "${branch}" against.`, [
