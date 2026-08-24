@@ -20,9 +20,10 @@ const BLOCK = 'RULES GO HERE';
  */
 const norm = (p: string) => p.replace(/\\/g, '/');
 
-function fakeFs(seed: Record<string, string> = {}) {
+function fakeFs(seed: Record<string, string> = {}, dirs: string[] = []) {
   const files: Record<string, string> = {};
   for (const [k, v] of Object.entries(seed)) files[norm(k)] = v;
+  const existingDirs = new Set(dirs.map(norm));
   const made: string[] = [];
   const fs: FileSystemLike = {
     readFile: (file) => files[norm(file)] ?? null,
@@ -32,8 +33,20 @@ function fakeFs(seed: Record<string, string> = {}) {
     mkdirp: (dir) => {
       made.push(norm(dir));
     },
+    exists: (target) => existingDirs.has(norm(target)) || files[norm(target)] !== undefined,
   };
   return { fs, files, made };
+}
+
+/** VS Code's user dir on this platform, so the fixtures below match wherever they run. */
+function vscodeUserDir(home: string): string {
+  const base =
+    process.platform === 'win32'
+      ? process.env.APPDATA ?? `${home}/AppData/Roaming`
+      : process.platform === 'darwin'
+        ? `${home}/Library/Application Support`
+        : `${home}/.config`;
+  return norm(`${base}/Code/User`);
 }
 
 describe('applyBlock', () => {
@@ -127,10 +140,60 @@ describe('resolveAgentsFile', () => {
   });
 });
 
-describe('runInstructionsInstall', () => {
+describe('runInstructionsInstall (global — the default)', () => {
+  it('installs globally when no scope is given, because dova itself is installed globally', () => {
+    const { fs, files } = fakeFs({}, [vscodeUserDir('/home/u')]);
+    const result = runInstructionsInstall({ home: '/home/u', fs, block: BLOCK });
+
+    expect(result.scope).toBe('global');
+    expect(files['/home/u/.codeium/windsurf/memories/global_rules.md']).toContain(BLOCK);
+    expect(files[`${vscodeUserDir('/home/u')}/prompts/dova.instructions.md`]).toContain(BLOCK);
+  });
+
+  it("gives the VS Code file an applyTo frontmatter, or it wouldn't apply outside a glob", () => {
+    const { fs, files } = fakeFs({}, [vscodeUserDir('/home/u')]);
+    runInstructionsInstall({ home: '/home/u', fs, block: BLOCK });
+
+    const written = files[`${vscodeUserDir('/home/u')}/prompts/dova.instructions.md`]!;
+    expect(written.startsWith("---\napplyTo: '**'\n---\n")).toBe(true);
+  });
+
+  it('does not re-add the frontmatter when updating an existing file', () => {
+    const { fs, files } = fakeFs({}, [vscodeUserDir('/home/u')]);
+    runInstructionsInstall({ home: '/home/u', fs, block: BLOCK });
+    runInstructionsInstall({ home: '/home/u', fs, block: 'NEW RULES' });
+
+    const written = files[`${vscodeUserDir('/home/u')}/prompts/dova.instructions.md`]!;
+    expect(written.match(/applyTo/g)).toHaveLength(1);
+    expect(written).toContain('NEW RULES');
+  });
+
+  it('leaves rules the user already had in global_rules.md alone', () => {
+    const { fs, files } = fakeFs(
+      { '/home/u/.codeium/windsurf/memories/global_rules.md': '## My own rule\nAlways use tabs.\n' },
+      [vscodeUserDir('/home/u')]
+    );
+    runInstructionsInstall({ home: '/home/u', fs, block: BLOCK });
+
+    const written = files['/home/u/.codeium/windsurf/memories/global_rules.md']!;
+    expect(written).toContain('Always use tabs.');
+    expect(written).toContain(BLOCK);
+  });
+
+  it('only targets VS Code flavours actually installed, rather than littering', () => {
+    const { fs } = fakeFs({}, [vscodeUserDir('/home/u')]); // stable only
+    const result = runInstructionsInstall({ home: '/home/u', fs, block: BLOCK });
+
+    expect(result.files.filter((f) => f.file.includes('dova.instructions.md'))).toHaveLength(1);
+  });
+});
+
+describe('runInstructionsInstall (--repo)', () => {
   it('writes both files — neither target reads the other one by default', () => {
     const { fs, files } = fakeFs();
-    const result = runInstructionsInstall({ root: '/repo', fs, block: BLOCK });
+    const result = runInstructionsInstall({ scope: 'repo', root: '/repo', fs, block: BLOCK });
+
+    expect(result.scope).toBe('repo');
 
     expect(result.files.map((f) => f.file)).toEqual(['AGENTS.md', '.github/copilot-instructions.md']);
     expect(files['/repo/AGENTS.md']).toContain(BLOCK);
@@ -139,7 +202,7 @@ describe('runInstructionsInstall', () => {
 
   it('appends into an existing lowercase agents.md instead of making a duplicate', () => {
     const { fs, files } = fakeFs({ '/repo/agents.md': '# Our repo\n' });
-    const result = runInstructionsInstall({ root: '/repo', fs, block: BLOCK });
+    const result = runInstructionsInstall({ scope: 'repo', root: '/repo', fs, block: BLOCK });
 
     expect(result.files[0]!.file).toBe('agents.md');
     expect(result.files[0]!.action).toBe('appended');
@@ -149,7 +212,7 @@ describe('runInstructionsInstall', () => {
 
   it('writes nothing at all on --dry-run', () => {
     const { fs, files, made } = fakeFs();
-    const result = runInstructionsInstall({ root: '/repo', dryRun: true, fs, block: BLOCK });
+    const result = runInstructionsInstall({ scope: 'repo', root: '/repo', dryRun: true, fs, block: BLOCK });
 
     expect(result.files.every((f) => f.action === 'created')).toBe(true);
     expect(Object.keys(files)).toHaveLength(0);
@@ -158,7 +221,7 @@ describe('runInstructionsInstall', () => {
 
   it('creates .github/ when it does not exist', () => {
     const { fs, made } = fakeFs();
-    runInstructionsInstall({ root: '/repo', fs, block: BLOCK });
+    runInstructionsInstall({ scope: 'repo', root: '/repo', fs, block: BLOCK });
     expect(made.some((d) => d.endsWith('.github'))).toBe(true);
   });
 
@@ -166,7 +229,7 @@ describe('runInstructionsInstall', () => {
     const { fs } = fakeFs({
       '/repo/.vscode/settings.json': '{"github.copilot.chat.codeGeneration.useInstructionFiles": false}',
     });
-    const result = runInstructionsInstall({ root: '/repo', fs, block: BLOCK });
+    const result = runInstructionsInstall({ scope: 'repo', root: '/repo', fs, block: BLOCK });
 
     // The files are still written correctly — they'd just be ignored.
     expect(result.files.every((f) => f.action === 'created')).toBe(true);
@@ -184,6 +247,22 @@ describe('the shipped instructions block', () => {
     expect(instructions).toMatch(/az boards work-item update/);
     // dova's own standing rule: no organization-specific values anywhere.
     expect(instructions).not.toMatch(/dev\.azure\.com\/(?!contoso)/);
+  });
+
+  it('the global block fits the 6,000-character cap on a global rules file', async () => {
+    const { default: globalBlock } = await import('../src/instructions/global-block.md');
+
+    // Devin's global rules file is capped at 6,000 characters — half the
+    // workspace limit — which is why the global install ships a separate,
+    // shorter block rather than the same text.
+    expect(globalBlock.length).toBeLessThan(6_000);
+    // It must say when it applies: unlike the repo-scoped block, it is in
+    // context for every repo, including ones not on Azure DevOps.
+    expect(globalBlock).toMatch(/dev\.azure\.com/);
+    expect(globalBlock).toMatch(/does not apply to repos hosted elsewhere/i);
+    // The rules that cannot be enforced in code survive the condensing.
+    expect(globalBlock).toMatch(/dova link[\s\S]*dova pr create/);
+    expect(globalBlock).toMatch(/az boards work-item update/);
   });
 
   it('stays under the 12,000-character cap a workspace rule file is allowed', async () => {

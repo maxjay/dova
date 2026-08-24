@@ -1,6 +1,9 @@
 import path from 'node:path';
+import os from 'node:os';
 import fs from 'node:fs';
+import { UserError } from './errors.js';
 import instructionsBlock from '../instructions/block.md';
+import globalInstructionsBlock from '../instructions/global-block.md';
 
 /* ------------------------------------------------------------------ *
  * `dova instructions init` — writes dova's usage rules into the files
@@ -98,6 +101,7 @@ export interface FileSystemLike {
   readFile(file: string): string | null;
   writeFile(file: string, content: string): void;
   mkdirp(dir: string): void;
+  exists(target: string): boolean;
 }
 
 export const nodeFs: FileSystemLike = {
@@ -110,9 +114,76 @@ export const nodeFs: FileSystemLike = {
   },
   writeFile: (file, content) => fs.writeFileSync(file, content, 'utf8'),
   mkdirp: (dir) => fs.mkdirSync(dir, { recursive: true }),
+  exists: (target) => fs.existsSync(target),
 };
 
+/* ------------------------------------------------------------------ *
+ * Global install — the default.
+ *
+ * dova is installed once per machine and works in any repo it's run
+ * from, so the rules for using it belong at the same level. A
+ * per-repo install (--repo) is for committing them so teammates get
+ * them too, which is a different job.
+ *
+ * The global block is a separate, shorter file rather than the same
+ * text: it's in context for *every* repo, including ones not hosted on
+ * Azure DevOps, so it has to say when it applies — and Devin's global
+ * rules file is capped at 6,000 characters, half the workspace limit.
+ * ------------------------------------------------------------------ */
+
+/** Where each editor keeps its user-level settings, per platform. */
+function vscodeUserDirs(home: string): string[] {
+  const base =
+    process.platform === 'win32'
+      ? process.env.APPDATA ?? path.join(home, 'AppData', 'Roaming')
+      : process.platform === 'darwin'
+        ? path.join(home, 'Library', 'Application Support')
+        : path.join(home, '.config');
+  return ['Code', 'Code - Insiders', 'VSCodium'].map((variant) => path.join(base, variant, 'User'));
+}
+
+export interface ResolvedTarget {
+  /** Absolute path written to. */
+  path: string;
+  /** Shown to the user — home-relative where possible. */
+  label: string;
+  read_by: string;
+  /** Written above the block when the file is created (not on update). */
+  preamble?: string;
+}
+
+export function resolveGlobalTargets(fsLike: FileSystemLike, home: string): ResolvedTarget[] {
+  const targets: ResolvedTarget[] = [
+    {
+      path: path.join(home, '.codeium', 'windsurf', 'memories', 'global_rules.md'),
+      label: '~/.codeium/windsurf/memories/global_rules.md',
+      read_by: 'Devin Desktop / Windsurf',
+    },
+  ];
+
+  // Every VS Code flavour that has actually been run on this machine —
+  // writing into one that was never installed just leaves litter.
+  const installed = vscodeUserDirs(home).filter((dir) => fsLike.exists(dir));
+  const userDirs = installed.length > 0 ? installed : [vscodeUserDirs(home)[0]!];
+  for (const dir of userDirs) {
+    targets.push({
+      path: path.join(dir, 'prompts', 'dova.instructions.md'),
+      label: path.join(path.basename(path.dirname(dir)), 'User', 'prompts', 'dova.instructions.md').replace(/\\/g, '/'),
+      read_by: 'GitHub Copilot in VS Code (all workspaces)',
+      // applyTo is what makes a user-level instructions file apply
+      // everywhere rather than to a glob of files.
+      preamble: "---\napplyTo: '**'\n---\n",
+    });
+  }
+
+  return targets;
+}
+
+export type InstallScope = 'global' | 'repo';
+
 export interface InstructionsInstallResult {
+  scope: InstallScope;
+  /** Repo root for a --repo install; the home directory for a global one. */
   root: string;
   files: Array<{ file: string; read_by: string; action: BlockAction }>;
   warnings: string[];
@@ -139,30 +210,63 @@ export function checkCopilotDisabled(fsLike: FileSystemLike, root: string): stri
   return null;
 }
 
+function writeTarget(
+  fsLike: FileSystemLike,
+  absolute: string,
+  block: string,
+  preamble: string | undefined,
+  dryRun: boolean
+): BlockAction {
+  const existing = fsLike.readFile(absolute);
+  let { content, action } = applyBlock(existing, block);
+  // A preamble (e.g. VS Code's `applyTo` frontmatter) is part of
+  // creating the file, not of the block — on update it's already there,
+  // sitting before the markers, and applyBlock preserves it.
+  if (existing === null && preamble) content = preamble + content;
+  if (!dryRun && action !== 'unchanged') {
+    fsLike.mkdirp(path.dirname(absolute));
+    fsLike.writeFile(absolute, content);
+  }
+  return action;
+}
+
 export function runInstructionsInstall(opts: {
-  root: string;
+  scope?: InstallScope;
+  /** Repo root — required for a --repo install, ignored for a global one. */
+  root?: string;
+  home?: string;
   dryRun?: boolean;
   fs?: FileSystemLike;
   block?: string;
 }): InstructionsInstallResult {
   const fsLike = opts.fs ?? nodeFs;
-  const block = opts.block ?? instructionsBlock;
+  const scope: InstallScope = opts.scope ?? 'global';
+  const dryRun = Boolean(opts.dryRun);
   const files: InstructionsInstallResult['files'] = [];
+  const warnings: string[] = [];
+
+  if (scope === 'global') {
+    const home = opts.home ?? os.homedir();
+    const block = opts.block ?? globalInstructionsBlock;
+    for (const target of resolveGlobalTargets(fsLike, home)) {
+      const action = writeTarget(fsLike, target.path, block, target.preamble, dryRun);
+      files.push({ file: target.label, read_by: target.read_by, action });
+    }
+    return { scope, root: home, files, warnings, dryRun };
+  }
+
+  const root = opts.root;
+  if (root === undefined) throw new UserError('A repo-scoped install needs a repo root.');
+  const block = opts.block ?? instructionsBlock;
 
   for (const target of TARGETS) {
-    const file = target.file === 'AGENTS.md' ? resolveAgentsFile(fsLike, opts.root) : target.file;
-    const absolute = path.join(opts.root, file);
-    const { content, action } = applyBlock(fsLike.readFile(absolute), block);
-    if (!opts.dryRun && action !== 'unchanged') {
-      fsLike.mkdirp(path.dirname(absolute));
-      fsLike.writeFile(absolute, content);
-    }
+    const file = target.file === 'AGENTS.md' ? resolveAgentsFile(fsLike, root) : target.file;
+    const action = writeTarget(fsLike, path.join(root, file), block, undefined, dryRun);
     files.push({ file, read_by: target.read_by, action });
   }
 
-  const warnings: string[] = [];
-  const copilotWarning = checkCopilotDisabled(fsLike, opts.root);
+  const copilotWarning = checkCopilotDisabled(fsLike, root);
   if (copilotWarning) warnings.push(copilotWarning);
 
-  return { root: opts.root, files, warnings, dryRun: Boolean(opts.dryRun) };
+  return { scope, root, files, warnings, dryRun };
 }
