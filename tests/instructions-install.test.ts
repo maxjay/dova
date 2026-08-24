@@ -254,8 +254,10 @@ describe('the shipped instructions block', () => {
 
     // Devin's global rules file is capped at 6,000 characters — half the
     // workspace limit — which is why the global install ships a separate,
-    // shorter block rather than the same text.
-    expect(globalBlock.length).toBeLessThan(6_000);
+    // shorter block rather than the same text. Measured *wrapped*, since
+    // the markers and generated-by note are part of what gets loaded and
+    // the headroom here is thin.
+    expect(applyBlock(null, globalBlock).content.length).toBeLessThan(6_000);
     // States the rule outright rather than making it conditional on the
     // remote: a condition would have the agent check where the repo is
     // hosted before it can act, every time, for no gain.
@@ -263,6 +265,11 @@ describe('the shipped instructions block', () => {
     // The rules that cannot be enforced in code survive the condensing.
     expect(globalBlock).toMatch(/dova link[\s\S]*dova pr create/);
     expect(globalBlock).toMatch(/az boards work-item update/);
+    // And so does the few-shot: worked scenarios, not just rules.
+    expect(globalBlock.match(/^### /gm)?.length ?? 0).toBeGreaterThanOrEqual(6);
+    expect(globalBlock).toContain('### Common mistakes');
+    expect(globalBlock).toMatch(/✗ dova pr view 612/);
+    expect(globalBlock).toMatch(/✓ dova summarize 612/);
   });
 
   it('stays under the 12,000-character cap a workspace rule file is allowed', async () => {
