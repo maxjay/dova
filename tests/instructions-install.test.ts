@@ -165,4 +165,25 @@ describe('the shipped instructions block', () => {
     // dova's own standing rule: no organization-specific values anywhere.
     expect(instructions).not.toMatch(/dev\.azure\.com\/(?!contoso)/);
   });
+
+  it('stays under the 12,000-character cap a workspace rule file is allowed', async () => {
+    const { default: instructions } = await import('../src/instructions/block.md');
+
+    // AGENTS.md feeds the same rules engine as .devin/rules/, where a
+    // workspace rule file is capped at 12,000 characters. Going over
+    // doesn't error — the content is just not all there — so this is
+    // the only thing that would catch it.
+    expect(instructions.length).toBeLessThan(12_000);
+  });
+
+  it('teaches by worked example, not by rules alone', async () => {
+    const { default: instructions } = await import('../src/instructions/block.md');
+
+    // Few-shot: complete command-plus-output scenarios, and explicit
+    // wrong/right pairs for the mistakes that are otherwise silent.
+    expect(instructions.match(/### Worked example/g)?.length ?? 0).toBeGreaterThanOrEqual(4);
+    expect(instructions).toContain('### Common mistakes');
+    expect(instructions).toMatch(/✗ dova pr view 612/);
+    expect(instructions).toMatch(/✓ dova summarize 612/);
+  });
 });
