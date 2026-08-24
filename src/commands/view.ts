@@ -19,6 +19,7 @@ interface ViewFlags {
   json?: string | boolean;
   jq?: string;
   web?: boolean;
+  full?: boolean;
   color: boolean;
 }
 
@@ -28,7 +29,7 @@ async function showWorkItem(runner: Runner, orgUrl: string, id: number, fallback
     await openInBrowser(detail.url);
     return;
   }
-  await emit({ kind: 'work-item', ...detail }, opts, () => renderWorkItemDetailHuman(detail, color));
+  await emit({ kind: 'work-item', ...detail }, opts, () => renderWorkItemDetailHuman(detail, color, Boolean(opts.full)));
 }
 
 async function showPr(runner: Runner, orgUrl: string, id: number, ctx: ResolvedContext, opts: ViewFlags, color: ReturnType<typeof getColor>): Promise<void> {
@@ -53,7 +54,8 @@ async function showPr(runner: Runner, orgUrl: string, id: number, ctx: ResolvedC
 export function registerViewCommand(program: Command): void {
   const cmd = program
     .command('view <id-or-url>')
-    .description('View a PR or work item, given its id or a link to it — auto-detects which');
+    .description('View a PR or work item, given its id or a link to it — auto-detects which')
+    .option('--full', "show a work item's description/acceptance criteria in full, not truncated");
 
   addContextOptions(cmd);
   addJsonOption(cmd);

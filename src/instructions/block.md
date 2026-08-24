@@ -1,124 +1,132 @@
-## Azure DevOps work: use `dova`
+## Azure DevOps: use `dova`
 
-Work items, pull requests, and pipelines for this repo live in Azure
-DevOps. `dova` wraps `az` and `git`, inferring organization, project,
-and repo from the git remote — so its commands need no `--org` or
-`--project`.
+Work items, pull requests and pipelines for this repo are in Azure
+DevOps. Use `dova` for all of them. Never call `az boards` or `az repos`
+directly: `dova` infers org, project and repo from the git remote, and
+records the branch-to-ticket link that raw `az` can neither read nor
+write.
 
-Use it instead of calling `az boards` / `az repos` directly. Beyond the
-shorter commands, `dova` records which branch corresponds to which work
-item, and raw `az` neither writes nor reads that. If `dova` is not
-installed, say so rather than falling back to `az` — the fallback looks
-like it worked and quietly loses the linkage.
+If `dova` is not installed, say so and stop. Do not fall back to `az`.
 
-`dova <command> --help` lists flags. Below is what `--help` cannot tell
-you.
+Run `dova <command> --help` for flags. Below is what `--help` omits.
 
-### Which command answers which question
+### Pick the command
 
-| Question | Command |
+| Need | Run |
 |---|---|
-| What's the state of this branch? | `dova status` |
-| What does this ticket say? | `dova wi view <id>` |
-| **What code changed in this PR?** | `dova summarize <pr-id>` |
-| What's the discussion on this PR? | `dova pr view <pr-id>` |
-| What's happened on this branch? | `dova summarize <branch>` |
-| What does this whole thread say? | `dova pr comment show <pr-id> <thread-id>` |
-| Why did CI fail? | `dova pipeline log` |
-| Which branches are mid-work? | `dova list` |
-| Anything not wrapped above | `dova api <path>` |
+| State of this branch | `dova status` |
+| Read a ticket or a PR | `dova view <id>` — auto-detects which |
+| A PR's code | `dova summarize <pr-id>` |
+| A PR's discussion | `dova pr view <pr-id>` |
+| One thread in full | `dova pr comment show <pr-id> <thread-id>` |
+| Why CI failed | `dova pipeline log` |
+| Wait for CI | `dova pipeline watch` |
+| Catch up on a branch | `dova summarize <branch>` |
+| Branches mid-work | `dova list` |
+| Find tickets | `dova wi search <query>` |
+| File a bug | `dova bug '<title>' --at <file>:<line> --link` |
+| Anything else | `dova api <path>` |
 
-`dova pr view` shows metadata and comment threads but **not the diff**.
-`dova summarize` is the one that reads code — it takes a PR id, a PR
-url, or a branch name, and fetches the branch first if it isn't local,
-so it works on a PR nobody here has checked out.
+`dova view` replaces `dova wi view` and `dova pr view <id>` — use it
+unless you need a PR's comment threads.
 
-Its `Diff` section is **committed work only** — that's what a PR would
-contain. Anything still in the working tree appears below it under
-`Uncommitted`, and only when summarizing the branch you're on. If you
-have just edited files and want them reflected in `Diff`, commit
-first; don't assume an empty `Diff` means you changed nothing.
+Long descriptions truncate. Pass `--full` to `view` or `summarize` for
+the rest. Never go to the browser for it.
 
-**`summarize` already includes each linked ticket's body** under a
-`Description:` (or `Acceptance Criteria:`) heading beneath its title.
-That is the ticket — you have read it. Don't follow a `summarize` with
-`dova wi view` on the same ids to "get the details"; there are no more
-details, and it costs an `az` call per ticket. Reach for `wi view` only
-for an id `summarize` didn't cover, or when you need a ticket's parent
-and children.
-
-### Worked example: implement a ticket
+### Start work on a ticket
 
 ```console
-$ dova wi view 4821
+$ dova view 4821
 #4821 Login redirects to the wrong page after sign-in
-Bug · Active · assigned to Jane Doe
+User Story · Ready · unassigned
 
 Area:      MyProject\Platform
 Iteration: MyProject\Sprint 14
+
+Description
+Users are sent to /undefined after sign-in.
+
+Acceptance Criteria
+- Redirect resolves to /dashboard for a valid token
+- Invalid tokens return to /login with an error
 
 $ git checkout -b fix/4821-login-redirect   # git's job — dova never creates branches
 $ dova link 4821
 Branch: fix/4821-login-redirect
 
 Linked work items:
-  #4821 [Bug] Login redirects to the wrong page after sign-in (primary)
+  #4821 [User Story] Login redirects to the wrong page (primary)
 
 # ...implement, commit...
 
 $ dova pr create
 Created PR #612 — Fix null check in redirect handler
-  https://dev.azure.com/contoso/MyProject/_git/my-repo/pullrequest/612
   Work items: #4821
 ```
 
-The ticket attached because `dova link` ran first. Without it, `pr
-create` falls back to `#id` references in commit messages, and with
-neither the PR is created **successfully with nothing attached and no
-error** — the linkage is simply missing and nothing reports it later.
+Run `dova link` before `dova pr create`, always. Without it `pr create`
+falls back to `#id` references in commit messages; with neither, the PR
+opens with nothing attached and no error, and nothing reports it later.
 
-### Worked example: answer review feedback
+Working several related tickets on one branch: `dova link 4821 5219
+5220`. The first id is primary. Correct a bad link with `dova unlink
+<id>`, or `--all` to clear the branch. Add `--draft` to `pr create`
+when the work isn't ready for review.
+
+### Answer review feedback
 
 ```console
 $ dova status
 Branch: fix/4821-login-redirect
 
 Pull Request
-  #612 Fix null check in redirect handler
-  active · opened by Agent
+  #612 Fix null check in redirect handler · active
 
 Comment Threads
-┌──────────┬─────────────────┬─────────────┬──────────────────────────────┐
-│ Status   │ Location        │ Last author │ Last comment                 │
-├──────────┼─────────────────┼─────────────┼──────────────────────────────┤
-│ open     │ /src/auth.ts:42 │ Jane Doe    │ Can you also handle the nu.. │
-└──────────┴─────────────────┴─────────────┴──────────────────────────────┘
+  #4  open  /src/auth.ts:42  Jane Doe  "Can you also handle the nu.."
 
-$ dova pr comment show 612 4        # read the WHOLE thread before acting
-Thread #4 on PR #612
-/src/auth.ts:42
-Status: active
+$ dova pr comment show 612 4      # read the whole thread, not the preview
+Thread #4 on PR #612 · /src/auth.ts:42 · active
 
 SonarQube · 2026-08-22T10:00:00Z
-  Fix this cognitive complexity issue by extracting the validation logic.
-
+  Extract the validation logic — cognitive complexity.
 Jane Doe · 2026-08-22T10:15:00Z
-  Can you also handle the null case here while you're at it?
+  Can you also handle the null case while you're here?
 
-# ...make the change, commit, push...
+# ...fix, commit, push...
 
 $ dova pr comment reply 612 4 --resolve - <<'EOF'
-Extracted the validation into `validateSession()` and added the null
-check — `$token` is now checked before the redirect decision.
+Extracted into `validateSession()` and added the null check.
 EOF
 Replied in thread #4 on PR #612.
 Set thread #4 on PR #612 to "fixed".
 ```
 
-The status table only ever shows the *last* comment, so `comment show`
-first — the earlier comments often carry the actual request.
+Read the whole thread before replying. `status` shows only the last
+comment; the actual request is usually earlier. Reply and resolve in
+one call. To close a thread without replying: `dova pr comment resolve
+612 4`.
 
-### Worked example: CI is red
+### Review someone else's PR
+
+```console
+$ dova summarize 785
+Branch: feature/305-dark-mode
+compared against origin/main
+
+#305 [User Story/Active] Add dark mode (primary)
+Description: Users on shared machines want a dark theme.
+
+Commits (3 since origin/main)
+  a1b2c3d Add theme toggle
+
+Diff
+src/theme.ts | 42 ++++++++++++++
+```
+
+It fetches the branch itself. Never `git checkout` to read a PR.
+
+### Fix red CI
 
 ```console
 $ dova pipeline log
@@ -130,71 +138,54 @@ FAIL src/auth.test.ts
   Received: "/undefined"
 ```
 
-Fix the cause and push. Don't re-run hoping it passes.
+Fix what it reports. Never re-run hoping it passes. `dova pipeline
+watch` blocks until a run finishes and exits non-zero on failure.
 
-### Worked example: review someone else's PR
+### Rules
 
-```console
-$ dova summarize 785            # no checkout, no local branch needed
-Branch: feature/305-dark-mode
-compared against origin/main
-
-#305 [User Story/Active] Add dark mode (primary)
-
-Commits (3 since origin/main)
-  a1b2c3d Add theme toggle
-  ...
-
-Diff
-src/theme.ts | 42 ++++++++++++++
-```
-
-### Worked example: file a bug you hit mid-task
-
-```console
-$ dova bug 'Null check missing on empty session token' --at src/auth.ts:88 --link
-Created Bug #5219
-  Area: MyProject\Platform
-Branch: fix/4821-login-redirect
-
-Linked work items:
-  #4821 [Bug] Login redirects to the wrong page after sign-in (primary)
-  #5219 [Bug] Null check missing on empty session token
-```
-
-`--at` builds a permalink to that line; `--link` attaches it to the
-current branch so it rides along on the same PR.
-
-### Common mistakes
-
-**Reading a PR's code.** `pr view` returns metadata, not a diff.
+**Use `dova summarize` for code, not `dova pr view`.**
 
 ```console
 ✗ dova pr view 612          # threads and status — no code
-✓ dova summarize 612        # the actual diff
+✓ dova summarize 612        # the diff, fetched if not local
 ```
 
-**Closing a ticket after merge.** Don't. `dova pr create` passes
-`--transition-work-items`, so Azure DevOps moves linked items itself
-when the PR completes.
+**Never re-read what you already have.** `summarize` prints every
+linked ticket's body under its title. Choose human or `--json` before
+you run, never after — a second call re-pays the whole `az` cost for
+output already on screen.
+
+```console
+✗ dova summarize && dova view 3917455
+✗ dova view 3917455 && dova view 3917455 --json
+✓ dova summarize            # you now have every linked ticket
+```
+
+**`summarize`'s `Diff` is committed work only** — that is what a PR
+will contain. Uncommitted work appears below it under `Uncommitted`,
+and only for the branch you are on. An empty `Diff` does not mean you
+changed nothing; commit to move edits into it.
+
+**Never change a ticket's state, assignee or priority.** `dova pr
+create` passes `--transition-work-items`, so Azure DevOps transitions
+linked items itself on completion.
 
 ```console
 ✗ az boards work-item update --id 4821 --state Resolved
-✓ (nothing — it happens on completion)
+✓ (nothing — it happens automatically)
 ```
 
-**Setting up a ticket's branch.** `dova` never creates, names, or checks
-out branches, and never changes a work item's state, assignee, or
-priority. Those belong to the person and to git.
+**Never create, name or check out branches with `dova`.** It has no
+such command, by design. Use git, then `dova link`.
 
 ```console
-✗ dova checkout 4821        # no such command, by design
+✗ dova checkout 4821
 ✓ git checkout -b fix/4821-login && dova link 4821
 ```
 
-**Free text with backticks, `$`, or quotes.** The shell mangles it
-before `dova` sees it — in bash `"...$total..."` expands to nothing and
-backticks inside double quotes *execute*.
+**Pipe free text; never inline it with double quotes.** The shell
+mangles it before `dova` sees it — in bash `"...$total..."` expands to
+nothing and backticks inside double quotes *execute*.
 
 ```console
 ✗ dova pr comment 612 "Fixed the $count check in `auth.ts`"
@@ -204,12 +195,11 @@ EOF
 ```
 
 Every command taking free text accepts `-` for stdin (`--title -` for
-the flag form). Short titles are fine inline **single**-quoted; use
-stdin when the text has an apostrophe or runs long.
+the flag form). Single-quote short titles; pipe anything with an
+apostrophe.
 
-**Retrying a command that asked a question.** With no terminal, `dova`
-never prompts — it fails immediately, naming the flag that answers it
-and listing the real values. Read the error and re-run with that flag.
+**Read the error and re-run with the flag it names.** Without a
+terminal `dova` never prompts — it fails immediately with the answer.
 
 ```console
 $ dova bug 'Something broke'
@@ -220,21 +210,13 @@ Error: Multiple teams in "MyProject" — which one?
 ✓ dova bug 'Something broke' --team Platform
 ```
 
-`--team`, `--area`, `--iteration`, and `--like <id>` (copy area and
-iteration from an existing ticket) are the escape hatches; `--area` and
+`--team`, `--area`, `--iteration` and `--like <id>` (copy area and
+iteration from an existing ticket) are the escape hatches. `--area` and
 `--iteration` together skip team resolution entirely.
 
-### Parsing output
+### Output
 
-`--json` (optionally `--json <fields>`, plus `--jq <expr>`) is available
-on every read command, for when something downstream has to parse the
-result rather than read it — the human output is for humans and its
-shape is not a contract.
-
-Pick one **before** you run the command. Running a command and then
-re-running it with `--json` pays for the whole thing twice, `az` call
-included, for output you already have. If you can read the human output,
-you don't need the JSON.
-
-Exit codes distinguish causes: `1` bad input, `2` not found, `3` `az`
-missing or logged out, `4` an `az`/`git` call failed.
+`--json` (optionally `--json <fields>`, plus `--jq <expr>`) on any read
+command. Human output is for humans and its shape is not a contract.
+Exit codes: `1` bad input, `2` not found, `3` `az` missing or logged
+out, `4` an `az`/`git` call failed.
