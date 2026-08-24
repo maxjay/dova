@@ -18,6 +18,17 @@ export function toHeadRef(branch: string): string {
 }
 
 /**
+ * The ref a PR's build-validation runs report. Azure DevOps builds a
+ * temporary merge commit — the target branch as it would look after the
+ * merge — so these never appear under the source branch's own ref.
+ * `resolve_git_ref_heads` passes `refs/pull/...` through untouched, so
+ * this can be handed to `fetchRecentRuns` directly.
+ */
+export function prMergeRef(pullRequestId: number): string {
+  return `refs/pull/${pullRequestId}/merge`;
+}
+
+/**
  * Recent pipeline runs **for this branch**.
  *
  * `--branch` is resolved server-side (`resolve_git_ref_heads` in the

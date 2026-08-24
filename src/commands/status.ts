@@ -6,7 +6,7 @@ import { addContextOptions, addJsonOption, addJqOption, addNoColorOption, addWeb
 import { emit, getColor, renderTable } from '../lib/output.js';
 import { openInBrowser } from '../lib/browser.js';
 import { NotFoundError, UserError } from '../lib/errors.js';
-import { fetchRecentRuns, buildRunWebUrl } from '../lib/pipelines.js';
+import { fetchRecentRuns, buildRunWebUrl, prMergeRef } from '../lib/pipelines.js';
 import { fetchWorkItemsByIds, fieldValue } from '../lib/work-items.js';
 import { fetchActivePrForBranch, fetchPrWorkItems, fetchDiscussionThreads, isUnresolvedThreadStatus, threadLocation, type ThreadLocation } from '../lib/pr.js';
 
@@ -100,16 +100,7 @@ export async function gatherStatus(
     gitConfigGet(runner, `branch.${branch}.dova-primary`, { cwd }),
   ]);
 
-  const pipelineRuns: PipelineRunSummary[] = runs.map((r) => ({
-    id: r.id,
-    name: r.definition?.name ?? `#${r.buildNumber}`,
-    status: r.status,
-    result: r.result,
-    queueTime: r.queueTime ?? null,
-    url: r._links?.web?.href ?? buildRunWebUrl(orgUrl, project, r.id),
-  }));
-
-  // Wave 2 — the two calls that genuinely need the PR, together. Work
+  // Wave 2 — the calls that genuinely need the PR, together. Work
   // items come from the PR when there is one, otherwise from what `dova
   // link` recorded locally; comment threads only exist with a PR, and
   // have no native `az` command, so they go through `az rest`.
@@ -119,14 +110,35 @@ export async function gatherStatus(
     .filter(Boolean)
     .map(Number);
 
-  const [rawWorkItems, rawThreads] = await Promise.all([
+  const [rawWorkItems, rawThreads, prRuns] = await Promise.all([
     pr
       ? fetchPrWorkItems(runner, orgUrl, pr.pullRequestId)
       : trackedIds.length > 0
         ? fetchWorkItemsByIds(runner, orgUrl, trackedIds)
         : Promise.resolve([]),
     pr ? fetchDiscussionThreads(runner, orgUrl, project, repo, pr.pullRequestId) : Promise.resolve([]),
+    // Build validation runs against a temporary merge commit, so their
+    // sourceBranch is `refs/pull/<id>/merge`, not the branch's own ref —
+    // a query for `refs/heads/<branch>` never returns them. They are the
+    // runs that gate the merge, so on a branch with a PR they matter
+    // more than the branch-push builds above, not less.
+    pr ? fetchRecentRuns(runner, orgUrl, project, prMergeRef(pr.pullRequestId), 3) : Promise.resolve([]),
   ]);
+
+  // PR-validation runs first: they reflect the merged result, which is
+  // what reviewers and policies are looking at.
+  const seen = new Set<number>();
+  const pipelineRuns: PipelineRunSummary[] = [...prRuns, ...runs]
+    .filter((r) => !seen.has(r.id) && seen.add(r.id))
+    .slice(0, 3)
+    .map((r) => ({
+      id: r.id,
+      name: r.definition?.name ?? `#${r.buildNumber}`,
+      status: r.status,
+      result: r.result,
+      queueTime: r.queueTime ?? null,
+      url: r._links?.web?.href ?? buildRunWebUrl(orgUrl, project, r.id),
+    }));
 
   let workItems: WorkItemSummary[];
   if (pr) {
