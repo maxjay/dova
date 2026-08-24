@@ -12,6 +12,24 @@ export function buildRunWebUrl(orgUrl: string, project: string, id: number): str
   return `${orgUrl}/${encodeURIComponent(project)}/_build/results?buildid=${id}`;
 }
 
+/** `refs/heads/x` for a bare name; already-qualified refs pass through. */
+export function toHeadRef(branch: string): string {
+  return branch.startsWith('refs/') ? branch : `refs/heads/${branch}`;
+}
+
+/**
+ * Recent pipeline runs **for this branch**.
+ *
+ * `--branch` is resolved server-side (`resolve_git_ref_heads` in the
+ * extension's pipeline_run.py turns a bare name into `refs/heads/...`),
+ * so the request is right — but the answer is filtered again here
+ * against each run's own `sourceBranch`. A run for another ref showing
+ * up in a branch's status is worse than showing nothing: it reads as
+ * this branch's CI and isn't.
+ *
+ * Over-fetches so the filter has something to trim rather than
+ * returning fewer than asked for. Same single `az` call either way.
+ */
 export async function fetchRecentRuns(
   runner: Runner,
   orgUrl: string,
@@ -19,13 +37,16 @@ export async function fetchRecentRuns(
   branch: string,
   top = 3
 ): Promise<AzBuild[]> {
-  return runAzJson<AzBuild[]>(runner, [
+  const runs = await runAzJson<AzBuild[]>(runner, [
     'pipelines', 'runs', 'list',
     '--organization', orgUrl,
     '--project', project,
     '--branch', branch,
-    '--top', String(top),
+    '--top', String(Math.max(top * 4, 20)),
   ]);
+
+  const wanted = toHeadRef(branch);
+  return runs.filter((run) => run.sourceBranch === undefined || run.sourceBranch === wanted).slice(0, top);
 }
 
 export async function fetchRun(runner: Runner, orgUrl: string, project: string, id: number): Promise<AzBuild> {

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { fetchTimeline, fetchLogText, failedRecords, type AzTimelineRecord } from '../src/lib/pipelines.js';
+import { fetchTimeline, fetchLogText, failedRecords, fetchRecentRuns, type AzTimelineRecord } from '../src/lib/pipelines.js';
 import { NotFoundError, ExternalCommandError } from '../src/lib/errors.js';
 import { createFakeRunner, ok, okJson } from './fixtures/fake-runner.js';
 
@@ -70,5 +70,59 @@ describe('fetchLogText', () => {
     const runner = createFakeRunner({ az: () => ok('line one\nline two\nBuild FAILED') });
     const text = await fetchLogText(runner, ORG_URL, PROJECT, 42, 7);
     expect(text).toBe('line one\nline two\nBuild FAILED');
+  });
+});
+
+describe('fetchRecentRuns branch filtering', () => {
+  function runsRunner(runs: unknown[], seen: string[][] = []) {
+    return createFakeRunner({
+      az: (args) => {
+        seen.push(args);
+        return okJson(runs);
+      },
+    });
+  }
+
+  it('drops runs whose sourceBranch is a different ref', async () => {
+    const runner = runsRunner([
+      { id: 1, buildNumber: '1', status: 'completed', result: 'succeeded', sourceBranch: 'refs/heads/main', url: '' },
+      { id: 2, buildNumber: '2', status: 'completed', result: 'failed', sourceBranch: 'refs/heads/feature/x', url: '' },
+      { id: 3, buildNumber: '3', status: 'completed', result: 'succeeded', sourceBranch: 'refs/pull/99/merge', url: '' },
+    ]);
+
+    const runs = await fetchRecentRuns(runner, ORG_URL, PROJECT, 'feature/x');
+
+    // A run for another ref shown under this branch reads as this
+    // branch's CI and isn't — worse than showing nothing.
+    expect(runs.map((r) => r.id)).toEqual([2]);
+  });
+
+  it('matches a branch name containing slashes', async () => {
+    const runner = runsRunner([
+      { id: 1, buildNumber: '1', status: 'completed', result: 'succeeded', sourceBranch: 'refs/heads/integration/teams-upstream', url: '' },
+    ]);
+    const runs = await fetchRecentRuns(runner, ORG_URL, PROJECT, 'integration/teams-upstream');
+    expect(runs).toHaveLength(1);
+  });
+
+  it('keeps runs that report no sourceBranch at all rather than silently dropping them', async () => {
+    const runner = runsRunner([{ id: 1, buildNumber: '1', status: 'completed', result: 'succeeded', url: '' }]);
+    expect(await fetchRecentRuns(runner, ORG_URL, PROJECT, 'feature/x')).toHaveLength(1);
+  });
+
+  it('over-fetches so filtering still returns the number asked for', async () => {
+    const seen: string[][] = [];
+    const many = Array.from({ length: 30 }, (_, i) => ({
+      id: i, buildNumber: String(i), status: 'completed', result: 'succeeded',
+      sourceBranch: i % 2 === 0 ? 'refs/heads/feature/x' : 'refs/heads/main', url: '',
+    }));
+    const runner = runsRunner(many, seen);
+
+    const runs = await fetchRecentRuns(runner, ORG_URL, PROJECT, 'feature/x', 3);
+
+    expect(runs).toHaveLength(3);
+    expect(runs.every((r) => r.sourceBranch === 'refs/heads/feature/x')).toBe(true);
+    // Asked az for more than 3, or the filter would leave fewer.
+    expect(Number(seen[0]![seen[0]!.indexOf('--top') + 1])).toBeGreaterThan(3);
   });
 });
