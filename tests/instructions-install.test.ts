@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   applyBlock,
   resolveAgentsFile,
+  TARGETS,
   runInstructionsInstall,
   checkCopilotDisabled,
   BLOCK_START,
@@ -11,17 +12,25 @@ import {
 
 const BLOCK = 'RULES GO HERE';
 
-/** In-memory FileSystemLike, seeded with whatever files should already exist. */
+/**
+ * In-memory FileSystemLike, seeded with whatever files should already
+ * exist. Keys are normalized to forward slashes so the fixtures below
+ * can be written POSIX-style and still match on Windows, where
+ * path.join hands back backslash-separated paths.
+ */
+const norm = (p: string) => p.replace(/\\/g, '/');
+
 function fakeFs(seed: Record<string, string> = {}) {
-  const files = { ...seed };
+  const files: Record<string, string> = {};
+  for (const [k, v] of Object.entries(seed)) files[norm(k)] = v;
   const made: string[] = [];
   const fs: FileSystemLike = {
-    readFile: (file) => files[file] ?? null,
+    readFile: (file) => files[norm(file)] ?? null,
     writeFile: (file, content) => {
-      files[file] = content;
+      files[norm(file)] = content;
     },
     mkdirp: (dir) => {
-      made.push(dir);
+      made.push(norm(dir));
     },
   };
   return { fs, files, made };
@@ -85,6 +94,17 @@ describe('checkCopilotDisabled', () => {
       '/repo/.vscode/settings.json': '{"github.copilot.chat.codeGeneration.useInstructionFiles": true}',
     });
     expect(checkCopilotDisabled(fs, '/repo')).toBeNull();
+  });
+});
+
+describe('TARGETS', () => {
+  it('names files with forward slashes on every platform', () => {
+    // These strings are printed and returned in --json, so they must not
+    // vary by platform — building them with path.join would yield
+    // `.github\\copilot-instructions.md` on Windows.
+    for (const target of TARGETS) {
+      expect(target.file).not.toContain('\\');
+    }
   });
 });
 
