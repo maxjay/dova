@@ -1,5 +1,6 @@
-import { describe, it, expect } from 'vitest';
-import { runUnlink } from '../src/lib/link.js';
+import { describe, it, expect, afterEach } from 'vitest';
+import { runUnlink, runLink } from '../src/lib/link.js';
+import { setNonInteractive } from '../src/lib/interactive.js';
 import { UserError, NotFoundError } from '../src/lib/errors.js';
 import { createFakeRunner, ok, okJson, fail } from './fixtures/fake-runner.js';
 import type { AzWorkItem } from '../src/types/azure-devops.js';
@@ -133,5 +134,56 @@ describe('runUnlink', () => {
       git: (args) => (args[0] === 'rev-parse' && args.includes('--abbrev-ref') ? ok('HEAD') : fail('', 1)),
     });
     await expect(runUnlink({ ids: ['200'], runner, org: 'contoso', project: 'MyProject', color: COLOR })).rejects.toBeInstanceOf(UserError);
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * Non-interactive behaviour — the prompts dova can't show when there's
+ * no terminal (an agent, CI, a pipe). These deliberately do NOT inject
+ * `prompts`, so the real defaults are exercised.
+ * ------------------------------------------------------------------ */
+
+describe('runLink without a terminal', () => {
+  afterEach(() => setNonInteractive(false));
+
+  function linkRunner(gitCalls: string[][]) {
+    return createFakeRunner({
+      git: (args) => {
+        gitCalls.push(args);
+        if (args[0] === 'rev-parse' && args.includes('--is-inside-work-tree')) return ok('true');
+        if (args[0] === 'remote') return ok('https://dev.azure.com/contoso/MyProject/_git/my-repo');
+        if (args[0] === 'rev-parse' && args.includes('--abbrev-ref')) return ok('fix/200');
+        // #200 is already linked on a *different* branch.
+        if (args[0] === 'config' && args.includes('--get-regexp')) return ok('branch.other/branch.dova-workitems 200');
+        if (args[0] === 'config') return ok('');
+        if (args[0] === 'checkout') return ok('');
+        return fail(`unexpected git call: ${args.join(' ')}`);
+      },
+      az: (args) => {
+        const joined = args.join(' ');
+        // Both the seed fetch and the children lookup are `boards query`;
+        // only the children one filters on System.Parent.
+        if (joined.includes('System.Parent')) return okJson([]);
+        return okJson([item(200, 'A')]);
+      },
+    });
+  }
+
+  it('never checks out another branch unasked — the confirm defaults to yes interactively, but must not here', async () => {
+    setNonInteractive(true);
+    const gitCalls: string[][] = [];
+    const result = await runLink({
+      ids: ['200'],
+      runner: linkRunner(gitCalls),
+      org: 'contoso',
+      project: 'MyProject',
+      color: COLOR,
+    });
+
+    // Silently moving the working tree out from under a running agent is
+    // the one thing this must never do.
+    expect(gitCalls.some((c) => c[0] === 'checkout')).toBe(false);
+    expect(result.branch).toBe('fix/200');
+    expect(result.switchedToExisting).toBeFalsy();
   });
 });

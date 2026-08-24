@@ -1,7 +1,8 @@
 import type { Command } from 'commander';
 import { defaultRunner } from '../../lib/exec.js';
+import { readTextArg } from '../../lib/stdin.js';
 import { quickCreateWorkItem } from '../../lib/quick-create.js';
-import { addContextOptions, addJsonOption, addTeamOptions } from '../../lib/command-helpers.js';
+import { addContextOptions, addJsonOption, addTeamOptions, addNoInputOption } from '../../lib/command-helpers.js';
 import { emit, getColor } from '../../lib/output.js';
 import { runLink, renderLinkHuman, type LinkResult } from '../../lib/link.js';
 
@@ -11,6 +12,8 @@ interface WiQuickFlags {
   project?: string;
   repo?: string;
   team?: string;
+  area?: string;
+  iteration?: string;
   like?: string;
   save?: boolean;
   reresolve?: boolean;
@@ -22,7 +25,7 @@ interface WiQuickFlags {
 
 export function registerWiQuickCommand(wi: Command): void {
   const cmd = wi
-    .command('quick <type> <title>')
+    .command('quick <type> [title]')
     .description('Fast work item filing for any type — `dova bug` is sugar over this with type defaulted to Bug')
     .option('--at <location>', 'file:line to build a "Found in:" permalink from')
     .option('--link', 'link the newly created id to the current branch (chains into `dova link`)');
@@ -30,10 +33,18 @@ export function registerWiQuickCommand(wi: Command): void {
   addContextOptions(cmd);
   addTeamOptions(cmd);
   addJsonOption(cmd);
+  addNoInputOption(cmd);
 
-  cmd.action(async (type: string, title: string, opts: WiQuickFlags) => {
+  cmd.action(async (type: string, titleArg: string | undefined, opts: WiQuickFlags) => {
     const runner = defaultRunner;
     const color = getColor(opts.color === false);
+    const title = await readTextArg(titleArg, {
+      what: 'title',
+      hints: [
+        "Pass it directly (single-quoted, so nothing is expanded): dova wi quick Task 'Add retry'",
+        "Or pipe it in: dova wi quick Task - <<'EOF'",
+      ],
+    });
 
     const result = await quickCreateWorkItem(runner, {
       type,
@@ -41,6 +52,8 @@ export function registerWiQuickCommand(wi: Command): void {
       at: opts.at,
       project: opts.project,
       team: opts.team,
+      area: opts.area,
+      iteration: opts.iteration,
       like: opts.like,
       save: opts.save,
       reresolve: opts.reresolve,

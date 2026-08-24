@@ -1,4 +1,5 @@
 import type { Command } from 'commander';
+import { setNonInteractive } from './interactive.js';
 import { UserError } from './errors.js';
 
 /** --org / --org-url / --project / --repo — the flags that win over context resolution. */
@@ -10,13 +11,29 @@ export function addContextOptions(cmd: Command): Command {
     .option('--repo <repo>', 'Azure Repos repository name (overrides context resolution)');
 }
 
-/** --team / --like / --save / --reresolve — for commands that need team-level (area/iteration) resolution. */
+/** --team / --area / --iteration / --like / --save / --reresolve — for commands that need team-level (area/iteration) resolution. */
 export function addTeamOptions(cmd: Command): Command {
   return cmd
     .option('--team <team>', 'team name (overrides team resolution)')
+    .option('--area <path>', 'area path, set directly (skips resolving one from a team)')
+    .option('--iteration <path>', 'iteration path, set directly (skips resolving one from a team)')
     .option('--like <id>', 'copy area/iteration from an existing work item instead of resolving a team')
     .option('--save', "--like only: persist that area/iteration as this repo's default")
     .option('--reresolve', 'ignore cached/saved team & area/iteration resolution and re-resolve');
+}
+
+/**
+ * `--no-input` for the commands that can ask a question. Registered
+ * with its own preAction hook so the flag takes effect before the
+ * action body runs, without every command having to remember to
+ * forward it into the prompt layer.
+ */
+export function addNoInputOption(cmd: Command): Command {
+  return cmd
+    .option('--no-input', 'never prompt — error instead (implied when stdin is not a terminal, or $DOVA_NO_INPUT is set)')
+    .hook('preAction', (thisCommand) => {
+      if (thisCommand.opts().input === false) setNonInteractive(true);
+    });
 }
 
 /**

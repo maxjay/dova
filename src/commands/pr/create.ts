@@ -1,6 +1,7 @@
 import type { Command } from 'commander';
 import type { Runner } from '../../lib/exec.js';
 import { defaultRunner, runAzJson, tryGit } from '../../lib/exec.js';
+import { readTextArg } from '../../lib/stdin.js';
 import { gitConfigGet } from '../../lib/config.js';
 import { resolveContext, buildPrWebUrl } from '../../lib/context.js';
 import { addContextOptions, addJsonOption, addNoColorOption } from '../../lib/command-helpers.js';
@@ -41,7 +42,7 @@ export function registerPrCreateCommand(pr: Command): void {
       '--work-items <ids...>',
       "work item ids to link (default: tracked ids from `dova link`, or #id refs in this branch's commit messages)"
     )
-    .option('--title <title>', 'title (default: last commit subject)')
+    .option('--title <title>', "title (default: last commit subject; use '-' to read it from stdin)")
     .option('--draft', 'create as a draft PR');
 
   addContextOptions(cmd);
@@ -62,7 +63,12 @@ export function registerPrCreateCommand(pr: Command): void {
       workItems = tracked ? tracked.split(',').map((s) => s.trim()).filter(Boolean) : await workItemsFromCommitMessages(runner);
     }
 
-    const title = opts.title ?? (await tryGit(runner, ['log', '-1', '--format=%s'])) ?? `Merge ${ctx.branch}`;
+    // `--title -` reads stdin; omitting --title entirely still falls back
+    // to the last commit subject, so it can't mean "read stdin" here.
+    const title =
+      opts.title === '-'
+        ? await readTextArg('-', { what: 'title' })
+        : opts.title ?? (await tryGit(runner, ['log', '-1', '--format=%s'])) ?? `Merge ${ctx.branch}`;
 
     const args = [
       'repos', 'pr', 'create',

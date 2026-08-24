@@ -4,6 +4,7 @@ import { runAzJson } from './exec.js';
 import { gitConfigGet, gitConfigSet } from './config.js';
 import { fetchWorkItem, fieldValue } from './work-items.js';
 import { NotFoundError, UserError } from './errors.js';
+import { isInteractive, nonInteractiveError } from './interactive.js';
 
 /* ------------------------------------------------------------------ *
  * az output shapes.
@@ -45,13 +46,29 @@ export interface AzTeamIteration {
  * ------------------------------------------------------------------ */
 
 export interface TeamResolverPrompts {
-  select(config: { message: string; choices: Array<{ name: string; value: string }> }): Promise<string>;
+  select(config: {
+    message: string;
+    choices: Array<{ name: string; value: string }>;
+    /** Flag(s) that would have answered this, quoted back when dova can't prompt. */
+    nonInteractiveHint?: string[];
+  }): Promise<string>;
   confirm(config: { message: string; default?: boolean }): Promise<boolean>;
 }
 
 export const defaultPrompts: TeamResolverPrompts = {
-  select: (config) => inquirerSelect(config),
-  confirm: (config) => inquirerConfirm(config),
+  select: ({ nonInteractiveHint, ...config }) => {
+    // Rejects rather than throwing synchronously: the declared return
+    // type is a promise, and callers await it.
+    if (!isInteractive()) {
+      return Promise.reject(nonInteractiveError(config.message, nonInteractiveHint, config.choices.map((c) => c.value)));
+    }
+    return inquirerSelect(config);
+  },
+  // Every confirm dova asks is a convenience with a safe "no" — don't
+  // save to git config, don't switch branches. Without a terminal we
+  // take that side-effect-free path rather than erroring: the caller
+  // asked for the real work, not for the bookkeeping around it.
+  confirm: (config) => (isInteractive() ? inquirerConfirm(config) : Promise.resolve(false)),
 };
 
 /* ------------------------------------------------------------------ *
@@ -146,6 +163,7 @@ export async function resolveTeam(
     chosen = await prompts.select({
       message: `Multiple teams in "${project}" — which one?`,
       choices: teams.map((t) => ({ name: t.name, value: t.name })),
+      nonInteractiveHint: ['Pass --team <name>.'],
     });
   }
 
@@ -201,6 +219,9 @@ export async function resolveAreaPath(
   const choice = await prompts.select({
     message: `No default area path is set for team "${team}". Pick one:`,
     choices: values.map((v) => ({ name: v.value, value: v.value })),
+    nonInteractiveHint: [
+      'Pass --area <path>, or --like <id> to copy area/iteration from an existing work item.',
+    ],
   });
   return { areaPath: choice };
 }
@@ -256,7 +277,7 @@ export async function resolveIterationPath(
  * caching by team (rather than just by repo) bought nothing real.
  * ------------------------------------------------------------------ */
 
-export type CreateContextSource = 'like' | 'repo-local-area' | 'team';
+export type CreateContextSource = 'like' | 'flags' | 'repo-local-area' | 'team';
 
 export interface ResolvedCreateContext {
   /** null when area/iteration came from --like or a saved repo-local override — no team was ever resolved. */
@@ -299,9 +320,14 @@ export async function resolveCreateContext(
   runner: Runner,
   orgUrl: string,
   project: string,
-  flags: { team?: string } = {},
+  flags: { team?: string; area?: string; iteration?: string } = {},
   opts: ResolveCreateContextOptions = {}
 ): Promise<ResolvedCreateContext> {
+  if (opts.like && (flags.area || flags.iteration)) {
+    throw new UserError('--like and --area/--iteration are mutually exclusive.', [
+      '--like copies both paths from an existing ticket; --area/--iteration set them directly. Use one or the other.',
+    ]);
+  }
   if (opts.save && !opts.like) {
     throw new UserError('--save only makes sense together with --like.', [
       "Pass --like <id> --save to persist that ticket's area/iteration as this repo's default.",
@@ -331,10 +357,24 @@ export async function resolveCreateContext(
     return { team: null, areaPath, iterationPath, warnings: [], fromCache: false, source: 'like' };
   }
 
+  // Both paths given outright: there is nothing left to resolve, and no
+  // team to resolve it from — same standing as --like.
+  if (flags.area && flags.iteration) {
+    return {
+      team: null,
+      areaPath: flags.area,
+      iterationPath: flags.iteration,
+      warnings: [],
+      fromCache: false,
+      source: 'flags',
+    };
+  }
+
   // --team is an explicit ad-hoc override too, same standing as --like —
   // it must reach team-based resolution below rather than being silently
-  // shadowed by whatever's already saved for this repo.
-  if (!opts.reresolve && !flags.team) {
+  // shadowed by whatever's already saved for this repo. So are a lone
+  // --area/--iteration.
+  if (!opts.reresolve && !flags.team && !flags.area && !flags.iteration) {
     const [savedArea, savedIteration] = await Promise.all([
       gitConfigGet(runner, 'dova.area', { cwd: opts.cwd }),
       gitConfigGet(runner, 'dova.iteration', { cwd: opts.cwd }),
@@ -346,11 +386,19 @@ export async function resolveCreateContext(
 
   const prompts = opts.prompts ?? defaultPrompts;
   const teamResult = await resolveTeam(runner, orgUrl, project, flags, opts);
-  const area = await resolveAreaPath(runner, orgUrl, project, teamResult.team, prompts);
-  const iteration = await resolveIterationPath(runner, orgUrl, project, teamResult.team);
+  // A path given explicitly is used as-is: no az call to resolve it, and
+  // no prompt to disambiguate one dova was told outright.
+  const area: ResolvedAreaPath = flags.area
+    ? { areaPath: flags.area }
+    : await resolveAreaPath(runner, orgUrl, project, teamResult.team, prompts);
+  const iteration: ResolvedIterationPath = flags.iteration
+    ? { iterationPath: flags.iteration }
+    : await resolveIterationPath(runner, orgUrl, project, teamResult.team);
   const warnings = [area.warning, iteration.warning].filter((w): w is string => Boolean(w));
 
-  if (teamResult.source !== 'flag') {
+  // Same rule as --team: a one-off override never silently becomes the
+  // repo's saved default.
+  if (teamResult.source !== 'flag' && !flags.area && !flags.iteration) {
     await gitConfigSet(runner, 'dova.area', area.areaPath, { cwd: opts.cwd });
     await gitConfigSet(runner, 'dova.iteration', iteration.iterationPath, { cwd: opts.cwd });
   }

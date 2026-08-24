@@ -1,6 +1,7 @@
 import type { Command } from 'commander';
 import type { Runner } from '../../lib/exec.js';
 import { defaultRunner } from '../../lib/exec.js';
+import { readTextArg } from '../../lib/stdin.js';
 import { resolveContext } from '../../lib/context.js';
 import {
   fetchPrById,
@@ -57,13 +58,19 @@ export function registerPrCommentCommand(pr: Command): void {
   const comment = pr.command('comment').description('Pull request comment threads: post, show, reply, resolve');
 
   const addCmd = comment
-    .command('add <id> <text>', { isDefault: true })
-    .description('Post a new comment thread on a pull request');
+    .command('add <id> [text]', { isDefault: true })
+    .description("Post a new comment thread on a pull request (omit <text>, or pass '-', to read it from stdin)");
   addContextOptions(addCmd);
   addJsonOption(addCmd);
-  addCmd.action(async (idArg: string, text: string, opts: PrCommentFlags) => {
+  addCmd.action(async (idArg: string, textArg: string | undefined, opts: PrCommentFlags) => {
     const runner = defaultRunner;
     const color = getColor(opts.color === false);
+    const text = await readTextArg(textArg, {
+      what: 'comment text',
+      hints: [
+        "Pipe it in so the shell can't touch backticks or $: dova pr comment <id> - <<'EOF'",
+      ],
+    });
     const ctx = await resolveContext(runner, { org: opts.org, orgUrl: opts.orgUrl, project: opts.project, repo: opts.repo });
     const id = Number(idArg);
     const { repo, project } = await resolveRepoForPr(runner, ctx.orgUrl, id, ctx.repo, ctx.project);
@@ -96,14 +103,20 @@ export function registerPrCommentCommand(pr: Command): void {
   });
 
   const replyCmd = comment
-    .command('reply <id> <thread-id> <text>')
-    .description('Reply within an existing comment thread (a response, not a new thread)')
+    .command('reply <id> <thread-id> [text]')
+    .description("Reply within an existing comment thread (omit <text>, or pass '-', to read it from stdin)")
     .option('--resolve [status]', "also resolve the thread after replying (default: resolved; same status values as `comment resolve`) — the reply is usually the reason it's now resolved");
   addContextOptions(replyCmd);
   addJsonOption(replyCmd);
-  replyCmd.action(async (idArg: string, threadIdArg: string, text: string, opts: PrCommentReplyFlags) => {
+  replyCmd.action(async (idArg: string, threadIdArg: string, textArg: string | undefined, opts: PrCommentReplyFlags) => {
     const runner = defaultRunner;
     const color = getColor(opts.color === false);
+    const text = await readTextArg(textArg, {
+      what: 'reply text',
+      hints: [
+        "Pipe it in so the shell can't touch backticks or $: dova pr comment reply <id> <thread-id> - <<'EOF'",
+      ],
+    });
     const ctx = await resolveContext(runner, { org: opts.org, orgUrl: opts.orgUrl, project: opts.project, repo: opts.repo });
     const id = Number(idArg);
     const threadId = Number(threadIdArg);
