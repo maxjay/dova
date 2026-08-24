@@ -9,6 +9,7 @@ import { registerViewCommand } from './commands/view.js';
 import { registerWiCommand } from './commands/wi/index.js';
 import { registerPrCommand } from './commands/pr/index.js';
 import { registerPipelineCommand } from './commands/pipeline/index.js';
+import { registerAgentsCommand } from './commands/agents.js';
 import { registerApiCommand } from './commands/api.js';
 import { registerCompletionCommand } from './commands/completion.js';
 
@@ -40,6 +41,7 @@ export function buildProgram(): Command {
   registerWiCommand(program);
   registerPrCommand(program);
   registerPipelineCommand(program);
+  registerAgentsCommand(program);
   registerApiCommand(program);
   registerCompletionCommand(program);
 
