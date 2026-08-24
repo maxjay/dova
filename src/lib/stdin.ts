@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import { UserError } from './errors.js';
 
 /* ------------------------------------------------------------------ *
@@ -17,6 +18,26 @@ import { UserError } from './errors.js';
  * ------------------------------------------------------------------ */
 
 type ReadableTTY = NodeJS.ReadableStream & { isTTY?: boolean };
+
+/**
+ * Whether something is actually piped or redirected in — as opposed to
+ * merely "not a terminal", which is true of every agent and CI run even
+ * when nothing was sent.
+ *
+ * A pipe is a FIFO; a `< file` redirect is a regular file with a size.
+ * A closed stdin or `< /dev/null` is a character device, and neither
+ * carries anything to read.
+ */
+export function stdinHasData(fd = 0): boolean {
+  try {
+    const stat = fs.fstatSync(fd);
+    if (stat.isFIFO()) return true;
+    if (stat.isFile()) return stat.size > 0;
+    return false;
+  } catch {
+    return false;
+  }
+}
 
 export interface ReadTextArgOptions {
   /** What's missing, for the error message — e.g. "comment text", "title". */

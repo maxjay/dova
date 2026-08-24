@@ -1,7 +1,7 @@
 import type { Command } from 'commander';
 import type { Runner } from '../../lib/exec.js';
 import { defaultRunner, runAzJson, tryGit } from '../../lib/exec.js';
-import { readTextArg } from '../../lib/stdin.js';
+import { readTextArg, stdinHasData } from '../../lib/stdin.js';
 import { gitConfigGet } from '../../lib/config.js';
 import { resolveContext, buildPrWebUrl } from '../../lib/context.js';
 import { addContextOptions, addJsonOption, addNoColorOption } from '../../lib/command-helpers.js';
@@ -16,6 +16,8 @@ interface PrCreateFlags {
   repo?: string;
   workItems?: string[];
   title?: string;
+  description?: string;
+  target?: string;
   draft?: boolean;
   json?: string | boolean;
   color: boolean;
@@ -43,6 +45,8 @@ export function registerPrCreateCommand(pr: Command): void {
       "work item ids to link (default: tracked ids from `dova link`, or #id refs in this branch's commit messages)"
     )
     .option('--title <title>', "title (default: last commit subject; use '-' to read it from stdin)")
+    .option('--description <text>', "description/body (use '-' to read it from stdin)")
+    .option('--target <branch>', "branch to merge into (default: the repo's default branch)")
     .option('--draft', 'create as a draft PR');
 
   addContextOptions(cmd);
@@ -63,12 +67,33 @@ export function registerPrCreateCommand(pr: Command): void {
       workItems = tracked ? tracked.split(',').map((s) => s.trim()).filter(Boolean) : await workItemsFromCommitMessages(runner);
     }
 
+    // Only one of these can read stdin, and piping without asking for it
+    // would silently drop the text — see the guard below.
+    if (opts.title === '-' && opts.description === '-') {
+      throw new UserError('Only one of --title and --description can read stdin.', [
+        'Pass the short one inline: --title \'...\' --description -',
+      ]);
+    }
+
     // `--title -` reads stdin; omitting --title entirely still falls back
     // to the last commit subject, so it can't mean "read stdin" here.
     const title =
       opts.title === '-'
         ? await readTextArg('-', { what: 'title' })
         : opts.title ?? (await tryGit(runner, ['log', '-1', '--format=%s'])) ?? `Merge ${ctx.branch}`;
+
+    const description =
+      opts.description === '-' ? await readTextArg('-', { what: 'description' }) : opts.description;
+
+    // Text piped in that nothing asked for is text that would vanish: the
+    // PR gets created, looks fine, and has no description. Catch it here
+    // rather than let it succeed emptily.
+    if (stdinHasData() && opts.title !== '-' && opts.description !== '-') {
+      throw new UserError('Something is piped into `dova pr create`, but nothing was told to read it.', [
+        "Pass --description - to use it as the PR description (or --title - for the title).",
+        'Example: cat body.md | dova pr create --title \'...\' --description -',
+      ]);
+    }
 
     const args = [
       'repos', 'pr', 'create',
@@ -79,6 +104,11 @@ export function registerPrCreateCommand(pr: Command): void {
       '--title', title,
       '--transition-work-items', 'true',
     ];
+    // az's --description takes a list, one argument per line, joined with
+    // newlines on its side — but a single argument containing newlines
+    // survives that join unchanged, so pass it whole.
+    if (description) args.push('--description', description);
+    if (opts.target) args.push('--target-branch', opts.target);
     if (workItems.length > 0) args.push('--work-items', ...workItems);
     if (opts.draft) args.push('--draft', 'true');
 

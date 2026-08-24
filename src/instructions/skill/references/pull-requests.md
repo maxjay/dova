@@ -21,8 +21,24 @@ With none of those the PR is created **successfully, with nothing
 attached and no error**. Nothing reports it later. That is the failure
 this ordering exists to prevent.
 
-Title defaults to the last commit subject. `--draft` opens it as a
-draft. `--title -` reads the title from stdin.
+```console
+$ dova pr create --title 'feat(atm): filter reload by permitted teams' \
+    --description - --target develop <<'EOF'
+**ATMControlsReloadStrategy** — filters the reload to permitted teams.
+
+- `decorateIterator()` wraps the cache iterator
+- Fails open when preferences are absent
+EOF
+```
+
+`--title` defaults to the last commit subject. `--description` takes
+the body; `--target` the branch to merge into (default: the repo's
+default branch). `--draft` opens it as a draft. Either `--title` or
+`--description` may be `-` to read stdin, but not both.
+
+Piping something in without `--description -` is an error, not a
+silent drop — a PR created with the body thrown away looks like it
+worked.
 
 Do not close tickets after merging. `pr create` passes
 `--transition-work-items true`, so Azure DevOps transitions linked
