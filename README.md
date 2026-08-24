@@ -51,8 +51,8 @@ az login
 `dova` reads your `az` credentials and configuration; it doesn't manage
 its own.
 
-Working with a coding agent? Run this once per repo, and commit what it
-writes — see [Teaching a coding agent to use it](#teaching-a-coding-agent-to-use-it):
+Working with a coding agent? Run this once per machine — see
+[Teaching a coding agent to use it](#teaching-a-coding-agent-to-use-it):
 
 ```sh
 dova instructions init
@@ -235,7 +235,7 @@ src/auth.ts | 2 ++
 | `dova link <id...>` | Associate the current branch with one or more work items. |
 | `dova unlink [id...]` | Undo it — remove id(s) from the current branch (`--all` for everything). |
 | **Agent setup** | |
-| `dova instructions init` | Teach Devin Desktop/Copilot to use dova — writes `AGENTS.md` and `.github/copilot-instructions.md`. |
+| `dova instructions init` | Teach Devin Desktop/Copilot to use dova, in every repo on the machine. `--repo` to commit them into one repo instead. |
 | **Everything else** | |
 | `dova api <path>` | An authenticated REST call, for anything not wrapped above. |
 | `dova completion <shell>` | Shell completions, generated from the live command tree. |
@@ -301,24 +301,36 @@ and the stdin rule above. `dova instructions init` writes that down:
 ```console
 $ dova instructions init
 Wrote:
-  ✓ AGENTS.md  — Devin Desktop / Windsurf (also Cursor, Codex)
+  ✓ ~/.codeium/windsurf/memories/global_rules.md  — Devin Desktop / Windsurf
       created
-  ✓ .github/copilot-instructions.md  — GitHub Copilot in VS Code
+  ✓ Code/User/prompts/dova.instructions.md  — GitHub Copilot in VS Code (all workspaces)
       created
 ```
 
-Two files rather than one because neither target reads the other's by
-default. Devin Desktop — what Windsurf was renamed to in June 2026,
-after which its Cascade agent was retired in favour of Devin Local —
-reads a root `AGENTS.md` as an always-on rule, feeding it into the same
-rules engine behind `.devin/rules/`, so there's no need to write that
-directory too. VS Code's `AGENTS.md` support, by contrast, is
-experimental and off behind `chat.useAgentsMdFile`; there,
-`.github/copilot-instructions.md` is what works out of the box. Same
-content in both, generated from one source rather than maintained
-twice, and not a symlink because a Windows checkout with
-`core.symlinks=false` turns one into a text file containing a path,
-silently.
+**Global by default**, because that's how `dova` itself works: it's
+installed once and infers its context from whatever repo you're
+standing in, so the rules for using it belong at the same level rather
+than needing a run in every repo. The VS Code file gets an `applyTo:
+'**'` frontmatter, which is what makes a user-level instructions file
+apply across all workspaces.
+
+`--repo` installs into the current repo instead, as `AGENTS.md` and
+`.github/copilot-instructions.md` — worth committing so teammates'
+agents get the same rules. Two files rather than one because neither
+target reads the other's by default: Devin Desktop (what Windsurf was
+renamed to in June 2026, after which Cascade was retired in favour of
+Devin Local) reads a root `AGENTS.md` as an always-on rule, while VS
+Code's `AGENTS.md` support is experimental and off behind
+`chat.useAgentsMdFile`, so there `.github/copilot-instructions.md` is
+what works out of the box. Not a symlink between them, because a
+Windows checkout with `core.symlinks=false` turns one into a text file
+containing a path, silently.
+
+The global install ships a shorter, conditionally-framed block — it
+says to use `dova` *when a repo's remote points at Azure DevOps*, since
+unlike the repo-scoped one it's in context for every repo you open.
+Devin's global rules file is also capped at 6,000 characters, half the
+workspace limit.
 
 It's `instructions`, not `agents`, because that's what these files are —
 VS Code and GitHub both call them "custom instructions". An *agent*
