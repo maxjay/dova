@@ -237,6 +237,16 @@ describe('runInstructionsInstall (--repo)', () => {
   });
 });
 
+/** A worked example is a console block that shows a command *and* its output. */
+function countWorkedExamples(block: string): number {
+  return (block.match(/```console\n[\s\S]*?```/g) ?? []).filter((b) => /^\$ /m.test(b) && b.split('\n').length > 3).length;
+}
+
+/** A wrong/right pair is a ✗ line — the form that teaches what not to do. */
+function countWrongRightPairs(block: string): number {
+  return (block.match(/^✗ /gm) ?? []).length;
+}
+
 describe('the shipped instructions block', () => {
   it('imports as real content and carries the rules that cannot be enforced in code', async () => {
     const { default: instructions } = await import('../src/instructions/block.md');
@@ -271,11 +281,10 @@ describe('the shipped instructions block', () => {
     // The rules that cannot be enforced in code survive the condensing.
     expect(globalBlock).toMatch(/dova link[\s\S]*dova pr create/);
     expect(globalBlock).toMatch(/az boards work-item update/);
-    // And so does the few-shot: worked scenarios, not just rules.
-    expect(globalBlock.match(/^### /gm)?.length ?? 0).toBeGreaterThanOrEqual(6);
-    expect(globalBlock).toContain('### Common mistakes');
-    expect(globalBlock).toMatch(/✗ dova pr view 612/);
-    expect(globalBlock).toMatch(/✓ dova summarize 612/);
+    // And so does the few-shot. Asserted structurally rather than by
+    // heading text, which is presentation and gets reworded.
+    expect(countWorkedExamples(globalBlock)).toBeGreaterThanOrEqual(3);
+    expect(countWrongRightPairs(globalBlock)).toBeGreaterThanOrEqual(3);
   });
 
   it('stays under the 12,000-character cap a workspace rule file is allowed', async () => {
@@ -291,11 +300,19 @@ describe('the shipped instructions block', () => {
   it('teaches by worked example, not by rules alone', async () => {
     const { default: instructions } = await import('../src/instructions/block.md');
 
-    // Few-shot: complete command-plus-output scenarios, and explicit
-    // wrong/right pairs for the mistakes that are otherwise silent.
-    expect(instructions.match(/### Worked example/g)?.length ?? 0).toBeGreaterThanOrEqual(4);
-    expect(instructions).toContain('### Common mistakes');
-    expect(instructions).toMatch(/✗ dova pr view 612/);
-    expect(instructions).toMatch(/✓ dova summarize 612/);
+    expect(countWorkedExamples(instructions)).toBeGreaterThanOrEqual(4);
+    expect(countWrongRightPairs(instructions)).toBeGreaterThanOrEqual(4);
+  });
+
+  it('commands rather than explains — imperative, not hedged', async () => {
+    const { default: instructions } = await import('../src/instructions/block.md');
+    const { default: globalBlock } = await import('../src/instructions/global-block.md');
+
+    // Hedging wastes the budget and reads as optional. An instruction
+    // block should tell the agent what to do, not reason with it.
+    for (const block of [instructions, globalBlock]) {
+      expect(block).not.toMatch(/\byou may want to\b|\bit'?s worth\b|\bconsider (?:using|running)\b/i);
+      expect(block).toMatch(/\bNever\b/);
+    }
   });
 });
