@@ -12,6 +12,7 @@ link. If `dova` is not installed, stop and say so.
 |---|---|
 | Read a ticket or PR | `dova view <id>` |
 | A PR's code | `dova summarize <pr-id>` |
+| What a file changed | `dova summarize --files <path>` |
 | This branch's state | `dova status` |
 | A PR's threads | `dova pr view <pr-id>` |
 | One thread in full | `dova pr comment show <pr-id> <thread-id>` |
@@ -20,7 +21,8 @@ link. If `dova` is not installed, stop and say so.
 | Why CI failed | `dova pipeline log` |
 | Anything else | `dova api <path>` |
 
-Add `--full` to `view` or `summarize` when text is truncated.
+Add `--full` to `view` when text is truncated. `summarize`'s `Diff` is
+a stat — for actual code, pass `--files <path...>`, not `--full`.
 
 Depth lives in `.agents/skills/dova/references/` (or
 `~/.agents/skills/dova/references/`). Open `work-items.md`,

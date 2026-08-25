@@ -287,3 +287,93 @@ describe('gatherSummary uncommitted changes', () => {
     expect(full.uncommitted?.patch).toBe('working tree patch');
   });
 });
+
+/* ------------------------------------------------------------------ *
+ * Restricting the diff to named paths. A 31-file branch's full patch is
+ * thousands of lines — too much for a human and too much to hand an
+ * agent — so naming files is how actual code content comes back.
+ * ------------------------------------------------------------------ */
+
+describe('gatherSummary --files', () => {
+  function recordingRunner(calls: string[][], currentBranch = 'other') {
+    return createFakeRunner({
+      git: (args) => {
+        calls.push(args);
+        if (args[0] === 'rev-parse' && args.includes('--abbrev-ref')) return ok(currentBranch);
+        if (args[0] === 'rev-parse' && args.includes('--verify') && args[args.length - 1] === 'refs/heads/fix/200') return ok('deadbeef');
+        if (args[0] === 'rev-parse' && args.includes('--verify') && args[args.length - 1] === 'origin/develop') return ok('deadbeef');
+        if (args[0] === 'config') return fail('', 1);
+        if (args[0] === 'log') return ok('');
+        if (args[0] === 'ls-files') return ok('');
+        if (args[0] === 'diff' && args.includes('--stat')) return ok(' src/auth.ts | 4 +-');
+        if (args[0] === 'diff') return ok('@@ -1,3 +1,4 @@\n+const guard = true;');
+        return fail(`unexpected git call: ${args.join(' ')}`);
+      },
+      az: () => okJson([]),
+    });
+  }
+
+  const base = { org: 'contoso', project: 'MyProject', base: 'develop' };
+
+  it('returns the patch without --full, because naming a file means wanting its content', async () => {
+    const calls: string[][] = [];
+    const result = await gatherSummary(recordingRunner(calls), 'fix/200', base, { files: ['src/auth.ts'] });
+
+    expect(result.fullDiff).toContain('const guard = true;');
+    // The commit log stays compact — only the diff was asked about.
+    expect(result.fullLog).toBeUndefined();
+  });
+
+  it('passes the paths after a -- separator so a path can never be read as a revision', async () => {
+    const calls: string[][] = [];
+    await gatherSummary(recordingRunner(calls), 'fix/200', base, { files: ['src/auth.ts', 'src/pr'] });
+
+    const diffs = calls.filter((c) => c[0] === 'diff');
+    expect(diffs.length).toBeGreaterThan(0);
+    for (const args of diffs) {
+      const sep = args.indexOf('--');
+      expect(sep).toBeGreaterThan(0);
+      expect(args.slice(sep + 1)).toEqual(['src/auth.ts', 'src/pr']);
+    }
+  });
+
+  it('omits the separator entirely when no paths are named', async () => {
+    const calls: string[][] = [];
+    await gatherSummary(recordingRunner(calls), 'fix/200', base, { full: true });
+
+    for (const args of calls.filter((c) => c[0] === 'diff')) {
+      expect(args).not.toContain('--');
+    }
+  });
+
+  it('restricts the stat as well, so the summary and the patch describe the same thing', async () => {
+    const calls: string[][] = [];
+    await gatherSummary(recordingRunner(calls), 'fix/200', base, { files: ['src/auth.ts'] });
+
+    const stat = calls.find((c) => c[0] === 'diff' && c.includes('--stat'));
+    expect(stat?.slice(stat.indexOf('--') + 1)).toEqual(['src/auth.ts']);
+  });
+
+  it('restricts the working-tree diff and the untracked listing too', async () => {
+    const calls: string[][] = [];
+    await gatherSummary(recordingRunner(calls, 'fix/200'), 'fix/200', base, { files: ['src/auth.ts'] });
+
+    const lsFiles = calls.find((c) => c[0] === 'ls-files');
+    expect(lsFiles).toContain('src/auth.ts');
+
+    const treeDiffs = calls.filter((c) => c[0] === 'diff' && c.includes('HEAD'));
+    expect(treeDiffs.length).toBe(2); // stat + patch
+    for (const args of treeDiffs) {
+      expect(args.slice(args.indexOf('--') + 1)).toEqual(['src/auth.ts']);
+    }
+  });
+
+  it('records the pathspecs on the result, so --json says what was left out', async () => {
+    const calls: string[][] = [];
+    const scoped = await gatherSummary(recordingRunner(calls), 'fix/200', base, { files: ['src/auth.ts'] });
+    expect(scoped.files).toEqual(['src/auth.ts']);
+
+    const whole = await gatherSummary(recordingRunner([]), 'fix/200', base);
+    expect(whole.files).toBeUndefined();
+  });
+});
