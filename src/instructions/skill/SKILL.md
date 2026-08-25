@@ -18,6 +18,7 @@ branch-to-ticket link that raw `az` can neither read nor write.
 |---|---|
 | Read a ticket or PR | `dova view <id>` |
 | A PR's code | `dova summarize <pr-id>` |
+| What a file changed | `dova summarize --files <path>` |
 | This branch's state | `dova status` |
 | A PR's threads | `dova pr view <pr-id>` |
 | One thread in full | `dova pr comment show <pr-id> <thread-id>` |
@@ -26,8 +27,9 @@ branch-to-ticket link that raw `az` can neither read nor write.
 | Why CI failed | `dova pipeline log` |
 | Anything else | `dova api <path>` |
 
-`dova <command> --help` lists flags. Add `--full` to `view` or
-`summarize` when text is truncated.
+`dova <command> --help` lists flags. Add `--full` to `view` when text is
+truncated. `summarize`'s `Diff` is a stat — for actual code, pass
+`--files <path...>`, not `--full`.
 
 ## Read a reference when it applies
 

@@ -74,8 +74,28 @@ the current branch. It fetches the branch if it is not local, so it
 works on a PR nobody here has checked out — never `git checkout` to
 read one.
 
-`--full` prints the whole patch and full commit messages instead of the
-stat.
+### Reading the actual code
+
+The `Diff` above is a **stat** — file names and line counts, no content.
+To read what actually changed, name the paths:
+
+```console
+$ dova summarize --files src/theme.ts
+Diff — src/theme.ts
+diff --git a/src/theme.ts b/src/theme.ts
+@@ -1,3 +1,4 @@
++export const theme = prefersDark() ? dark : light;
+```
+
+`--files` takes several paths and takes directories:
+`dova summarize 612 --files src/auth src/theme.ts`. It restricts the
+stat, the patch and the `Uncommitted` section alike, so all three
+describe the same subset.
+
+Read the stat first, then pull the files that matter. `--full` prints
+the entire patch and full commit messages; on a 30-file branch that is
+thousands of lines. **Use `--files`.** Reach for `--full` only on a
+branch the stat shows is small.
 
 `Diff` is **committed work only** — what the PR will contain.
 Uncommitted work appears separately under `Uncommitted`, and only when

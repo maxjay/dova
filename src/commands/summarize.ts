@@ -16,6 +16,7 @@ export interface SummarizeFlags {
   project?: string;
   repo?: string;
   base?: string;
+  files?: string[];
   json?: string | boolean;
   jq?: string;
   color: boolean;
@@ -47,6 +48,8 @@ export interface SummarizeResult {
   workItems: SummarizeWorkItem[];
   commits: SummarizeCommit[];
   diffStat: string;
+  /** The pathspecs the diff was restricted to, when it was restricted. */
+  files?: string[];
   fullLog?: string;
   fullDiff?: string;
   /**
@@ -133,6 +136,21 @@ function toSummarizeWorkItem(item: AzWorkItem, primaryId: number | undefined): S
 export interface GatherSummaryOptions {
   cwd?: string;
   full?: boolean;
+  /**
+   * git pathspecs to restrict the diff to. A 31-file branch's full patch
+   * is thousands of lines — too much to read and too much to hand an
+   * agent — so naming files is how you get actual content out of a large
+   * change. Naming any implies the patch, not the stat: asking for a
+   * file means asking what changed in it.
+   */
+  files?: string[];
+}
+
+/** `git diff <range> [-- path...]`, with the pathspec separator only when there are paths. */
+function diffArgs(range: string, files: string[] | undefined, extra: string[] = []): string[] {
+  const args = ['diff', ...extra, range];
+  if (files && files.length > 0) args.push('--', ...files);
+  return args;
 }
 
 /**
@@ -181,7 +199,12 @@ export async function gatherSummary(
       return { sha: sha ?? '', subject: subject ?? '' };
     });
 
-  const diffStat = (await tryGit(runner, ['diff', '--stat', `${diffable}...${headRef}`], { cwd })) ?? '';
+  const range = `${diffable}...${headRef}`;
+  // Naming files means wanting their content, so the patch comes back
+  // whether or not --full was passed.
+  const wantPatch = Boolean(opts.full) || (opts.files?.length ?? 0) > 0;
+
+  const diffStat = (await tryGit(runner, diffArgs(range, opts.files, ['--stat']), { cwd })) ?? '';
 
   const result: SummarizeResult = {
     branch,
@@ -196,10 +219,13 @@ export async function gatherSummary(
     commits,
     diffStat,
   };
+  if (opts.files?.length) result.files = opts.files;
 
   if (opts.full) {
     result.fullLog = (await tryGit(runner, ['log', `${diffable}..${headRef}`], { cwd })) ?? '';
-    result.fullDiff = (await tryGit(runner, ['diff', `${diffable}...${headRef}`], { cwd })) ?? '';
+  }
+  if (wantPatch) {
+    result.fullDiff = (await tryGit(runner, diffArgs(range, opts.files), { cwd })) ?? '';
   }
 
   // `diffStat` above compares commits, so anything still in the working
@@ -212,9 +238,9 @@ export async function gatherSummary(
     // `diff HEAD` covers staged and unstaged together; untracked files
     // are invisible to git diff entirely, so they're listed separately.
     const [stat, untrackedRaw, patch] = await Promise.all([
-      tryGit(runner, ['diff', '--stat', 'HEAD'], { cwd }),
-      tryGit(runner, ['ls-files', '--others', '--exclude-standard'], { cwd }),
-      opts.full ? tryGit(runner, ['diff', 'HEAD'], { cwd }) : Promise.resolve(null),
+      tryGit(runner, diffArgs('HEAD', opts.files, ['--stat']), { cwd }),
+      tryGit(runner, ['ls-files', '--others', '--exclude-standard', ...(opts.files ?? [])], { cwd }),
+      wantPatch ? tryGit(runner, diffArgs('HEAD', opts.files), { cwd }) : Promise.resolve(null),
     ]);
     const untracked = (untrackedRaw ?? '').split('\n').filter(Boolean);
     if (stat || untracked.length > 0) {
@@ -258,8 +284,11 @@ function renderSummarizeHuman(result: SummarizeResult, full: boolean, color: Ret
   }
   lines.push('');
 
-  lines.push(color.bold('Diff'));
-  if (full && result.fullDiff !== undefined) {
+  const scope = result.files?.length ? color.dim(` — ${result.files.join(' ')}`) : '';
+  lines.push(color.bold('Diff') + scope);
+  // `fullDiff` is only populated when a patch was asked for — by --full,
+  // or by naming files — so its presence is the condition, not `full`.
+  if (result.fullDiff !== undefined) {
     lines.push(result.fullDiff || color.dim('  (no changes)'));
   } else {
     lines.push(result.diffStat.trim() || color.dim('  (no changes)'));
@@ -267,7 +296,7 @@ function renderSummarizeHuman(result: SummarizeResult, full: boolean, color: Ret
 
   if (result.uncommitted) {
     lines.push('', color.bold('Uncommitted') + color.dim(' — in the working tree, not in the diff above'));
-    if (full && result.uncommitted.patch !== undefined) {
+    if (result.uncommitted.patch !== undefined) {
       lines.push(result.uncommitted.patch);
     } else if (result.uncommitted.stat.trim()) {
       lines.push(result.uncommitted.stat.trim());
@@ -287,7 +316,11 @@ export function registerSummarizeCommand(program: Command): void {
       "Catch up on a branch or a PR: linked tickets' descriptions, commit log, and diff shape since it diverged (default: current branch)"
     )
     .option('--base <ref>', 'compare against this branch instead of auto-detecting (PR target, then repo default)')
-    .option('--full', 'show full commit messages and the full diff, not just the compact form');
+    .option('--full', 'show full commit messages and the full diff, not just the compact form')
+    .option(
+      '--files <paths...>',
+      'show the actual patch for these paths only, instead of the file-count summary (directories work too)'
+    );
 
   addContextOptions(cmd);
   addJsonOption(cmd);
@@ -339,7 +372,7 @@ export function registerSummarizeCommand(program: Command): void {
       branch = currentBranch;
     }
 
-    const result = await gatherSummary(runner, branch, flags, { full: opts.full });
+    const result = await gatherSummary(runner, branch, flags, { full: opts.full, files: opts.files });
     await emit(result, opts, () => renderSummarizeHuman(result, Boolean(opts.full), color));
   });
 }

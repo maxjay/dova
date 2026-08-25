@@ -394,8 +394,9 @@ describe('the skill matches the real CLI', () => {
     // Flags the skill legitimately names that aren't dova options:
     // `--help` is commander's built-in and isn't in `.options`, and
     // `--transition-work-items` is az's, quoted to explain why an agent
-    // must not close tickets by hand.
-    for (const external of ['--help', '--transition-work-items', '--format', '--raw', '--global']) {
+    // must not close tickets by hand. `--git` is not a flag at all: it
+    // is the `diff --git a/… b/…` header inside a sample patch.
+    for (const external of ['--help', '--transition-work-items', '--format', '--raw', '--global', '--git']) {
       real.add(external);
     }
 
