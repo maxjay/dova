@@ -16,13 +16,15 @@ interface PrViewFlags {
   json?: string | boolean;
   jq?: string;
   web?: boolean;
+  full?: boolean;
   color: boolean;
 }
 
 export function registerPrViewCommand(pr: Command): void {
   const cmd = pr
     .command('view [id-or-url]')
-    .description("View a pull request's full detail, including comment threads (default: PR for current branch)");
+    .description("View a pull request's full detail, including comment threads (default: PR for current branch)")
+    .option('--full', "show each thread's last comment in full, not truncated");
 
   addContextOptions(cmd);
   addJsonOption(cmd);
@@ -68,6 +70,6 @@ export function registerPrViewCommand(pr: Command): void {
       return;
     }
 
-    await emit(detail, opts, () => renderPrDetailHuman(detail, color));
+    await emit(detail, opts, () => renderPrDetailHuman(detail, color, Boolean(opts.full)));
   });
 }

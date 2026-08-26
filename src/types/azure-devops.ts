@@ -19,6 +19,7 @@ export interface AzPullRequest {
   /** "active" | "abandoned" | "completed" | "notSet" */
   status: string;
   isDraft?: boolean;
+  description?: string;
   createdBy: AzIdentityRef;
   creationDate: string;
   sourceRefName: string;

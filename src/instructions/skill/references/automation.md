@@ -44,7 +44,10 @@ are **executed**:
 ```
 
 There is no recovery — the text is gone before the process starts.
-Pipe it instead, and nothing needs escaping:
+Pipe it instead, and nothing needs escaping.
+
+**bash / zsh** — the quoted delimiter (`<<'EOF'`, not `<<EOF`) is what
+disables expansion:
 
 ```console
 $ dova pr comment 612 - <<'EOF'
@@ -52,9 +55,56 @@ Fixed the $count check in `auth.ts` — the "total" field was null.
 EOF
 ```
 
-The quoted heredoc delimiter (`<<'EOF'`, not `<<EOF`) is what disables
-expansion. Every command taking free text accepts `-` for stdin;
-`--title -` and `--description -` do the same for the flag forms.
+**PowerShell** — there are no heredocs. `<<` is a parse error:
+
+```console
+✗ dova pr comment 612 - <<'EOF'
+ParserError: Missing file specification after redirection operator.
+```
+
+Use a **single**-quoted here-string and pipe it. `@'` … `'@` is literal;
+`@"` … `"@` expands `$vars` and **eats backticks**, which silently
+destroys any inline code in the text:
+
+```powershell
+@'
+Fixed the $count check in `auth.ts` — the "total" field was null.
+'@ | dova pr comment 612 -
+```
+
+The closing `'@` must start its own line, at column 1.
+
+Every command taking free text accepts `-` for stdin; `--title -` and
+`--description -` do the same for the flag forms.
+
+## Never pass multi-line text as an argument
+
+Inline `--description "line one`⏎`line two"` is not reliable — on
+Windows the `.cmd`/`.ps1` shim rebuilds the command line and the body
+arrives empty or cut at the first newline. `az` reports success anyway,
+so the PR is created with no description.
+
+`dova` checks what came back and warns when the body was lost, naming
+the PR to repair:
+
+```console
+$ dova pr create --title 'feat: thing' --description "## Summary
+multi-line body"
+Warning: the description did not reach Azure DevOps — the PR has no description.
+  Then set it with: dova pr edit 2302902 --description -
+```
+
+Fix it by sending the body on stdin, as above:
+
+```powershell
+@'
+## Summary
+multi-line body
+'@ | dova pr edit 2302902 --description -
+```
+
+Anything with a newline in it goes on stdin. One line, single-quoted, is
+the only safe inline form.
 
 Something has to be told to read it. Piping into a command where
 nothing asked for stdin is an error, not a silent drop:
