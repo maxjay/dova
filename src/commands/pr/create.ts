@@ -2,7 +2,7 @@ import type { Command } from 'commander';
 import type { Runner } from '../../lib/exec.js';
 import { defaultRunner, runAzJson, tryGit } from '../../lib/exec.js';
 import { readTextArg, stdinHasData } from '../../lib/stdin.js';
-import { withAzFileArg } from '../../lib/az-file-arg.js';
+import { azText, type AzArg } from '../../lib/az-file-arg.js';
 import { gitConfigGet } from '../../lib/config.js';
 import { resolveContext, buildPrWebUrl, resolveDefaultBranch } from '../../lib/context.js';
 import { addContextOptions, addJsonOption, addNoColorOption } from '../../lib/command-helpers.js';
@@ -119,13 +119,15 @@ export function registerPrCreateCommand(pr: Command): void {
       ]);
     }
 
-    const args = [
+    const args: AzArg[] = [
       'repos', 'pr', 'create',
       '--organization', ctx.orgUrl,
       '--project', ctx.project,
       '--repository', ctx.repo,
       '--source-branch', ctx.branch,
-      '--title', title,
+      // A commit subject is a person's text: it can hold quotes, parens,
+      // `&`, anything. Off the command line it goes.
+      '--title', azText(title),
       '--transition-work-items', 'true',
     ];
     // Resolved, not asked for. `origin/HEAD` already says what this repo
@@ -139,14 +141,9 @@ export function registerPrCreateCommand(pr: Command): void {
     if (workItems.length > 0) args.push('--work-items', ...workItems);
     if (opts.draft) args.push('--draft', 'true');
 
-    // The body goes via a temp file, never on the command line — see
-    // `withAzFileArg`. Markdown carries newlines by definition, and a
-    // newline cannot survive an argument through `az.cmd` on Windows.
-    const created = description
-      ? await withAzFileArg(description, (arg) =>
-          runAzJson<AzPullRequest>(runner, [...args, '--description', arg])
-        )
-      : await runAzJson<AzPullRequest>(runner, args);
+    if (description) args.push('--description', azText(description));
+
+    const created = await runAzJson<AzPullRequest>(runner, args);
 
     // Belt and braces over the temp-file route above: az reports success
     // whether or not the body reached it, so a silent loss would look

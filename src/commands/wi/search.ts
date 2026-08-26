@@ -1,5 +1,6 @@
 import type { Command } from 'commander';
 import { defaultRunner, runAzJson } from '../../lib/exec.js';
+import { azText } from '../../lib/az-file-arg.js';
 import { resolveContext } from '../../lib/context.js';
 import { buildWiql, isCurrentUserToken } from '../../lib/wiql.js';
 import { fieldValue } from '../../lib/work-items.js';
@@ -67,7 +68,7 @@ export function registerWiSearchCommand(wi: Command): void {
 
     const items = (await runAzJson<AzWorkItem[] | null>(runner, [
       'boards', 'query',
-      '--wiql', wiql,
+      '--wiql', azText(wiql),
       '--organization', ctx.orgUrl,
     ])) ?? [];
 

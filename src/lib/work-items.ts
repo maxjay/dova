@@ -4,6 +4,7 @@ import { runAzJson } from './exec.js';
 import { buildWiql } from './wiql.js';
 import { renderTable } from './output.js';
 import { NotFoundError, looksLikeAzNotFoundError } from './errors.js';
+import { azText } from './az-file-arg.js';
 import type { AzWorkItem } from '../types/azure-devops.js';
 
 /**
@@ -53,7 +54,7 @@ export async function fetchWorkItemsByIds(
   const wiql = buildWiql({ fields, where: [{ field: 'System.Id', op: 'IN', value: ids }] });
   const result = await runAzJson<AzWorkItem[] | null>(runner, [
     'boards', 'query',
-    '--wiql', wiql,
+    '--wiql', azText(wiql),
     '--organization', orgUrl,
   ]);
   return result ?? [];
@@ -65,7 +66,7 @@ export async function fetchChildren(runner: Runner, orgUrl: string, parentId: nu
     fields: ['System.Id', 'System.Title', 'System.State', 'System.WorkItemType'],
     where: [{ field: 'System.Parent', op: '=', value: parentId }],
   });
-  const result = await runAzJson<AzWorkItem[] | null>(runner, ['boards', 'query', '--wiql', wiql, '--organization', orgUrl]);
+  const result = await runAzJson<AzWorkItem[] | null>(runner, ['boards', 'query', '--wiql', azText(wiql), '--organization', orgUrl]);
   return result ?? [];
 }
 
