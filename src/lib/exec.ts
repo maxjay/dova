@@ -1,5 +1,6 @@
 import { execa, type Options as ExecaOptions } from 'execa';
 import { PrereqError, ExternalCommandError, NotFoundError } from './errors.js';
+import { withAzFileArg } from './az-file-arg.js';
 
 export interface ProcessResult {
   stdout: string;
@@ -176,11 +177,24 @@ export interface AzRestOptions {
 
 /** `runAzJson`, specialized for `az rest` against Azure DevOps — see `AZURE_DEVOPS_AAD_RESOURCE`. */
 export async function runAzRestJson<T>(runner: Runner, opts: AzRestOptions): Promise<T> {
-  const args = ['rest', '--method', opts.method, '--uri', opts.uri, '--resource', AZURE_DEVOPS_AAD_RESOURCE];
-  if (opts.body !== undefined) args.push('--body', toAsciiSafeJson(opts.body));
-  else if (opts.rawBody !== undefined) args.push('--body', opts.rawBody);
-  for (const header of opts.headers ?? []) args.push('--headers', header);
-  return runAzJson<T>(runner, args, { cwd: opts.cwd });
+  const base = ['rest', '--method', opts.method, '--uri', opts.uri, '--resource', AZURE_DEVOPS_AAD_RESOURCE];
+  const headerArgs = (opts.headers ?? []).flatMap((header) => ['--headers', header]);
+
+  // The body carries whatever a person wrote — a review reply, a comment
+  // — so it can hold `(`, `&`, `%`, `^`, `!`, quotes, any of which cmd
+  // re-parses when `az.cmd` forwards `%*` (see `withAzFiles`). It goes on
+  // disk; only a short `@path` reaches the command line.
+  if (opts.body !== undefined) {
+    const json = toAsciiSafeJson(opts.body);
+    return withAzFileArg(json, (arg) => runAzJson<T>(runner, [...base, '--body', arg, ...headerArgs], { cwd: opts.cwd }));
+  }
+  // `dova api` hands through a user-typed body that may already be az's
+  // own `@path/to/file.json` — passing that through unchanged is the
+  // whole point, so it must not be re-wrapped in another file.
+  if (opts.rawBody !== undefined) {
+    return runAzJson<T>(runner, [...base, '--body', opts.rawBody, ...headerArgs], { cwd: opts.cwd });
+  }
+  return runAzJson<T>(runner, [...base, ...headerArgs], { cwd: opts.cwd });
 }
 
 /**

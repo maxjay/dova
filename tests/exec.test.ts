@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { readFileSync, existsSync } from 'node:fs';
 import { runAzRestJson, runAzRestText, toAsciiSafeJson, resolveOrFetchBranchRef, AZURE_DEVOPS_AAD_RESOURCE, assertNoNewlineArgs } from '../src/lib/exec.js';
 import { NotFoundError } from '../src/lib/errors.js';
 import { createFakeRunner, ok, okJson, fail } from './fixtures/fake-runner.js';
@@ -41,11 +42,18 @@ describe('runAzRestJson', () => {
     expect(seenArgs[seenArgs.indexOf('--resource') + 1]).toBe(AZURE_DEVOPS_AAD_RESOURCE);
   });
 
-  it('passes body and headers through when given', async () => {
+  // A JSON body is quote-dense, and on Windows each `"` closes the
+  // quoted run cmd is holding when `az.cmd` re-parses `%*` — exposing
+  // any `(`, `&` or `%` after it. So the body goes to a temp file and
+  // only `@path` reaches the command line.
+  it('sends the body as an @file argument, not inline, and passes headers through', async () => {
     let seenArgs: string[] = [];
+    let bodyOnDisk = '';
     const runner = createFakeRunner({
       az: (args) => {
         seenArgs = args;
+        const arg = args[args.indexOf('--body') + 1]!;
+        bodyOnDisk = readFileSync(arg.slice(1), 'utf8');
         return okJson({ ok: true });
       },
     });
@@ -53,14 +61,45 @@ describe('runAzRestJson', () => {
     await runAzRestJson(runner, {
       method: 'post',
       uri: 'https://dev.azure.com/contoso/_apis/x?api-version=7.1',
-      body: { a: 1 },
+      body: { content: 'enforces hasViewPermission() per row' },
       headers: ['Content-Type=application/json'],
     });
 
-    expect(seenArgs).toContain('--body');
-    expect(seenArgs[seenArgs.indexOf('--body') + 1]).toBe('{"a":1}');
+    const bodyArg = seenArgs[seenArgs.indexOf('--body') + 1]!;
+    expect(bodyArg.startsWith('@')).toBe(true);
+    // The text cmd would have choked on never reaches the command line.
+    expect(bodyArg).not.toContain('(');
+    expect(bodyArg).not.toContain('"');
+    expect(bodyOnDisk).toBe('{"content":"enforces hasViewPermission() per row"}');
+
     expect(seenArgs).toContain('--headers');
     expect(seenArgs[seenArgs.indexOf('--headers') + 1]).toBe('Content-Type=application/json');
+  });
+
+  it('still escapes non-ASCII in the body it writes — az reads the file as Latin-1 on some hosts', async () => {
+    let bodyOnDisk = '';
+    const runner = createFakeRunner({
+      az: (args) => {
+        bodyOnDisk = readFileSync(args[args.indexOf('--body') + 1]!.slice(1), 'utf8');
+        return okJson({ ok: true });
+      },
+    });
+
+    await runAzRestJson(runner, { method: 'post', uri: 'https://x/y', body: { content: 'em — dash' } });
+    expect(bodyOnDisk).toBe('{"content":"em \\u2014 dash"}');
+  });
+
+  it('removes the temp file once the call is done', async () => {
+    let bodyArg = '';
+    const runner = createFakeRunner({
+      az: (args) => {
+        bodyArg = args[args.indexOf('--body') + 1]!;
+        return okJson({ ok: true });
+      },
+    });
+
+    await runAzRestJson(runner, { method: 'post', uri: 'https://x/y', body: { a: 1 } });
+    expect(existsSync(bodyArg.slice(1))).toBe(false);
   });
 
   it('passes rawBody straight through, untouched (e.g. az\'s own @file.json syntax)', async () => {
