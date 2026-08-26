@@ -6,7 +6,7 @@ import { fetchActivePrForBranch, fetchPrById } from '../lib/pr.js';
 import { fetchWorkItemsByIds, fieldValue, workItemBody, type WorkItemBody } from '../lib/work-items.js';
 import { parsePrUrl, parseIdArgument, looksLikeUrl } from '../lib/urls.js';
 import { addContextOptions, addJsonOption, addJqOption, addNoColorOption } from '../lib/command-helpers.js';
-import { emit, getColor } from '../lib/output.js';
+import { emit, getColor, truncate } from '../lib/output.js';
 import { UserError } from '../lib/errors.js';
 import type { AzGitRepository, AzWorkItem } from '../types/azure-devops.js';
 
@@ -66,11 +66,6 @@ export interface SummarizeResult {
 }
 
 const DESCRIPTION_TRUNCATE = 500;
-
-function truncate(text: string, n: number): { shown: string; truncated: boolean } {
-  if (text.length <= n) return { shown: text, truncated: false };
-  return { shown: text.slice(0, n).trimEnd() + '…', truncated: true };
-}
 
 /**
  * What to diff/log the branch against: --base always wins; otherwise an

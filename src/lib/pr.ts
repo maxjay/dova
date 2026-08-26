@@ -2,7 +2,7 @@ import type { ChalkInstance } from 'chalk';
 import type { Runner } from './exec.js';
 import { runAzJson, runAzRestJson } from './exec.js';
 import { buildPrWebUrl } from './context.js';
-import { renderTable } from './output.js';
+import { renderTable, truncate } from './output.js';
 import { UserError, NotFoundError, looksLikeAzNotFoundError } from './errors.js';
 import type { AzPullRequest, AzWorkItem, AzCommentThread, AzComment } from '../types/azure-devops.js';
 
@@ -347,7 +347,44 @@ export function renderThreadDetailHuman(detail: ThreadDetail, color: ChalkInstan
   process.stdout.write(`${lines.join('\n').replace(/\n+$/, '')}\n`);
 }
 
-export function renderPrDetailHuman(detail: PrDetail, color: ChalkInstance): void {
+/**
+ * How much of a thread's last comment `pr view` prints. A review comment
+ * is the request you have to act on, so it has to arrive whole enough to
+ * act on: the old 60-character table cell reduced a Sonar finding to the
+ * opening of its badge URL, which told a reader nothing and forced a
+ * `pr comment show` — another `az` start — on every thread.
+ */
+export const THREAD_COMMENT_TRUNCATE = 600;
+
+/** One thread as an indented block rather than a table row, so long file paths and real comment text both survive. */
+function renderThreadSummary(t: ThreadSummary, prId: number, color: ChalkInstance, full: boolean): string[] {
+  const head = [
+    color.bold(`#${t.id}`),
+    t.unresolved ? color.yellow('open') : color.dim('resolved'),
+    t.location ? `${t.location.file}:${t.location.line}` : color.dim('(not on a file)'),
+    t.lastAuthor ?? '?',
+  ].join('  ');
+
+  const body = (t.lastComment ?? '').trim();
+  if (!body) return [head, color.dim('  (no comment text)')];
+
+  const { shown, truncated } = full ? { shown: body, truncated: false } : truncate(body, THREAD_COMMENT_TRUNCATE);
+  const lines = [head, ...shown.split('\n').map((l) => `  ${l}`)];
+
+  // Only point at `pr comment show` when there is genuinely more to read.
+  // Naming the exact command is what stops an agent running it on every
+  // thread just to find out whether it needed to.
+  const more = [
+    truncated ? 'truncated' : undefined,
+    t.commentCount > 1 ? `${t.commentCount - 1} earlier comment${t.commentCount > 2 ? 's' : ''}` : undefined,
+  ].filter(Boolean);
+  if (more.length > 0) {
+    lines.push(color.dim(`  … ${more.join(', ')} — dova pr comment show ${prId} ${t.id}`));
+  }
+  return lines;
+}
+
+export function renderPrDetailHuman(detail: PrDetail, color: ChalkInstance, full = false): void {
   const draftTag = detail.isDraft ? color.dim(' [draft]') : '';
   const lines: string[] = [
     `${color.bold(`#${detail.id}`)} ${detail.title}${draftTag}`,
@@ -366,22 +403,18 @@ export function renderPrDetailHuman(detail: PrDetail, color: ChalkInstance): voi
       )
     );
   }
-  lines.push('', color.bold('Comment Threads'));
+  const open = detail.threads.filter((t) => t.unresolved).length;
+  const resolved = detail.threads.length - open;
+  const counts = [open > 0 ? `${open} open` : undefined, resolved > 0 ? `${resolved} resolved` : undefined]
+    .filter(Boolean)
+    .join(', ');
+  lines.push('', color.bold('Comment Threads') + (counts ? color.dim(` (${counts})`) : ''));
   if (detail.threads.length === 0) {
     lines.push(color.dim('  (no comment threads)'));
   } else {
-    lines.push(
-      renderTable(
-        ['ID', 'Status', 'Location', 'Last author', 'Last comment'],
-        detail.threads.map((t) => [
-          String(t.id),
-          t.unresolved ? color.yellow('open') : color.dim('resolved'),
-          t.location ? `${t.location.file}:${t.location.line}` : color.dim('—'),
-          t.lastAuthor ?? '?',
-          (t.lastComment ?? '').slice(0, 60),
-        ])
-      )
-    );
+    for (const t of detail.threads) {
+      lines.push('', ...renderThreadSummary(t, detail.id, color, full));
+    }
   }
   process.stdout.write(`${lines.join('\n')}\n`);
 }

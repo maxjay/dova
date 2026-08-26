@@ -23,6 +23,29 @@ interface PrCreateFlags {
   color: boolean;
 }
 
+/** Line endings and trailing whitespace differ harmlessly between what's sent and what comes back. */
+function normalizeBody(text: string): string {
+  return text.replace(/\r\n/g, '\n').trim();
+}
+
+/**
+ * Whether the description dova sent actually arrived, phrased for the
+ * warning. Only reports a *loss* — empty, or shorter than what was sent
+ * — so that server-side normalization never trips a false alarm.
+ */
+export function describeLostDescription(sent: string | undefined, returned: string | undefined): string | null {
+  if (!sent) return null;
+  const want = normalizeBody(sent);
+  if (!want) return null;
+  const got = normalizeBody(returned ?? '');
+  if (got === want) return null;
+  if (!got) return 'did not reach Azure DevOps — the PR has no description';
+  if (got.length < want.length) {
+    return `arrived truncated (${got.length} of ${want.length} characters)`;
+  }
+  return null;
+}
+
 /** Recent commit subjects on this branch that reference a work item as `#<id>`, most recent first, deduped. */
 async function workItemsFromCommitMessages(runner: Runner, cwd?: string): Promise<string[]> {
   const log = await tryGit(runner, ['log', '-50', '--format=%s'], { cwd });
@@ -121,6 +144,23 @@ export function registerPrCreateCommand(pr: Command): void {
     if (opts.draft) args.push('--draft', 'true');
 
     const created = await runAzJson<AzPullRequest>(runner, args);
+
+    // A multi-line string passed as a command-line *argument* does not
+    // survive Windows reliably — the .cmd/.ps1 shim and cmd.exe rebuild
+    // the command line, and the body arrives empty or cut at the first
+    // newline. The PR still gets created, so without this check dova
+    // reports a confident success over a PR with no description.
+    const lost = describeLostDescription(description, created.description);
+    if (lost) {
+      process.stderr.write(
+        `${color.yellow('Warning')}: the description ${lost}.\n` +
+          `  Text passed inline can be mangled by the shell. Send it on stdin instead:\n` +
+          `    PowerShell:  @'\n...\n'@ | dova pr create --title '...' --description -\n` +
+          `    bash/zsh:    dova pr create --title '...' --description - <<'EOF'\n...\nEOF\n` +
+          `  Then set it with: dova pr edit ${created.pullRequestId} --description -\n` +
+          `  (the PR itself was created fine — only the body is missing)\n`
+      );
+    }
 
     const result = {
       id: created.pullRequestId,

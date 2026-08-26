@@ -117,3 +117,9 @@ export function printError(err: unknown, color: ChalkInstance): void {
     }
   }
 }
+
+/** Cut long text at `n` characters, reporting whether anything was cut so callers can offer `--full`. */
+export function truncate(text: string, n: number): { shown: string; truncated: boolean } {
+  if (text.length <= n) return { shown: text, truncated: false };
+  return { shown: text.slice(0, n).trimEnd() + '…', truncated: true };
+}

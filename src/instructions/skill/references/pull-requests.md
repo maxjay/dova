@@ -118,21 +118,28 @@ Comment Threads
   #4  open  /src/auth.ts:42  Jane Doe  "Can you also handle the nu.."
 ```
 
-The table shows only the **last** comment in each thread. The actual
-request is usually earlier, so read the whole thread first:
+`dova pr view` prints each thread's last comment in full:
 
 ```console
-$ dova pr comment show 612 4
-Thread #4 on PR #612 · /src/auth.ts:42 · active
+$ dova pr view 612
+Comment Threads (2 open, 1 resolved)
 
-SonarQube · 2026-08-22T10:00:00Z
-  Extract the validation logic — cognitive complexity.
-Jane Doe · 2026-08-22T10:15:00Z
+#4  open  /src/auth.ts:42  Jane Doe
   Can you also handle the null case while you're here?
+  … 1 earlier comment — dova pr comment show 612 4
+
+#7  open  (not on a file)  SonarQube
+  Refactor this method to reduce its Cognitive Complexity from 21 to 15.
 ```
 
-A thread anchored to a line carries its file and line; a general PR
-comment does not.
+That last comment is usually the whole request — act on it. Run
+`dova pr comment show` **only** on threads whose `…` line says there is
+more, and only when the last comment alone doesn't say what to change.
+Every run costs another `az` start.
+
+Comments truncate at 600 characters; `dova pr view --full` prints them
+whole. A thread anchored to a line carries its file and line; a general
+PR comment does not.
 
 Fix the code, commit, push, then reply and resolve in one call:
 

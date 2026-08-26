@@ -85,7 +85,11 @@ request is usually earlier.
 
 ### Free text
 
-Pipe it. Double quotes let bash expand `$var` and *execute* backticks.
+**Anything with a newline goes on stdin.** Passed as an argument it is
+mangled: bash expands `$var` and *executes* backticks, and on Windows a
+multi-line argument arrives empty or cut at the first line.
+
+bash/zsh — quote the delimiter:
 
 ```console
 ✗ dova pr comment 612 "Fixed the $count check in `auth.ts`"
@@ -94,8 +98,18 @@ Fixed the $count check in `auth.ts`
 EOF
 ```
 
-Every free-text command takes `-` for stdin; `--title -` for flags.
-Single-quote short titles.
+PowerShell — no heredocs (`<<` is a parse error). Single-quoted
+here-string only; `@"` expands `$var` and eats backticks:
+
+```powershell
+@'
+Fixed the $count check in `auth.ts`
+'@ | dova pr comment 612 -
+```
+
+Every free-text command takes `-` for stdin; `--title -`,
+`--description -` for flags. Single-quote short one-line titles.
+Repair a lost PR body with `dova pr edit <id> --description -`.
 
 ### Errors
 
