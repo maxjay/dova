@@ -85,11 +85,34 @@ function isEnoent(err: unknown): boolean {
 }
 
 /**
+ * A newline inside an `az` argument is silently destructive on Windows:
+ * `az` is `az.cmd`, so the spawn goes through `cmd.exe /c`, which
+ * rebuilds the command line as one string with no way to escape a
+ * newline inside an argument. The text arrives empty or cut at the first
+ * line and az reports success, which is how a PR gets created with no
+ * description.
+ *
+ * There is no case where dova needs to send one: JSON bodies escape
+ * newlines to `\n`, and free text goes through `withAzFileArg`. So this
+ * fails loudly, everywhere, rather than only on a Windows user's PR.
+ */
+export function assertNoNewlineArgs(args: string[]): void {
+  const offender = args.findIndex((a) => a.includes('\n') || a.includes('\r'));
+  if (offender === -1) return;
+  const flag = offender > 0 ? args[offender - 1] : '(first argument)';
+  throw new Error(
+    `Refusing to pass multi-line text to az as an argument (${flag}): it cannot survive cmd.exe on Windows. ` +
+      'Wrap the call in withAzFileArg() and pass the `@path` it gives you.'
+  );
+}
+
+/**
  * Runs `az ... --output json` and parses the result. Every az call in dova
  * goes through this — never through table output. `args` should not include
  * `--output`/`-o`; it's appended here.
  */
 export async function runAzJson<T>(runner: Runner, args: string[], opts?: { cwd?: string }): Promise<T> {
+  assertNoNewlineArgs(args);
   const result = await runner.az([...args, '--output', 'json'], opts);
   const trimmed = result.stdout.trim();
   if (!trimmed) {

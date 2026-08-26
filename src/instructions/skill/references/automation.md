@@ -77,33 +77,16 @@ The closing `'@` must start its own line, at column 1.
 Every command taking free text accepts `-` for stdin; `--title -` and
 `--description -` do the same for the flag forms.
 
-## Never pass multi-line text as an argument
+## Length is never the problem
 
-Inline `--description "line one`⏎`line two"` is not reliable — on
-Windows the `.cmd`/`.ps1` shim rebuilds the command line and the body
-arrives empty or cut at the first newline. `az` reports success anyway,
-so the PR is created with no description.
+`dova` takes text of any size and shape — markdown, code fences, blank
+lines, `---` rules, thousands of characters. It writes the body to a
+temp file and hands `az` the path, so nothing multi-line ever reaches a
+command line. Do not shorten, flatten or split a PR description to make
+it fit; there is nothing to fit it into.
 
-`dova` checks what came back and warns when the body was lost:
-
-```console
-$ dova pr create --title 'feat: thing' --description "## Summary
-multi-line body"
-Warning: the description did not reach Azure DevOps — the PR has no description.
-  (the PR itself was created fine — only the body is missing)
-```
-
-Send it on stdin instead:
-
-```powershell
-@'
-## Summary
-multi-line body
-'@ | dova pr create --title 'feat: thing' --description -
-```
-
-Anything with a newline in it goes on stdin. One line, single-quoted, is
-the only safe inline form.
+The only hazard left is the **shell**, before `dova` runs. Use stdin, as
+above, and that one goes away too.
 
 Something has to be told to read it. Piping into a command where
 nothing asked for stdin is an error, not a silent drop:
