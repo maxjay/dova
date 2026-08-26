@@ -84,23 +84,22 @@ Windows the `.cmd`/`.ps1` shim rebuilds the command line and the body
 arrives empty or cut at the first newline. `az` reports success anyway,
 so the PR is created with no description.
 
-`dova` checks what came back and warns when the body was lost, naming
-the PR to repair:
+`dova` checks what came back and warns when the body was lost:
 
 ```console
 $ dova pr create --title 'feat: thing' --description "## Summary
 multi-line body"
 Warning: the description did not reach Azure DevOps — the PR has no description.
-  Then set it with: dova pr edit 2302902 --description -
+  (the PR itself was created fine — only the body is missing)
 ```
 
-Fix it by sending the body on stdin, as above:
+Send it on stdin instead:
 
 ```powershell
 @'
 ## Summary
 multi-line body
-'@ | dova pr edit 2302902 --description -
+'@ | dova pr create --title 'feat: thing' --description -
 ```
 
 Anything with a newline in it goes on stdin. One line, single-quoted, is

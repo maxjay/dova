@@ -157,7 +157,6 @@ export function registerPrCreateCommand(pr: Command): void {
           `  Text passed inline can be mangled by the shell. Send it on stdin instead:\n` +
           `    PowerShell:  @'\n...\n'@ | dova pr create --title '...' --description -\n` +
           `    bash/zsh:    dova pr create --title '...' --description - <<'EOF'\n...\nEOF\n` +
-          `  Then set it with: dova pr edit ${created.pullRequestId} --description -\n` +
           `  (the PR itself was created fine — only the body is missing)\n`
       );
     }

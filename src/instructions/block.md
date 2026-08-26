@@ -109,7 +109,6 @@ Fixed the $count check in `auth.ts`
 
 Every free-text command takes `-` for stdin; `--title -`,
 `--description -` for flags. Single-quote short one-line titles.
-Repair a lost PR body with `dova pr edit <id> --description -`.
 
 ### Errors
 
