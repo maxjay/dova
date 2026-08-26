@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import fs from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import { withAzFileArg } from '../src/lib/az-file-arg.js';
 
 /* ------------------------------------------------------------------ *
@@ -63,5 +64,39 @@ describe('withAzFileArg', () => {
 
   it('returns whatever the az call returned', async () => {
     expect(await withAzFileArg(BODY, async () => ({ pullRequestId: 42 }))).toEqual({ pullRequestId: 42 });
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * Every value a person wrote must be marked with azText() so it goes
+ * through a temp file. Structural tokens dova chose stay inline —
+ * routing those through files would cost a write per argument to
+ * protect strings that cannot contain anything cmd reacts to.
+ * ------------------------------------------------------------------ */
+
+describe('free-text az arguments are file-backed at every call site', () => {
+  const FREE_TEXT_FLAGS = ['--title', '--description', '--wiql', '--body'];
+
+  it('marks every free-text flag value with azText across the source tree', async () => {
+    const { globSync } = await import('node:fs');
+    const files = globSync('src/**/*.ts').filter((f) => !f.includes('instructions'));
+    const offenders: string[] = [];
+
+    for (const file of files) {
+      const source = readFileSync(file, 'utf8');
+      for (const flag of FREE_TEXT_FLAGS) {
+        // `'--title', foo` — the value must be azText(...) or a literal.
+        const pattern = new RegExp(`'${flag}',\\s*([^\\n]+?)[,)\\]]`, 'g');
+        for (const m of source.matchAll(pattern)) {
+          const value = m[1]!.trim();
+          const safe = value.startsWith('azText(') || value.startsWith("'") || value.startsWith('`');
+          // `rawBody` is deliberately passed through untouched: `dova api`
+          // hands over a user-typed body that may already be az's @file syntax.
+          if (!safe && !value.includes('rawBody')) offenders.push(`${file}: '${flag}', ${value}`);
+        }
+      }
+    }
+
+    expect(offenders).toEqual([]);
   });
 });

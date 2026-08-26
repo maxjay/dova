@@ -36,6 +36,49 @@ import path from 'node:path';
  *
  * Files live in one temp directory, removed when `run` settles.
  */
+/**
+ * Marks an argument value as text a person wrote, rather than a
+ * structural token dova chose. Anything wrapped in `azText()` is written
+ * to a temp file and passed to az as `@<path>`; everything else goes on
+ * the command line as-is.
+ *
+ * Use it for every value that carries free text — titles, descriptions,
+ * comment bodies, a WIQL query built around a search term. Not for
+ * subcommands, flags, urls, ids or enum values: those have shapes dova
+ * controls, and routing them through files would cost a write per
+ * argument to protect strings that cannot contain anything dangerous.
+ */
+export interface AzText {
+  readonly azText: string;
+}
+
+export type AzArg = string | AzText;
+
+export function azText(value: string): AzText {
+  return { azText: value };
+}
+
+export function isAzText(arg: AzArg): arg is AzText {
+  return typeof arg !== 'string';
+}
+
+/**
+ * Resolves an argument list containing `azText()` markers into plain
+ * strings, writing each marked value to a temp file first, and cleans
+ * the files up once `run` settles. Centralised so no call site can
+ * forget the cleanup, or forget the wrapping and silently regress.
+ */
+export async function withAzArgs<T>(args: AzArg[], run: (resolved: string[]) => Promise<T>): Promise<T> {
+  if (!args.some(isAzText)) return run(args as string[]);
+  return withAzFiles(async (toFileArg) => {
+    const resolved: string[] = [];
+    for (const arg of args) {
+      resolved.push(isAzText(arg) ? await toFileArg(arg.azText) : arg);
+    }
+    return run(resolved);
+  });
+}
+
 export async function withAzFiles<T>(run: (toFileArg: (text: string) => Promise<string>) => Promise<T>): Promise<T> {
   // Its own directory: the name is then ours to control, so it can't
   // contain `=` — az splits an argument on the first `=` before looking

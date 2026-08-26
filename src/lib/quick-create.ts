@@ -1,4 +1,5 @@
 import type { Runner } from './exec.js';
+import { azText } from './az-file-arg.js';
 import { runAzJson, tryGit } from './exec.js';
 import { resolveContext, type ResolvedContext } from './context.js';
 import { resolveProject, resolveCreateContext } from './team-resolver.js';
@@ -93,7 +94,7 @@ export async function quickCreateWorkItem(runner: Runner, opts: QuickCreateOptio
   const args = [
     'boards', 'work-item', 'create',
     '--type', opts.type,
-    '--title', opts.title,
+    '--title', azText(opts.title),
     '--area', createContext.areaPath,
     '--iteration', createContext.iterationPath,
     '--organization', ctx.orgUrl,
@@ -101,7 +102,7 @@ export async function quickCreateWorkItem(runner: Runner, opts: QuickCreateOptio
   ];
   if (opts.at) {
     const permalink = await buildFoundInPermalink(runner, ctx, opts.at, opts.cwd);
-    args.push('--description', `Found in: ${permalink}`);
+    args.push('--description', azText(`Found in: ${permalink}`));
   }
 
   const created = await runAzJson<AzWorkItem>(runner, args);

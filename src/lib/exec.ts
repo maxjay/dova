@@ -1,6 +1,6 @@
 import { execa, type Options as ExecaOptions } from 'execa';
 import { PrereqError, ExternalCommandError, NotFoundError } from './errors.js';
-import { withAzFileArg } from './az-file-arg.js';
+import { azText, isAzText, withAzArgs, type AzArg } from './az-file-arg.js';
 
 export interface ProcessResult {
   stdout: string;
@@ -103,7 +103,7 @@ export function assertNoNewlineArgs(args: string[]): void {
   const flag = offender > 0 ? args[offender - 1] : '(first argument)';
   throw new Error(
     `Refusing to pass multi-line text to az as an argument (${flag}): it cannot survive cmd.exe on Windows. ` +
-      'Wrap the call in withAzFileArg() and pass the `@path` it gives you.'
+      'Wrap the value in azText() so it goes through a temp file.'
   );
 }
 
@@ -112,21 +112,29 @@ export function assertNoNewlineArgs(args: string[]): void {
  * goes through this — never through table output. `args` should not include
  * `--output`/`-o`; it's appended here.
  */
-export async function runAzJson<T>(runner: Runner, args: string[], opts?: { cwd?: string }): Promise<T> {
-  assertNoNewlineArgs(args);
-  const result = await runner.az([...args, '--output', 'json'], opts);
-  const trimmed = result.stdout.trim();
-  if (!trimmed) {
-    // Some az commands print nothing on an empty result set (e.g. an empty list).
-    return [] as unknown as T;
-  }
-  try {
-    return JSON.parse(trimmed) as T;
-  } catch {
-    throw new ExternalCommandError(
-      `Could not parse JSON from "az ${args.join(' ')}":\n${trimmed.slice(0, 500)}`
-    );
-  }
+export async function runAzJson<T>(runner: Runner, args: AzArg[], opts?: { cwd?: string }): Promise<T> {
+  return withAzArgs(args, async (resolved) => {
+    assertNoNewlineArgs(resolved);
+    const result = await runner.az([...resolved, '--output', 'json'], opts);
+    const trimmed = result.stdout.trim();
+    if (!trimmed) {
+      // Some az commands print nothing on an empty result set (e.g. an empty list).
+      return [] as unknown as T;
+    }
+    try {
+      return JSON.parse(trimmed) as T;
+    } catch {
+      throw new ExternalCommandError(
+        // The resolved args name temp files; the originals say what was sent.
+        `Could not parse JSON from "az ${describeArgs(args)}":\n${trimmed.slice(0, 500)}`
+      );
+    }
+  });
+}
+
+/** Argument list for an error message, with file-backed values shown as their text rather than a temp path. */
+function describeArgs(args: AzArg[]): string {
+  return args.map((a) => (isAzText(a) ? a.azText : a)).join(' ');
 }
 
 /**
@@ -185,8 +193,7 @@ export async function runAzRestJson<T>(runner: Runner, opts: AzRestOptions): Pro
   // re-parses when `az.cmd` forwards `%*` (see `withAzFiles`). It goes on
   // disk; only a short `@path` reaches the command line.
   if (opts.body !== undefined) {
-    const json = toAsciiSafeJson(opts.body);
-    return withAzFileArg(json, (arg) => runAzJson<T>(runner, [...base, '--body', arg, ...headerArgs], { cwd: opts.cwd }));
+    return runAzJson<T>(runner, [...base, '--body', azText(toAsciiSafeJson(opts.body)), ...headerArgs], { cwd: opts.cwd });
   }
   // `dova api` hands through a user-typed body that may already be az's
   // own `@path/to/file.json` — passing that through unchanged is the

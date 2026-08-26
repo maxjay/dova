@@ -56,7 +56,7 @@ describe('runAzRestJson', () => {
         bodyOnDisk = readFileSync(arg.slice(1), 'utf8');
         return okJson({ ok: true });
       },
-    });
+    }, { rawArgs: true });
 
     await runAzRestJson(runner, {
       method: 'post',
@@ -77,16 +77,16 @@ describe('runAzRestJson', () => {
   });
 
   it('still escapes non-ASCII in the body it writes — az reads the file as Latin-1 on some hosts', async () => {
-    let bodyOnDisk = '';
+    let bodySeen = '';
     const runner = createFakeRunner({
       az: (args) => {
-        bodyOnDisk = readFileSync(args[args.indexOf('--body') + 1]!.slice(1), 'utf8');
+        bodySeen = args[args.indexOf('--body') + 1]!;
         return okJson({ ok: true });
       },
     });
 
     await runAzRestJson(runner, { method: 'post', uri: 'https://x/y', body: { content: 'em — dash' } });
-    expect(bodyOnDisk).toBe('{"content":"em \\u2014 dash"}');
+    expect(bodySeen).toBe('{"content":"em \\u2014 dash"}');
   });
 
   it('removes the temp file once the call is done', async () => {
@@ -96,7 +96,7 @@ describe('runAzRestJson', () => {
         bodyArg = args[args.indexOf('--body') + 1]!;
         return okJson({ ok: true });
       },
-    });
+    }, { rawArgs: true });
 
     await runAzRestJson(runner, { method: 'post', uri: 'https://x/y', body: { a: 1 } });
     expect(existsSync(bodyArg.slice(1))).toBe(false);
@@ -217,6 +217,6 @@ describe('assertNoNewlineArgs', () => {
   });
 
   it('points at the fix rather than just refusing', () => {
-    expect(() => assertNoNewlineArgs(['--description', 'a\nb'])).toThrow(/withAzFileArg/);
+    expect(() => assertNoNewlineArgs(['--description', 'a\nb'])).toThrow(/azText/);
   });
 });

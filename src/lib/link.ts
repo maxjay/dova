@@ -8,6 +8,7 @@ import { fetchWorkItemsByIds, fieldValue } from './work-items.js';
 import { buildWiql } from './wiql.js';
 import { fetchWorkItemTypeStates, categoryOf } from './work-item-types.js';
 import { UserError, NotFoundError } from './errors.js';
+import { azText } from './az-file-arg.js';
 import { isInteractive, nonInteractiveError } from './interactive.js';
 import type { AzWorkItem } from '../types/azure-devops.js';
 
@@ -124,7 +125,7 @@ export async function runLink(opts: LinkOptions): Promise<LinkResult> {
   const [seedItems, children] = await Promise.all([
     fetchWorkItemsByIds(runner, ctx.orgUrl, seedIds),
     runAzJson<AzWorkItem[] | null>(runner, [
-      'boards', 'query', '--wiql', childrenWiql, '--organization', ctx.orgUrl,
+      'boards', 'query', '--wiql', azText(childrenWiql), '--organization', ctx.orgUrl,
     ]).then((result) => result ?? []),
   ]);
 

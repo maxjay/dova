@@ -1,5 +1,6 @@
 import type { Command } from 'commander';
 import { defaultRunner, runAzJson } from '../../lib/exec.js';
+import { azText } from '../../lib/az-file-arg.js';
 import { readTextArg } from '../../lib/stdin.js';
 import { resolveContext } from '../../lib/context.js';
 import { resolveProject, resolveCreateContext } from '../../lib/team-resolver.js';
@@ -63,7 +64,7 @@ export function registerWiCreateCommand(wi: Command): void {
     const args = [
       'boards', 'work-item', 'create',
       '--type', opts.type,
-      '--title', title,
+      '--title', azText(title),
       '--area', createContext.areaPath,
       '--iteration', createContext.iterationPath,
       '--organization', ctx.orgUrl,
