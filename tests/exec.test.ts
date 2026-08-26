@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { runAzRestJson, runAzRestText, toAsciiSafeJson, resolveOrFetchBranchRef, AZURE_DEVOPS_AAD_RESOURCE } from '../src/lib/exec.js';
+import { runAzRestJson, runAzRestText, toAsciiSafeJson, resolveOrFetchBranchRef, AZURE_DEVOPS_AAD_RESOURCE, assertNoNewlineArgs } from '../src/lib/exec.js';
 import { NotFoundError } from '../src/lib/errors.js';
 import { createFakeRunner, ok, okJson, fail } from './fixtures/fake-runner.js';
 
@@ -142,5 +142,42 @@ describe('resolveOrFetchBranchRef', () => {
   it('throws NotFoundError when the branch exists nowhere', async () => {
     const runner = createFakeRunner({ git: () => fail('fatal: couldn\'t find remote ref feature/ghost', 128) });
     await expect(resolveOrFetchBranchRef(runner, 'feature/ghost')).rejects.toBeInstanceOf(NotFoundError);
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * `az` is `az.cmd` on Windows, so the spawn goes through `cmd.exe /c`,
+ * which rebuilds the command line as one string and cannot escape a
+ * newline inside an argument. Multi-line text sent that way arrives
+ * empty or cut at the first line while az still reports success — how a
+ * PR ends up created with no description. Free text goes via
+ * `withAzFileArg` instead; this makes the broken route unreachable.
+ * ------------------------------------------------------------------ */
+
+describe('assertNoNewlineArgs', () => {
+  it('allows ordinary single-line arguments', () => {
+    expect(() => assertNoNewlineArgs(['repos', 'pr', 'create', '--title', 'feat: a thing'])).not.toThrow();
+  });
+
+  it('allows a JSON body, where newlines are escaped to two characters', () => {
+    const body = JSON.stringify({ content: 'line one\nline two' });
+    expect(body).not.toContain('\n');
+    expect(() => assertNoNewlineArgs(['rest', '--body', body])).not.toThrow();
+  });
+
+  it('allows the @path a temp-file argument produces', () => {
+    expect(() => assertNoNewlineArgs(['--description', '@/tmp/dova-abc/body.txt'])).not.toThrow();
+  });
+
+  it('rejects a multi-line argument and names the flag that carried it', () => {
+    expect(() => assertNoNewlineArgs(['--description', '## Summary\n\nBody'])).toThrow(/--description/);
+  });
+
+  it('rejects a lone carriage return too — CRLF text is just as fatal', () => {
+    expect(() => assertNoNewlineArgs(['--description', 'one\r\ntwo'])).toThrow();
+  });
+
+  it('points at the fix rather than just refusing', () => {
+    expect(() => assertNoNewlineArgs(['--description', 'a\nb'])).toThrow(/withAzFileArg/);
   });
 });

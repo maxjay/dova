@@ -2,6 +2,7 @@ import type { Command } from 'commander';
 import type { Runner } from '../../lib/exec.js';
 import { defaultRunner, runAzJson, tryGit } from '../../lib/exec.js';
 import { readTextArg, stdinHasData } from '../../lib/stdin.js';
+import { withAzFileArg } from '../../lib/az-file-arg.js';
 import { gitConfigGet } from '../../lib/config.js';
 import { resolveContext, buildPrWebUrl, resolveDefaultBranch } from '../../lib/context.js';
 import { addContextOptions, addJsonOption, addNoColorOption } from '../../lib/command-helpers.js';
@@ -127,11 +128,6 @@ export function registerPrCreateCommand(pr: Command): void {
       '--title', title,
       '--transition-work-items', 'true',
     ];
-    // az's --description takes a list, one argument per line, joined with
-    // newlines on its side — but a single argument containing newlines
-    // survives that join unchanged, so pass it whole.
-    if (description) args.push('--description', description);
-
     // Resolved, not asked for. `origin/HEAD` already says what this repo
     // merges into — `dova summarize` has always read it to pick a diff
     // base — so a PR has no business making the caller name it. Left to
@@ -143,21 +139,25 @@ export function registerPrCreateCommand(pr: Command): void {
     if (workItems.length > 0) args.push('--work-items', ...workItems);
     if (opts.draft) args.push('--draft', 'true');
 
-    const created = await runAzJson<AzPullRequest>(runner, args);
+    // The body goes via a temp file, never on the command line — see
+    // `withAzFileArg`. Markdown carries newlines by definition, and a
+    // newline cannot survive an argument through `az.cmd` on Windows.
+    const created = description
+      ? await withAzFileArg(description, (arg) =>
+          runAzJson<AzPullRequest>(runner, [...args, '--description', arg])
+        )
+      : await runAzJson<AzPullRequest>(runner, args);
 
-    // A multi-line string passed as a command-line *argument* does not
-    // survive Windows reliably — the .cmd/.ps1 shim and cmd.exe rebuild
-    // the command line, and the body arrives empty or cut at the first
-    // newline. The PR still gets created, so without this check dova
-    // reports a confident success over a PR with no description.
+    // Belt and braces over the temp-file route above: az reports success
+    // whether or not the body reached it, so a silent loss would look
+    // exactly like a clean create. Cheap to check, and it turns a
+    // mystery into a message.
     const lost = describeLostDescription(description, created.description);
     if (lost) {
       process.stderr.write(
         `${color.yellow('Warning')}: the description ${lost}.\n` +
-          `  Text passed inline can be mangled by the shell. Send it on stdin instead:\n` +
-          `    PowerShell:  @'\n...\n'@ | dova pr create --title '...' --description -\n` +
-          `    bash/zsh:    dova pr create --title '...' --description - <<'EOF'\n...\nEOF\n` +
-          `  (the PR itself was created fine — only the body is missing)\n`
+          `  The PR itself was created fine — only the body is missing.\n` +
+          `  Please report this: dova sent the body via a temp file, which should not be able to fail.\n`
       );
     }
 
