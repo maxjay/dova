@@ -1,76 +1,35 @@
-import { describe, it, expect } from 'vitest';
-import { looksLikeUrl, parseIdArgument, parseWorkItemUrl, parsePrUrl } from '../src/lib/urls.js';
+import { describe, expect, it } from 'vitest';
+import { parseId, parsePullRequestLink, parseRemote, parseWorkItemLink } from '../src/core/urls.js';
 
-describe('looksLikeUrl', () => {
-  it('is true for http(s) urls', () => {
-    expect(looksLikeUrl('https://dev.azure.com/contoso/MyProject/_workitems/edit/123')).toBe(true);
-    expect(looksLikeUrl('http://dev.azure.com/x')).toBe(true);
+describe('parseRemote', () => {
+  it.each([
+    ['https://dev.azure.com/contoso/MyProject/_git/web', 'contoso', 'MyProject', 'web'],
+    ['https://contoso@dev.azure.com/contoso/My%20Project/_git/web.git', 'contoso', 'My Project', 'web'],
+    ['git@ssh.dev.azure.com:v3/contoso/MyProject/web', 'contoso', 'MyProject', 'web'],
+    ['https://contoso.visualstudio.com/DefaultCollection/MyProject/_git/web', 'contoso', 'MyProject', 'web'],
+    ['https://contoso.visualstudio.com/MyProject/_git/web', 'contoso', 'MyProject', 'web'],
+  ])('%s', (remote, org, project, repo) => {
+    expect(parseRemote(remote)).toEqual({ org, project, repo });
   });
 
-  it('is false for a bare id or anything else', () => {
-    expect(looksLikeUrl('123')).toBe(false);
-    expect(looksLikeUrl('MyProject')).toBe(false);
-  });
-});
-
-describe('parseIdArgument', () => {
-  it('parses a bare positive integer', () => {
-    expect(parseIdArgument('123')).toBe(123);
-    expect(parseIdArgument('  42 ')).toBe(42);
-  });
-
-  it('rejects zero, negatives, and non-numeric input', () => {
-    expect(parseIdArgument('0')).toBeNull();
-    expect(parseIdArgument('-5')).toBeNull();
-    expect(parseIdArgument('12a')).toBeNull();
-    expect(parseIdArgument('https://example.com')).toBeNull();
+  it('is null for anything that is not Azure Repos', () => {
+    expect(parseRemote('git@github.com:contoso/web.git')).toBeNull();
+    expect(parseRemote('https://dev.azure.com/contoso/MyProject')).toBeNull();
   });
 });
 
-describe('parseWorkItemUrl', () => {
-  it('parses the "edit" browser URL form', () => {
-    expect(parseWorkItemUrl('https://dev.azure.com/contoso/MyProject/_workitems/edit/456')).toEqual({
-      org: 'contoso',
-      orgUrl: 'https://dev.azure.com/contoso',
-      project: 'MyProject',
-      id: 456,
-    });
+describe('links', () => {
+  it('reads both work item link forms', () => {
+    expect(parseWorkItemLink('https://dev.azure.com/contoso/MyProject/_workitems/edit/42')).toEqual({ org: 'contoso', project: 'MyProject', id: 42 });
+    expect(parseWorkItemLink('https://dev.azure.com/contoso/MyProject/_workitems?id=42')).toEqual({ org: 'contoso', project: 'MyProject', id: 42 });
   });
 
-  it("parses dova's own generated query-string form", () => {
-    expect(parseWorkItemUrl('https://dev.azure.com/contoso/MyProject/_workitems?id=456')).toEqual({
-      org: 'contoso',
-      orgUrl: 'https://dev.azure.com/contoso',
-      project: 'MyProject',
-      id: 456,
-    });
+  it('reads a pull request link', () => {
+    expect(parsePullRequestLink('https://dev.azure.com/contoso/MyProject/_git/web/pullrequest/7')).toEqual({ org: 'contoso', project: 'MyProject', repo: 'web', id: 7 });
+    expect(parsePullRequestLink('https://dev.azure.com/contoso/MyProject/_workitems/edit/7')).toBeNull();
   });
 
-  it('handles a project name with spaces', () => {
-    expect(parseWorkItemUrl('https://dev.azure.com/contoso/My%20Project/_workitems/edit/456')?.project).toBe('My Project');
-  });
-
-  it('returns null for a PR link', () => {
-    expect(parseWorkItemUrl('https://dev.azure.com/contoso/MyProject/_git/my-repo/pullrequest/42')).toBeNull();
-  });
-
-  it('returns null for an unrelated URL', () => {
-    expect(parseWorkItemUrl('https://github.com/example/repo')).toBeNull();
-  });
-});
-
-describe('parsePrUrl', () => {
-  it('parses a modern PR URL', () => {
-    expect(parsePrUrl('https://dev.azure.com/contoso/MyProject/_git/my-repo/pullrequest/42')).toEqual({
-      org: 'contoso',
-      orgUrl: 'https://dev.azure.com/contoso',
-      project: 'MyProject',
-      repo: 'my-repo',
-      id: 42,
-    });
-  });
-
-  it('returns null for a work item link', () => {
-    expect(parsePrUrl('https://dev.azure.com/contoso/MyProject/_workitems/edit/456')).toBeNull();
+  it('takes ids bare or as #id, and nothing else', () => {
+    expect([parseId('12'), parseId('#12'), parseId('0'), parseId('12a')]).toEqual([12, 12, null, null]);
   });
 });

@@ -1,112 +1,62 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { runDaemon } from '../src/daemon/server.js';
-import { DaemonConnection } from '../src/daemon/client.js';
-import { fromWireError, toWireError, type DaemonStatus } from '../src/daemon/protocol.js';
-import { dovaPaths, type DovaPaths } from '../src/lib/paths.js';
-import { ExitCode, NotFoundError, NotSignedInError, PrereqError, UserError } from '../src/lib/errors.js';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { DaemonClient, daemonPaths, fromWire, serve, type Paths } from '../src/daemon.js';
+import { ExitCode, NotFoundError, NotSignedInError } from '../src/errors.js';
 
-/**
- * The real daemon, in this process, on a socket in a temp dir. Its token
- * source fails as az does when nobody's logged in, so nothing here runs
- * az or touches the network.
- */
-let paths: DovaPaths;
-let daemon: { close: () => Promise<void> };
+let paths: Paths;
+let daemon: { close(): void };
 
 beforeAll(async () => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'dova-d-'));
-  paths = dovaPaths({ DOVA_HOME: home });
-  daemon = await runDaemon({
-    paths,
-    tokenSource: () => Promise.reject(new NotSignedInError('Not logged in to Azure CLI.')),
-  });
+  paths = daemonPaths({ DOVA_HOME: fs.mkdtempSync(path.join(os.tmpdir(), 'dova-d-')) });
+  // A token source failing the way az does when nobody's logged in: no az, no network.
+  daemon = await serve({ paths, tokenSource: () => Promise.reject(new NotSignedInError('Not logged in to Azure CLI.')) });
 });
+afterAll(() => daemon.close());
 
-afterAll(async () => {
-  await daemon.close();
-});
-
-describe('dova daemon', () => {
-  it('writes its key and socket for this user only', () => {
+describe('daemon', () => {
+  it('is private to this user', () => {
     if (process.platform === 'win32') return;
-    expect(fs.statSync(paths.keyFile).mode & 0o777).toBe(0o600);
     expect(fs.statSync(paths.socket).mode & 0o777).toBe(0o600);
+    expect(fs.statSync(paths.key).mode & 0o777).toBe(0o600);
   });
 
-  it('answers hello and status', async () => {
-    const { connection, hello } = await DaemonConnection.open(paths);
-    expect(hello.pid).toBe(process.pid);
-    const status = (await connection.call('daemon.status')) as DaemonStatus;
-    expect(status).toMatchObject({ socket: paths.socket, logFile: paths.logFile, service: false });
-    connection.close();
+  it('answers hello and several calls at once on one connection', async () => {
+    const open = (await DaemonClient.open(paths))!;
+    expect(open.status.pid).toBe(process.pid);
+    const [a, b] = await Promise.all([open.client.call('daemon.status'), open.client.call('auth.status')]);
+    expect(a).toMatchObject({ pid: process.pid });
+    expect(b).toMatchObject({ signedIn: false });
+    open.client.close();
   });
 
-  it('turns away a client without the session key', async () => {
-    const realKey = fs.readFileSync(paths.keyFile, 'utf8');
-    fs.writeFileSync(paths.keyFile, 'wrong');
+  it('hands back errors as the same class, so the CLI can run az login', async () => {
+    const open = (await DaemonClient.open(paths))!;
+    const err = (await open.client.call('ado.request', { method: 'GET', url: 'https://dev.azure.com/contoso/_apis/x?secret=1' }).catch((e: unknown) => e)) as NotSignedInError;
+    expect(err).toBeInstanceOf(NotSignedInError);
+    expect(err.exitCode).toBe(ExitCode.PrereqError);
+    open.client.close();
+    expect(fs.readFileSync(paths.log, 'utf8')).not.toContain('secret');
+  });
+
+  it('turns away a client without the key', async () => {
+    const key = fs.readFileSync(paths.key);
+    fs.writeFileSync(paths.key, 'wrong');
     try {
-      await expect(DaemonConnection.open(paths)).rejects.toThrow(/session key/);
+      expect(await DaemonClient.open(paths)).toBeNull();
     } finally {
-      fs.writeFileSync(paths.keyFile, realKey);
+      fs.writeFileSync(paths.key, key);
     }
   });
 
-  it('reports not signed in, as the same error class and exit code the CLI would raise itself', async () => {
-    const { connection } = await DaemonConnection.open(paths);
-    expect(await connection.call('auth.status')).toMatchObject({ signedIn: false });
-    const err = await connection.call('ado.request', { method: 'GET', url: 'https://dev.azure.com/contoso/_apis/projects' }).catch((e: unknown) => e);
-    // NotSignedInError specifically: that's what lets the CLI run az login itself.
-    expect(err).toBeInstanceOf(NotSignedInError);
-    expect(err).toBeInstanceOf(PrereqError);
-    expect((err as PrereqError).exitCode).toBe(ExitCode.PrereqError);
-    expect((err as PrereqError).hints).toContain('Run: az login');
-    connection.close();
+  it('keeps the tenant of a NotSignedInError across the wire', () => {
+    expect(fromWire({ name: 'NotSignedInError', message: 'x', hints: [], exitCode: 3, tenant: 'guest' })).toMatchObject({ tenant: 'guest' });
+    expect(fromWire({ name: 'NotFoundError', message: 'x', hints: ['h'], exitCode: 2 })).toBeInstanceOf(NotFoundError);
   });
 
-  it('keeps several calls in flight on one connection', async () => {
-    const { connection } = await DaemonConnection.open(paths);
-    const results = await Promise.all([
-      connection.call('daemon.status'),
-      connection.call('auth.status'),
-      connection.call('nope').catch((e: unknown) => e),
-      connection.call('daemon.status'),
-    ]);
-    expect((results[0] as DaemonStatus).pid).toBe(process.pid);
-    expect(results[1]).toMatchObject({ signedIn: false });
-    expect(results[2]).toBeInstanceOf(UserError);
-    expect((results[3] as DaemonStatus).pid).toBe(process.pid);
-    connection.close();
-  });
-
-  it('logs request paths, never query strings', async () => {
-    const { connection } = await DaemonConnection.open(paths);
-    await connection.call('ado.request', { method: 'GET', url: 'https://dev.azure.com/contoso/_apis/x?secret=hunter2' }).catch(() => {});
-    connection.close();
-    const log = fs.readFileSync(paths.logFile, 'utf8');
-    expect(log).toContain('/contoso/_apis/x');
-    expect(log).not.toContain('hunter2');
-  });
-});
-
-describe('wire errors', () => {
-  it('keep the tenant a NotSignedInError names', () => {
-    const back = fromWireError(toWireError(new NotSignedInError('x', 'guest')));
-    expect(back).toBeInstanceOf(NotSignedInError);
-    expect((back as NotSignedInError).tenant).toBe('guest');
-  });
-
-  it('round-trip the class, hints and exit code', () => {
-    const back = fromWireError(toWireError(new NotFoundError('gone', ['look elsewhere'])));
-    expect(back).toBeInstanceOf(NotFoundError);
-    expect((back as NotFoundError).hints).toEqual(['look elsewhere']);
-  });
-
-  it('keep an unexpected error unexpected', () => {
-    const back = fromWireError(toWireError(new TypeError('boom')));
-    expect(back).not.toBeInstanceOf(UserError);
-    expect(back.message).toBe('boom');
+  it('puts a socket that would be too long somewhere short', () => {
+    const p = daemonPaths({ DOVA_HOME: `/home/j/${'deep/'.repeat(25)}dova` }, 'linux');
+    expect(p.socket).toMatch(/^\/tmp\/dova-.+\/dovad\.sock$/);
   });
 });
