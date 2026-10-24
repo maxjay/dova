@@ -56,16 +56,27 @@ export interface App {
   openUrl(url: string): Promise<void>;
 }
 
-export function createApp(opts: { env: NodeJS.ProcessEnv; interactive: boolean; flags: ScopeHint; cwd?: string; gitRunner?: GitRunner }): App {
+export interface AppOptions {
+  env: NodeJS.ProcessEnv;
+  interactive: boolean;
+  flags: ScopeHint;
+  cwd?: string;
+  gitRunner?: GitRunner;
+  /** Shared between apps — `dova rpc` makes one App per request, all on one daemon connection. */
+  transport?: Transport;
+  stdin?: Stdin;
+}
+
+export function createApp(opts: AppOptions): App {
   const git = new Git(opts.gitRunner ?? execGit, opts.cwd ?? process.cwd());
-  let transport: Transport | undefined;
+  let transport = opts.transport;
   const clients = new Map<string, AdoClient>();
   const app: App = {
     env: opts.env,
     git,
     links: new LinkStore(git),
     prompts: terminalPrompts(opts.interactive),
-    stdin: processStdin(),
+    stdin: opts.stdin ?? processStdin(),
     transport: () => (transport ??= createTransport(opts.env, opts.interactive)),
     ado: (orgUrl) => clients.get(orgUrl) ?? clients.set(orgUrl, new AdoClient((req) => app.transport().http(req), orgUrl)).get(orgUrl)!,
     scope: (hint) => resolveScope(git, opts.env, opts.flags, hint),

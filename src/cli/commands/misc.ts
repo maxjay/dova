@@ -188,3 +188,9 @@ export const instructions = command<never, { repo?: boolean }, { files: Array<{ 
   },
   render: (r, out) => out.print(...r.files.map((f) => `${f.changed ? out.color.green('✓ wrote') : out.color.dim('= unchanged')} ${f.file}`), out.color.dim('Re-run after upgrading dova.')),
 });
+
+export const rpcCommand = command<never, never, undefined>({
+  name: 'rpc',
+  description: 'Serve every command as JSON-RPC over stdin/stdout, for other tools (method list: rpc.methods)',
+  run: async () => void (await (await import('../rpc.js')).serveRpc(commands)),
+});

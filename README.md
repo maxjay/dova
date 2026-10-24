@@ -35,11 +35,26 @@ Needs Node 20+, git, and the [Azure CLI](https://learn.microsoft.com/cli/azure/i
 | `dova pr comment\|thread\|reply\|resolve` | review threads |
 | `dova pipeline list\|log\|watch` | runs for the branch, the failed task's log, follow a run |
 | `dova api <path>` | any REST call, signed in |
+| `dova rpc` | all of the above as JSON-RPC over stdio, for other tools |
 | `dova auth status` · `dova daemon status\|stop` | who you're signed in as · the background process |
 | `dova instructions [--repo]` | teach coding agents (Copilot, Windsurf/Devin, Cursor, Codex) to use dova |
 | `dova completion <shell>` | bash, zsh, fish, powershell |
 
 Every command takes `--json [fields]` and `--jq <expr>`, and `--org`/`--project`/`--repo` (or `$DOVA_ORG`/`$DOVA_PROJECT`) outside an Azure Repos clone. Free text can be piped in with `-`. Exit codes: `1` bad input, `2` not found, `3` not signed in or no access, `4` a request failed.
+
+## From other tools: `dova rpc`
+
+`dova rpc` serves every command as a [JSON-RPC 2.0](https://www.jsonrpc.org/specification) method, one message per line on stdin/stdout — spawn it once and send requests. The method is the command path with dots; params are its arguments and flags by camelCased name, plus `cwd` (which repo to act in) and `org`/`project`/`repo`. Results are exactly what `--json` prints.
+
+```console
+$ dova rpc
+→ {"jsonrpc":"2.0","id":1,"method":"wi.view","params":{"idOrUrl":"4821"}}
+← {"jsonrpc":"2.0","id":1,"result":{"id":4821,"title":"Login redirects to the wrong page",…}}
+→ {"jsonrpc":"2.0","id":2,"method":"api","params":{"path":"_apis/git/repositories","cwd":"/src/web"}}
+→ {"jsonrpc":"2.0","id":3,"method":"rpc.methods"}
+```
+
+Requests run concurrently, through the same daemon and `az` sign-in as the CLI. Nothing prompts; text the CLI would read from stdin (`bug`'s title, `pr reply`'s text) is a param. Errors carry dova's kind in `error.data`: `{ name, exitCode, hints }`.
 
 ## How it works
 
