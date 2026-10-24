@@ -80,14 +80,15 @@ describe('adoText', () => {
 describe('throwForStatus', () => {
   const call = { method: 'GET' as const, url: `${ORG}/_apis/wit/workitems/9?api-version=7.1` };
 
-  it('treats 401 and 203 alike: sign in again', () => {
+  it('treats 401 and 203 alike — as missing access, not as "log in again"', () => {
     for (const status of [401, 203]) {
       try {
         throwForStatus({ status, contentType: 'text/html', body: '<html>' }, call);
         expect.unreachable();
       } catch (err) {
         expect(err).toBeInstanceOf(PrereqError);
-        expect((err as PrereqError).hints).toContain('Run: dova auth login');
+        expect((err as PrereqError).hints.join(' ')).toMatch(/may not have access/);
+        expect((err as PrereqError).hints.join(' ')).not.toMatch(/login/);
       }
     }
   });

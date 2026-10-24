@@ -1,15 +1,23 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { execa } from 'execa';
-import { SIGN_IN_HINT, type AdoRequest, type AdoResponse } from '../lib/ado.js';
-import { PrereqError, UserError } from '../lib/errors.js';
+import type { AdoRequest, AdoResponse } from '../lib/ado.js';
+import { NotSignedInError, PrereqError, UserError } from '../lib/errors.js';
 import { DOVA_VERSION } from '../lib/version.js';
 import { configureProxy } from '../lib/proxy.js';
 
 /* ------------------------------------------------------------------ *
- * The sign-in is the Azure CLI's: `az login`, as before. What changed
- * is how often az runs. The daemon asks it for an Azure DevOps access
- * token once, keeps that in memory, and makes every request itself with
- * it until it's close to expiring — instead of a Python process per
- * request.
+ * The sign-in is the Azure CLI's: `az login`, once, as before. What
+ * changed is how often az runs. The daemon asks it for an Azure DevOps
+ * token, keeps that in memory, and makes every request itself with it
+ * until it's close to expiring — instead of a Python process per call.
+ *
+ * Nothing here ever needs the user to come back and sign in again:
+ *   - a new `az login` (another account, `az account set`) is noticed
+ *     on its own, from az's profile file changing;
+ *   - an org in another tenant names that tenant on its 401, and the
+ *     token is fetched for it from the same az login.
  * ------------------------------------------------------------------ */
 
 /** Azure DevOps' resource id — the audience of the token az is asked for. */
@@ -21,7 +29,8 @@ export interface AccessToken {
   expiresAt: number;
 }
 
-export type TokenSource = () => Promise<AccessToken>;
+/** A token for Azure DevOps — for `tenant` when given, otherwise az's current one. */
+export type TokenSource = (tenant?: string) => Promise<AccessToken>;
 
 export interface AuthStatus {
   signedIn: boolean;
@@ -34,30 +43,67 @@ export interface AuthStatus {
   error: string | null;
 }
 
+export interface AuthSessionOptions {
+  source?: TokenSource;
+  /** The file `az login` / `az account set` rewrite. Null to not watch anything (tests). */
+  azProfile?: string | null;
+}
+
 /** Fetch a new token this long before the cached one expires, so a request never carries one that dies mid-flight. */
 const EXPIRY_MARGIN_MS = 5 * 60 * 1000;
 const REQUEST_TIMEOUT_MS = 100_000;
+const NO_TENANT = '00000000-0000-0000-0000-000000000000';
+/** Map key for "whatever tenant az is currently on". */
+const DEFAULT = '';
+
+export function azProfileFile(env: NodeJS.ProcessEnv = process.env): string {
+  return path.join(env.AZURE_CONFIG_DIR || path.join(os.homedir(), '.azure'), 'azureProfile.json');
+}
 
 export class AuthSession {
-  private token: AccessToken | null = null;
-  private pending: Promise<AccessToken> | null = null;
+  private readonly source: TokenSource;
+  private readonly azProfile: string | null;
+  private readonly tokens = new Map<string, AccessToken>();
+  private readonly pending = new Map<string, Promise<AccessToken>>();
+  /** Org URL -> the tenant it said it belongs to. */
+  private readonly orgTenants = new Map<string, string>();
+  private profileStamp: number | null = null;
 
-  constructor(private readonly source: TokenSource = azCliToken) {
+  constructor(opts: AuthSessionOptions = {}) {
+    this.source = opts.source ?? azCliToken;
+    this.azProfile = opts.azProfile === undefined ? azProfileFile() : opts.azProfile;
     configureProxy();
   }
 
-  /** Sends one Azure DevOps request with the cached token. */
+  /** Sends one Azure DevOps request as whoever az is signed in as. */
   async send(req: AdoRequest): Promise<AdoResponse> {
     const url = assertAzureDevOpsUrl(req.url);
-    let res = await this.sendOnce(req, url, false);
-    // Rejected before it expired (a new `az login` as someone else, a
-    // revoked session): ask az again, once.
-    if (res.status === 401 || res.status === 203) res = await this.sendOnce(req, url, true);
-    return res;
+    this.forgetTokensIfAzLoginChanged();
+    const org = orgUrlOf(url);
+    const tenant = (org && this.orgTenants.get(org)) ?? DEFAULT;
+
+    const first = await this.sendOnce(req, url, tenant, false);
+    if (first.res.status !== 401 && first.res.status !== 203) return first.res;
+
+    // The org lives in another tenant than the token's: ask az for one
+    // there, and remember it for this org from now on.
+    const wanted = first.resourceTenant;
+    if (org && wanted && wanted !== first.tokenTenant) {
+      this.orgTenants.set(org, wanted);
+      return (await this.sendOnce(req, url, wanted, false)).res;
+    }
+    // Same tenant, still rejected before expiry (revoked, or az signed in
+    // as someone else since): ask az again, once.
+    return (await this.sendOnce(req, url, tenant, true)).res;
   }
 
-  private async sendOnce(req: AdoRequest, url: URL, fresh: boolean): Promise<AdoResponse> {
-    const { accessToken } = await this.accessToken(fresh);
+  private async sendOnce(
+    req: AdoRequest,
+    url: URL,
+    tenant: string,
+    fresh: boolean
+  ): Promise<{ res: AdoResponse; resourceTenant: string | null; tokenTenant: string | null }> {
+    const { accessToken } = await this.accessToken(tenant, fresh);
     const headers: Record<string, string> = {
       Authorization: `Bearer ${accessToken}`,
       // Build logs come back as JSON lines unless text is asked for.
@@ -76,31 +122,54 @@ export class AuthSession {
       redirect: 'manual',
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
-    return { status: res.status, contentType: res.headers.get('content-type'), body: await res.text() };
+    const resourceTenant = res.headers.get('x-vss-resourcetenant')?.split(',')[0]?.trim() || null;
+    return {
+      res: { status: res.status, contentType: res.headers.get('content-type'), body: await res.text() },
+      resourceTenant: resourceTenant && resourceTenant !== NO_TENANT ? resourceTenant : null,
+      tokenTenant: readClaims(accessToken).tenant,
+    };
   }
 
-  private async accessToken(fresh: boolean): Promise<AccessToken> {
-    if (!fresh && this.token && this.token.expiresAt - EXPIRY_MARGIN_MS > Date.now()) return this.token;
+  private async accessToken(tenant: string, fresh: boolean): Promise<AccessToken> {
+    const cached = this.tokens.get(tenant);
+    if (!fresh && cached && cached.expiresAt - EXPIRY_MARGIN_MS > Date.now()) return cached;
     // Concurrent requests all wait on the same az run.
-    this.pending ??= this.source()
-      .then((token) => {
-        this.token = token;
-        return token;
-      })
-      .finally(() => {
-        this.pending = null;
-      });
-    return this.pending;
+    let pending = this.pending.get(tenant);
+    if (!pending) {
+      pending = this.source(tenant === DEFAULT ? undefined : tenant)
+        .then((token) => {
+          this.tokens.set(tenant, token);
+          return token;
+        })
+        .finally(() => this.pending.delete(tenant));
+      this.pending.set(tenant, pending);
+    }
+    return pending;
   }
 
-  /** Forget the cached token — after `az login`, so the next request picks up the new account. */
-  reset(): void {
-    this.token = null;
+  /**
+   * `az login`, `az logout` and `az account set` all rewrite az's
+   * profile file. When it has changed since the tokens were fetched,
+   * they may belong to the wrong account: drop them.
+   */
+  private forgetTokensIfAzLoginChanged(): void {
+    if (!this.azProfile) return;
+    let stamp: number | null;
+    try {
+      stamp = fs.statSync(this.azProfile).mtimeMs;
+    } catch {
+      stamp = null;
+    }
+    if (stamp !== this.profileStamp) {
+      this.tokens.clear();
+      this.profileStamp = stamp;
+    }
   }
 
   async status(): Promise<AuthStatus> {
+    this.forgetTokensIfAzLoginChanged();
     try {
-      const token = await this.accessToken(false);
+      const token = await this.accessToken(DEFAULT, false);
       const claims = readClaims(token.accessToken);
       return {
         signedIn: true,
@@ -127,27 +196,30 @@ interface AzAccessToken {
   expiresOn?: string;
 }
 
-export async function azCliToken(): Promise<AccessToken> {
+const INSTALL_AZ = 'Install: https://learn.microsoft.com/cli/azure/install-azure-cli';
+
+export async function azCliToken(tenant?: string): Promise<AccessToken> {
   let result;
   try {
-    result = await execa('az', ['account', 'get-access-token', '--resource', AZURE_DEVOPS_RESOURCE, '--output', 'json'], {
-      reject: false,
-      env: { PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' },
-    });
+    result = await execa(
+      'az',
+      ['account', 'get-access-token', '--resource', AZURE_DEVOPS_RESOURCE, ...(tenant ? ['--tenant', tenant] : []), '--output', 'json'],
+      { reject: false, env: { PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' } }
+    );
   } catch (err) {
     if ((err as { code?: string }).code === 'ENOENT') {
-      throw new PrereqError('az (Azure CLI) is not installed or not on PATH.', [
-        'Install: https://learn.microsoft.com/cli/azure/install-azure-cli',
-      ]);
+      throw new PrereqError('az (Azure CLI) is not installed or not on PATH.', [INSTALL_AZ]);
     }
     throw err;
   }
   if (result.exitCode !== 0) {
     const stderr = result.stderr.trim();
-    if (/az login|aadsts|please run|expired|refresh token/i.test(stderr)) {
-      throw new PrereqError('Not logged in to Azure CLI (or the login expired).', [SIGN_IN_HINT]);
+    if (/az login|aadsts|please run|expired|refresh token|interaction/i.test(stderr)) {
+      throw tenant
+        ? new NotSignedInError(`This organization belongs to tenant ${tenant}, which your az login doesn't cover yet.`, tenant)
+        : new NotSignedInError('Not logged in to Azure CLI.');
     }
-    throw new PrereqError(`az could not get an Azure DevOps token:\n${stderr || '(no output on stderr)'}`, [SIGN_IN_HINT]);
+    throw new PrereqError(`az could not get an Azure DevOps token:\n${stderr || '(no output on stderr)'}`);
   }
   return parseAzToken(result.stdout);
 }
@@ -157,7 +229,7 @@ export function parseAzToken(stdout: string): AccessToken {
   try {
     data = JSON.parse(stdout) as AzAccessToken;
   } catch {
-    throw new PrereqError('az returned something other than a token.', [SIGN_IN_HINT]);
+    throw new PrereqError('az returned something other than a token.');
   }
   const expiresAt =
     typeof data.expires_on === 'number'
@@ -168,6 +240,40 @@ export function parseAzToken(stdout: string): AccessToken {
   // An expiry we can't read: treat the token as good for a few minutes,
   // so it gets used and then re-fetched rather than trusted for an hour.
   return { accessToken: data.accessToken, expiresAt: Number.isFinite(expiresAt) ? expiresAt : Date.now() + 10 * 60 * 1000 };
+}
+
+/**
+ * `az login`, in this terminal — what a command does by itself the first
+ * time it finds az not logged in, so nobody has to go and run it first.
+ * Its output goes to stderr: stdout belongs to the command's own result.
+ */
+export async function runAzLogin(tenant?: string): Promise<void> {
+  process.stderr.write(tenant ? `Signing in to tenant ${tenant} with az login…\n` : 'Not signed in to Azure — running az login…\n');
+  try {
+    const result = await execa('az', ['login', ...(tenant ? ['--tenant', tenant] : []), '--output', 'none'], {
+      stdin: 'inherit',
+      stdout: process.stderr,
+      stderr: 'inherit',
+      reject: false,
+    });
+    if (result.exitCode !== 0) throw new PrereqError(`az login exited with code ${result.exitCode}.`);
+  } catch (err) {
+    if ((err as { code?: string }).code === 'ENOENT') {
+      throw new PrereqError('az (Azure CLI) is not installed or not on PATH.', [INSTALL_AZ]);
+    }
+    throw err;
+  }
+}
+
+/** `https://dev.azure.com/{org}` for a URL under an org; null for org-less hosts. */
+export function orgUrlOf(url: URL): string | null {
+  const host = url.hostname.toLowerCase();
+  const first = url.pathname.split('/').filter(Boolean)[0];
+  if (host === 'dev.azure.com' || host.endsWith('.dev.azure.com')) {
+    return first && !first.startsWith('_') ? `https://dev.azure.com/${first}` : null;
+  }
+  const sub = host.slice(0, -'.visualstudio.com'.length);
+  return sub && !sub.includes('.') && sub !== 'app' ? `https://dev.azure.com/${sub}` : null;
 }
 
 /** Reads (does not verify) the token's claims, for display only. */

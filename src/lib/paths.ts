@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -40,10 +41,19 @@ export function dovaPaths(env: NodeJS.ProcessEnv = process.env, platform: NodeJS
   // A named pipe lives in its own namespace, not on disk. Scoped by user
   // name so two people on one machine get two daemons — the session key
   // is what actually keeps them out of each other's.
-  const socket =
-    platform === 'win32'
-      ? `\\\\.\\pipe\\dova-${safeUserName()}${env.DOVA_HOME ? `-${createHash('sha256').update(env.DOVA_HOME).digest('hex').slice(0, 12)}` : ''}`
-      : path.join(runtimeDir, 'dovad.sock');
+  let socket: string;
+  if (platform === 'win32') {
+    socket = `\\\\.\\pipe\\dova-${safeUserName()}${env.DOVA_HOME ? `-${shortHash(env.DOVA_HOME)}` : ''}`;
+  } else {
+    socket = path.join(runtimeDir, 'dovad.sock');
+    // A Unix socket path can't be longer than ~104 bytes (macOS) / 108
+    // (Linux); a deep home directory goes past that. Then it lives in a
+    // short per-user directory instead, the way tmux's does — see
+    // `ensureSocketDir` for why that's safe in a shared /tmp.
+    if (Buffer.byteLength(socket) > MAX_SOCKET_PATH) {
+      socket = path.join(SHORT_SOCKET_ROOT, `dova-${process.getuid?.() ?? safeUserName()}-${shortHash(runtimeDir)}`, 'dovad.sock');
+    }
+  }
 
   return {
     stateDir,
@@ -51,6 +61,28 @@ export function dovaPaths(env: NodeJS.ProcessEnv = process.env, platform: NodeJS
     keyFile: path.join(stateDir, 'daemon.key'),
     logFile: path.join(stateDir, 'daemon.log'),
   };
+}
+
+const MAX_SOCKET_PATH = 100;
+const SHORT_SOCKET_ROOT = '/tmp';
+
+function shortHash(text: string): string {
+  return createHash('sha256').update(text).digest('hex').slice(0, 12);
+}
+
+/**
+ * Creates the socket's directory, 0700, and refuses one that isn't ours:
+ * in a shared /tmp another user could have made it first to intercept
+ * the socket.
+ */
+export function ensureSocketDir(socket: string): void {
+  const dir = path.dirname(socket);
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const stat = fs.lstatSync(dir);
+  const uid = process.getuid?.();
+  if (!stat.isDirectory() || (uid !== undefined && stat.uid !== uid) || (stat.mode & 0o077) !== 0) {
+    throw new Error(`${dir} is not a private directory owned by you; refusing to put dova's socket there.`);
+  }
 }
 
 function safeUserName(): string {

@@ -31,9 +31,6 @@ export interface AdoResponse {
 
 export const API_VERSION = '7.1';
 
-/** `dova auth login` runs `az login` and makes the daemon pick up the new account. */
-export const SIGN_IN_HINT = 'Run: dova auth login';
-
 type QueryValue = string | number | boolean | undefined;
 
 /**
@@ -105,12 +102,15 @@ async function send(runner: Runner, call: AdoCall): Promise<AdoResponse> {
  * 203 is how Azure DevOps answers an unauthenticated request it wants
  * to bounce to a sign-in page: success-shaped, HTML body, not the
  * resource. It means the same thing as a 401.
+ *
+ * By the time a 401 gets here the token was already fresh and for the
+ * org's own tenant (see AuthSession.send), so logging in again would
+ * not help: the account az is signed in as lacks access.
  */
 export function throwForStatus(res: AdoResponse, call: Pick<AdoCall, 'method' | 'url'>): void {
   if (res.status === 203 || res.status === 401) {
-    throw new PrereqError('Azure DevOps rejected dova\'s sign-in.', [
-      SIGN_IN_HINT,
-      ...(serviceMessage(res) ? [`Azure DevOps said: ${serviceMessage(res)}`] : []),
+    throw new PrereqError(`Azure DevOps refused the request: ${serviceMessage(res) ?? `HTTP ${res.status}`}`, [
+      'The account az is signed in as may not have access to this organization — check: dova auth status',
     ]);
   }
   if (res.status >= 200 && res.status < 300) return;

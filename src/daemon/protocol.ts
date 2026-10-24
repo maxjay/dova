@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import type { Socket } from 'node:net';
-import { DovaError, ExitCode, ExternalCommandError, NotFoundError, PrereqError, UserError } from '../lib/errors.js';
+import { DovaError, ExitCode, ExternalCommandError, NotFoundError, NotSignedInError, PrereqError, UserError } from '../lib/errors.js';
 import { DOVA_VERSION } from '../lib/version.js';
 
 /* ------------------------------------------------------------------ *
@@ -32,6 +32,8 @@ export interface WireError {
   message: string;
   hints: string[];
   exitCode: number;
+  /** NotSignedInError only: the tenant az needs a login for. */
+  tenant?: string;
 }
 
 export type WireResponse = { id: number; result: unknown } | { id: number; error: WireError };
@@ -72,6 +74,9 @@ export function buildId(): string {
 }
 
 export function toWireError(err: unknown): WireError {
+  if (err instanceof NotSignedInError) {
+    return { name: err.name, message: err.message, hints: err.hints, exitCode: err.exitCode, tenant: err.tenant };
+  }
   if (err instanceof DovaError) {
     return { name: err.name, message: err.message, hints: err.hints, exitCode: err.exitCode };
   }
@@ -86,6 +91,8 @@ export function fromWireError(wire: WireError): Error {
       return new UserError(wire.message, wire.hints);
     case 'NotFoundError':
       return new NotFoundError(wire.message, wire.hints);
+    case 'NotSignedInError':
+      return new NotSignedInError(wire.message, wire.tenant);
     case 'PrereqError':
       return new PrereqError(wire.message, wire.hints);
     case 'ExternalCommandError':

@@ -1,12 +1,11 @@
 import type { Command } from 'commander';
-import { execa } from 'execa';
 import { defaultRunner } from '../lib/exec.js';
 import { adoJson, adoUrl, accountFromConnectionData, type ConnectionData } from '../lib/ado.js';
 import { defaultTransport } from '../lib/transport.js';
 import { resolveContext } from '../lib/context.js';
 import { addJsonOption, addNoColorOption } from '../lib/command-helpers.js';
 import { emit, getColor } from '../lib/output.js';
-import { ExitCode, PrereqError } from '../lib/errors.js';
+import { ExitCode } from '../lib/errors.js';
 
 /** The org in context, if there is one — only ever used to check the sign-in against, so never an error. */
 async function contextOrgUrl(): Promise<string | undefined> {
@@ -41,37 +40,7 @@ async function checkOrg(): Promise<OrgCheck | null> {
 }
 
 export function registerAuthCommand(program: Command): void {
-  const auth = program.command('auth').description('Your Azure CLI sign-in, as the dova daemon sees it');
-
-  const login = auth
-    .command('login')
-    .description('Run `az login`, then have the daemon pick up the new sign-in')
-    .option('--tenant <id>', 'passed through to az login')
-    .option('--use-device-code', 'passed through to az login');
-  addNoColorOption(login);
-  login.action(async (opts: { tenant?: string; useDeviceCode?: boolean; color: boolean }) => {
-    const color = getColor(opts.color === false);
-    const args = ['login', ...(opts.tenant ? ['--tenant', opts.tenant] : []), ...(opts.useDeviceCode ? ['--use-device-code'] : [])];
-    try {
-      const result = await execa('az', args, { stdio: 'inherit', reject: false });
-      if (result.exitCode !== 0) throw new PrereqError(`az login exited with code ${result.exitCode}.`);
-    } catch (err) {
-      if ((err as { code?: string }).code === 'ENOENT') {
-        throw new PrereqError('az (Azure CLI) is not installed or not on PATH.', [
-          'Install: https://learn.microsoft.com/cli/azure/install-azure-cli',
-        ]);
-      }
-      throw err;
-    }
-    // The daemon may still hold the previous account's token.
-    await defaultTransport().auth.reset();
-    const status = await defaultTransport().auth.status();
-    process.stdout.write(
-      status.signedIn
-        ? `${color.green('Signed in')}${status.account ? ` as ${color.bold(status.account)}` : ''}.\n`
-        : `${color.yellow('az login finished, but no Azure DevOps token is available:')} ${status.error}\n`
-    );
-  });
+  const auth = program.command('auth').description('Your Azure CLI sign-in, as dova sees it (sign in with `az login`, once)');
 
   const statusCmd = auth.command('status').description("Who you're signed in as, and whether this repo's organization accepts it");
   addJsonOption(statusCmd);
@@ -79,12 +48,12 @@ export function registerAuthCommand(program: Command): void {
   statusCmd.action(async (opts: { json?: string | boolean; color: boolean }) => {
     const color = getColor(opts.color === false);
     const transport = defaultTransport();
-    const status = await transport.auth.status();
+    const status = await transport.status();
     const check = status.signedIn ? await checkOrg() : null;
 
     await emit({ ...status, transport: transport.kind, organization: check }, opts, () => {
       if (!status.signedIn) {
-        process.stdout.write(`${color.yellow('Not signed in.')} ${status.error ?? ''}\n  Run: dova auth login\n`);
+        process.stdout.write(`${color.yellow('Not signed in.')} ${status.error ?? ''}\n  Run: az login (or any dova command, which runs it for you)\n`);
         return;
       }
       const lines = [

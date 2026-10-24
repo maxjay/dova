@@ -61,6 +61,12 @@ describe('dovaPaths', () => {
     expect(dovaPaths({ XDG_RUNTIME_DIR: '/run/user/1000' }, 'linux').socket).toBe('/run/user/1000/dova/dovad.sock');
   });
 
+  it('moves the socket somewhere short when the path would be too long for one', () => {
+    const socket = dovaPaths({ DOVA_HOME: `/home/j/${'very-long-directory-name/'.repeat(5)}dova` }, 'linux').socket;
+    expect(socket).toMatch(/^\/tmp\/dova-[^/]+\/dovad\.sock$/);
+    expect(Buffer.byteLength(socket)).toBeLessThanOrEqual(100);
+  });
+
   it('uses a per-user named pipe on Windows', () => {
     expect(dovaPaths({}, 'win32').socket).toMatch(/^\\\\\.\\pipe\\dova-/);
   });

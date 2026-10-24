@@ -6,7 +6,7 @@ import { runDaemon } from '../src/daemon/server.js';
 import { DaemonConnection } from '../src/daemon/client.js';
 import { fromWireError, toWireError, type DaemonStatus } from '../src/daemon/protocol.js';
 import { dovaPaths, type DovaPaths } from '../src/lib/paths.js';
-import { ExitCode, NotFoundError, PrereqError, UserError } from '../src/lib/errors.js';
+import { ExitCode, NotFoundError, NotSignedInError, PrereqError, UserError } from '../src/lib/errors.js';
 
 /**
  * The real daemon, in this process, on a socket in a temp dir. Its token
@@ -21,7 +21,7 @@ beforeAll(async () => {
   paths = dovaPaths({ DOVA_HOME: home });
   daemon = await runDaemon({
     paths,
-    tokenSource: () => Promise.reject(new PrereqError('Not logged in to Azure CLI (or the login expired).', ['Run: dova auth login'])),
+    tokenSource: () => Promise.reject(new NotSignedInError('Not logged in to Azure CLI.')),
   });
 });
 
@@ -58,9 +58,11 @@ describe('dova daemon', () => {
     const { connection } = await DaemonConnection.open(paths);
     expect(await connection.call('auth.status')).toMatchObject({ signedIn: false });
     const err = await connection.call('ado.request', { method: 'GET', url: 'https://dev.azure.com/contoso/_apis/projects' }).catch((e: unknown) => e);
+    // NotSignedInError specifically: that's what lets the CLI run az login itself.
+    expect(err).toBeInstanceOf(NotSignedInError);
     expect(err).toBeInstanceOf(PrereqError);
     expect((err as PrereqError).exitCode).toBe(ExitCode.PrereqError);
-    expect((err as PrereqError).hints).toContain('Run: dova auth login');
+    expect((err as PrereqError).hints).toContain('Run: az login');
     connection.close();
   });
 
@@ -90,6 +92,12 @@ describe('dova daemon', () => {
 });
 
 describe('wire errors', () => {
+  it('keep the tenant a NotSignedInError names', () => {
+    const back = fromWireError(toWireError(new NotSignedInError('x', 'guest')));
+    expect(back).toBeInstanceOf(NotSignedInError);
+    expect((back as NotSignedInError).tenant).toBe('guest');
+  });
+
   it('round-trip the class, hints and exit code', () => {
     const back = fromWireError(toWireError(new NotFoundError('gone', ['look elsewhere'])));
     expect(back).toBeInstanceOf(NotFoundError);

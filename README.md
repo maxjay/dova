@@ -42,17 +42,16 @@ npm link
 ```
 
 **Requirements:** Node 20+, git, and the
-[Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli),
-signed in:
+[Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli).
+The azure-devops extension is no longer needed.
 
-```sh
-dova auth login      # runs `az login`, then has the daemon pick it up
-```
-
-Already logged in with `az login`? Nothing to do. `dova auth status`
-shows who you're signed in as and checks that the current repo's
-organization accepts it. The azure-devops extension is no longer
-needed.
+Signing in is `az login`, once. Already logged in? Nothing to do. If
+you aren't, the first `dova` command you run does it for you, then
+carries on. After that you never sign in again for dova: the daemon
+notices a later `az login` (another account, `az account set`) by
+itself, and an organization in another tenant gets a token for that
+tenant from the same login. `dova auth status` shows who you're signed
+in as and checks that the current repo's organization accepts it.
 
 ### The daemon
 

@@ -3,7 +3,7 @@ import fsp from 'node:fs/promises';
 import net from 'node:net';
 import path from 'node:path';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { dovaPaths, type DovaPaths } from '../lib/paths.js';
+import { dovaPaths, ensureSocketDir, type DovaPaths } from '../lib/paths.js';
 import { AuthSession, type TokenSource } from '../auth/session.js';
 import type { AdoRequest } from '../lib/ado.js';
 import { UserError } from '../lib/errors.js';
@@ -41,10 +41,10 @@ const SERVICE_RETRY_MS = 2000;
 export async function runDaemon(opts: RunDaemonOptions = {}): Promise<{ close: () => Promise<void> }> {
   const paths = opts.paths ?? dovaPaths();
   fs.mkdirSync(paths.stateDir, { recursive: true, mode: 0o700 });
-  if (process.platform !== 'win32') fs.mkdirSync(path.dirname(paths.socket), { recursive: true, mode: 0o700 });
+  if (process.platform !== 'win32') ensureSocketDir(paths.socket);
 
   const log = openLog(paths.logFile, opts.echoLog);
-  const session = new AuthSession(opts.tokenSource);
+  const session = new AuthSession({ source: opts.tokenSource });
   const key = randomBytes(32).toString('base64url');
   const keyBuf = Buffer.from(key);
   const startedAt = new Date().toISOString();
@@ -111,10 +111,6 @@ export async function runDaemon(opts: RunDaemonOptions = {}): Promise<{ close: (
       }
       case 'auth.status':
         return session.status();
-      case 'auth.reset':
-        session.reset();
-        log('token cache cleared');
-        return null;
       case 'daemon.status':
         return {
           build,
@@ -136,7 +132,13 @@ export async function runDaemon(opts: RunDaemonOptions = {}): Promise<{ close: (
     }
   }
 
-  await listen(server, paths.socket, Boolean(opts.service), log);
+  try {
+    await listen(server, paths.socket, Boolean(opts.service), log);
+  } catch (err) {
+    // Launched detached, the log is the only place this can be seen.
+    log(`could not listen on ${paths.socket}: ${err instanceof Error ? err.message : String(err)}`);
+    throw err;
+  }
   if (process.platform !== 'win32') fs.chmodSync(paths.socket, 0o600);
   await writePrivateFile(paths.keyFile, key);
   log(`dova daemon ${build} listening on ${paths.socket} (pid ${process.pid})`);
@@ -173,14 +175,21 @@ export async function runDaemon(opts: RunDaemonOptions = {}): Promise<{ close: (
  * which gets removed.
  */
 async function listen(server: net.Server, socket: string, service: boolean, log: (line: string) => void): Promise<void> {
+  let removedStale = false;
   for (;;) {
     try {
       await new Promise<void>((resolve, reject) => {
-        server.once('error', reject);
-        server.listen(socket, () => {
-          server.off('error', reject);
+        const onError = (err: Error): void => {
+          server.off('listening', onListening);
+          reject(err);
+        };
+        const onListening = (): void => {
+          server.off('error', onError);
           resolve();
-        });
+        };
+        server.once('error', onError);
+        server.once('listening', onListening);
+        server.listen(socket);
       });
       return;
     } catch (err) {
@@ -193,7 +202,11 @@ async function listen(server: net.Server, socket: string, service: boolean, log:
         await new Promise((r) => setTimeout(r, SERVICE_RETRY_MS));
         continue;
       }
-      // Named pipes vanish with their process, so this is Unix-only.
+      // A dead daemon's leftover socket file (named pipes vanish with
+      // their process, so this is Unix-only). Removed once: still in use
+      // after that means something else is wrong, and spinning won't fix it.
+      if (removedStale) throw err;
+      removedStale = true;
       fs.rmSync(socket, { force: true });
     }
   }

@@ -44,7 +44,9 @@ and rendering all stay in the CLI process.
 requests with `adoUrl` and reads them through `adoJson` / `adoText`
 (`src/lib/ado.ts`). These map HTTP statuses to dova's errors:
 
-- 401 or 203 → `PrereqError` with the hint "dova auth login"
+- 401 or 203 → `PrereqError` naming an access problem (by then the
+  token was already fresh and for the org's tenant, so logging in
+  again wouldn't help)
 - 404 → `NotFoundError`, carrying the service's message
 - anything else → `ExternalCommandError`
 
@@ -64,9 +66,21 @@ it again:
 
 Concurrent requests share one `az` run. Nothing is written to disk.
 
-- `dova auth login` runs `az login`, passing `--tenant` and
-  `--use-device-code` through. It then tells the daemon to drop its
-  cached token, so the new account takes effect immediately.
+Signing in happens **once**, and never through dova:
+
+- **First use.** If `az` isn't logged in, the command running in a
+  terminal runs `az login` itself (to stderr), then retries — once
+  per process, shared by concurrent requests. Without a terminal, the
+  `NotSignedInError` goes out as-is, naming `az login`.
+- **Account changes.** The daemon stats az's `azureProfile.json` on
+  every request; `az login`, `az logout` and `az account set` rewrite
+  it, and a changed mtime drops the cached tokens.
+- **Other tenants.** An org in another tenant answers a token's 401
+  with `X-VSS-ResourceTenant`. The daemon then asks
+  `az account get-access-token --tenant <it>`, caches tokens per
+  tenant, and remembers each org's tenant. Only if az has never
+  signed in to that tenant does it take a one-time
+  `az login --tenant <it>`, run for you like the first one.
 - `dova auth status` shows the account and tenant from the token's
   claims, when the token expires, and whether the current repo's org
   accepts it.
@@ -102,7 +116,7 @@ The azure-devops `az` extension is no longer needed, only core `az`.
   `{id, result} | {id, error}`. Calls multiplex on one connection.
 - **Errors** cross the socket as `{name, message, hints, exitCode}` and
   are rebuilt as the same class on the CLI side.
-- **Methods:** `hello`, `ado.request`, `auth.status`, `auth.reset`,
+- **Methods:** `hello`, `ado.request`, `auth.status`,
   `daemon.status`, `daemon.shutdown`.
 - **What it fetches.** The daemon only fetches https URLs on
   `dev.azure.com`, `*.dev.azure.com` and `*.visualstudio.com`. It

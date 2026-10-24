@@ -19,7 +19,7 @@ export enum ExitCode {
 /** Base class for all errors dova raises deliberately (as opposed to bugs). */
 export class DovaError extends Error {
   readonly exitCode: ExitCode;
-  /** Extra lines of guidance printed under the main message (e.g. "Run: dova auth login"). */
+  /** Extra lines of guidance printed under the main message (e.g. "Run: az login"). */
   readonly hints: string[];
 
   constructor(message: string, exitCode: ExitCode = ExitCode.UserError, hints: string[] = []) {
@@ -48,6 +48,18 @@ export class PrereqError extends DovaError {
   constructor(message: string, hints: string[] = []) {
     super(message, ExitCode.PrereqError, hints);
     this.name = 'PrereqError';
+  }
+}
+
+/**
+ * az has no usable login — none at all, or none for the tenant an org
+ * belongs to. Its own class because a terminal session answers it by
+ * running `az login` on the spot (see transport.ts) rather than failing.
+ */
+export class NotSignedInError extends PrereqError {
+  constructor(message: string, readonly tenant?: string) {
+    super(message, [tenant ? `Run: az login --tenant ${tenant}` : 'Run: az login']);
+    this.name = 'NotSignedInError';
   }
 }
 
