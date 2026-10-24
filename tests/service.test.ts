@@ -2,7 +2,6 @@ import { describe, it, expect } from 'vitest';
 import { launchdPlist, systemdUnit, windowsLauncher } from '../src/daemon/service.js';
 import { proxyUrl } from '../src/lib/proxy.js';
 import { dovaPaths } from '../src/lib/paths.js';
-import { prefersDeviceCode } from '../src/commands/auth.js';
 
 describe('systemdUnit', () => {
   it('restarts always, and quotes paths with spaces', () => {
@@ -39,12 +38,12 @@ describe('proxyUrl', () => {
   });
 
   it('is skipped when NO_PROXY covers every host dova talks to', () => {
-    expect(proxyUrl({ HTTPS_PROXY: 'http://p:1', NO_PROXY: '.azure.com,login.microsoftonline.com' })).toBeNull();
+    expect(proxyUrl({ HTTPS_PROXY: 'http://p:1', NO_PROXY: '.azure.com' })).toBeNull();
     expect(proxyUrl({ https_proxy: 'http://p:1', no_proxy: '*' })).toBeNull();
   });
 
-  it('still applies when NO_PROXY only covers some of them', () => {
-    expect(proxyUrl({ HTTPS_PROXY: 'http://p:1', NO_PROXY: 'dev.azure.com' })).toBe('http://p:1');
+  it('still applies when NO_PROXY covers something else', () => {
+    expect(proxyUrl({ HTTPS_PROXY: 'http://p:1', NO_PROXY: 'internal.example' })).toBe('http://p:1');
   });
 
   it('is null with no proxy configured', () => {
@@ -55,7 +54,7 @@ describe('proxyUrl', () => {
 describe('dovaPaths', () => {
   it('puts everything under $DOVA_HOME when set', () => {
     const p = dovaPaths({ DOVA_HOME: '/x' }, 'linux');
-    expect([p.configDir, p.stateDir, p.socket]).toEqual(['/x', '/x', '/x/dovad.sock']);
+    expect([p.stateDir, p.socket]).toEqual(['/x', '/x/dovad.sock']);
   });
 
   it('prefers $XDG_RUNTIME_DIR for the socket on Linux', () => {
@@ -64,14 +63,5 @@ describe('dovaPaths', () => {
 
   it('uses a per-user named pipe on Windows', () => {
     expect(dovaPaths({}, 'win32').socket).toMatch(/^\\\\\.\\pipe\\dova-/);
-  });
-});
-
-describe('prefersDeviceCode', () => {
-  it('over SSH, or on Linux with no display', () => {
-    expect(prefersDeviceCode({ SSH_CONNECTION: '1 2 3 4' }, 'darwin')).toBe(true);
-    expect(prefersDeviceCode({}, 'linux')).toBe(true);
-    expect(prefersDeviceCode({ DISPLAY: ':0' }, 'linux')).toBe(false);
-    expect(prefersDeviceCode({}, 'win32')).toBe(false);
   });
 });

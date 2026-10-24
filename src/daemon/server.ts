@@ -1,10 +1,10 @@
 import fs from 'node:fs';
+import fsp from 'node:fs/promises';
 import net from 'node:net';
 import path from 'node:path';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { dovaPaths, type DovaPaths } from '../lib/paths.js';
-import { AuthSession, type LoginParams } from '../auth/session.js';
-import { fileCredentialStore, writePrivateFile } from '../auth/store.js';
+import { AuthSession, type TokenSource } from '../auth/session.js';
 import type { AdoRequest } from '../lib/ado.js';
 import { UserError } from '../lib/errors.js';
 import { DOVA_VERSION } from '../lib/version.js';
@@ -20,9 +20,9 @@ import {
 } from './protocol.js';
 
 /* ------------------------------------------------------------------ *
- * dovad: the long-running half of dova. It holds the user's sign-in and
- * makes every Azure DevOps request on the CLI's behalf. It runs until
- * it's told to stop; there is no idle timeout.
+ * dovad: the long-running half of dova. It holds the az token in memory
+ * and makes every Azure DevOps request on the CLI's behalf. It runs
+ * until it's told to stop; there is no idle timeout.
  * ------------------------------------------------------------------ */
 
 export interface RunDaemonOptions {
@@ -31,6 +31,8 @@ export interface RunDaemonOptions {
   paths?: DovaPaths;
   /** Also log to stderr (`dova daemon run` in a terminal). */
   echoLog?: boolean;
+  /** Where tokens come from — az, unless a test says otherwise. */
+  tokenSource?: TokenSource;
 }
 
 const MAX_LOG_BYTES = 5 * 1024 * 1024;
@@ -42,7 +44,7 @@ export async function runDaemon(opts: RunDaemonOptions = {}): Promise<{ close: (
   if (process.platform !== 'win32') fs.mkdirSync(path.dirname(paths.socket), { recursive: true, mode: 0o700 });
 
   const log = openLog(paths.logFile, opts.echoLog);
-  const session = new AuthSession(fileCredentialStore(paths.credentialsFile));
+  const session = new AuthSession(opts.tokenSource);
   const key = randomBytes(32).toString('base64url');
   const keyBuf = Buffer.from(key);
   const startedAt = new Date().toISOString();
@@ -52,13 +54,10 @@ export async function runDaemon(opts: RunDaemonOptions = {}): Promise<{ close: (
   const sockets = new Set<net.Socket>();
   const server = net.createServer((socket) => {
     sockets.add(socket);
-    const aborter = new AbortController();
     let authenticated = false;
 
     socket.on('close', () => {
       sockets.delete(socket);
-      // A CLI that went away (Ctrl-C mid-login) cancels what it started.
-      aborter.abort();
     });
     socket.on('error', () => {
       // A client vanishing mid-write; 'close' follows.
@@ -80,7 +79,7 @@ export async function runDaemon(opts: RunDaemonOptions = {}): Promise<{ close: (
       }
       const respond = (result: unknown): void => writeMessage(socket, { id: msg.id, result });
       const fail = (err: unknown): void => writeMessage(socket, { id: msg.id, error: toWireError(err) });
-      handle(msg, (event) => writeMessage(socket, { id: msg.id, event }), aborter.signal).then(respond, fail);
+      handle(msg).then(respond, fail);
     });
   });
 
@@ -90,7 +89,7 @@ export async function runDaemon(opts: RunDaemonOptions = {}): Promise<{ close: (
     return buf.length === keyBuf.length && timingSafeEqual(buf, keyBuf);
   }
 
-  async function handle(msg: WireRequest, emit: (event: unknown) => void, signal: AbortSignal): Promise<unknown> {
+  async function handle(msg: WireRequest): Promise<unknown> {
     switch (msg.method) {
       case 'hello': {
         const hello = msg.params as HelloParams;
@@ -110,18 +109,11 @@ export async function runDaemon(opts: RunDaemonOptions = {}): Promise<{ close: (
           throw err;
         }
       }
-      case 'auth.login': {
-        const params = msg.params as LoginParams;
-        log(`auth.login (${params.method})`);
-        const status = await session.login(params, emit, signal);
-        log(`signed in as ${status.account?.username ?? status.account?.name ?? 'unknown'}`);
-        return status;
-      }
       case 'auth.status':
         return session.status();
-      case 'auth.logout':
-        await session.logout();
-        log('signed out');
+      case 'auth.reset':
+        session.reset();
+        log('token cache cleared');
         return null;
       case 'daemon.status':
         return {
@@ -242,4 +234,12 @@ function describePath(raw: string): string {
   } catch {
     return '(invalid url)';
   }
+}
+
+/** A file only this user can read, written via a rename so a reader never sees half of it. */
+async function writePrivateFile(file: string, contents: string): Promise<void> {
+  await fsp.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
+  const tmp = `${file}.${process.pid}.tmp`;
+  await fsp.writeFile(tmp, contents, { mode: 0o600 });
+  await fsp.rename(tmp, file);
 }

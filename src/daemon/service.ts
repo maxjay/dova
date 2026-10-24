@@ -19,10 +19,16 @@ import { daemonCommand, spawnDaemon } from './client.js';
  * OS-managed one is always the one that takes over.
  * ------------------------------------------------------------------ */
 
-/** Environment a daemon needs that a login session may not hand it: proxy settings, and dova's own overrides. */
+/**
+ * Environment the daemon needs that a service manager won't hand it.
+ * PATH above all: the daemon runs `az`, and launchd/systemd start
+ * services with a bare system PATH that misses Homebrew, ~/.local/bin
+ * and the like.
+ */
 const PASSTHROUGH_ENV = [
+  'PATH', 'AZURE_CONFIG_DIR',
   'HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy', 'NO_PROXY', 'no_proxy',
-  'NODE_EXTRA_CA_CERTS', 'DOVA_HOME', 'DOVA_CLIENT_ID',
+  'NODE_EXTRA_CA_CERTS', 'REQUESTS_CA_BUNDLE', 'DOVA_HOME',
 ];
 
 export interface ServiceManager {

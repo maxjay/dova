@@ -17,7 +17,6 @@ const POLL_MS = 40;
 interface Pending {
   resolve: (value: unknown) => void;
   reject: (err: Error) => void;
-  onEvent?: (event: unknown) => void;
 }
 
 export class DaemonConnection {
@@ -30,10 +29,6 @@ export class DaemonConnection {
       const msg = raw as WireResponse;
       const call = this.pending.get(msg.id);
       if (!call) return;
-      if ('event' in msg) {
-        call.onEvent?.(msg.event);
-        return;
-      }
       this.pending.delete(msg.id);
       this.updateRef();
       if ('error' in msg) call.reject(fromWireError(msg.error));
@@ -71,11 +66,11 @@ export class DaemonConnection {
     }
   }
 
-  call(method: string, params?: unknown, onEvent?: (event: unknown) => void): Promise<unknown> {
+  call(method: string, params?: unknown): Promise<unknown> {
     if (this.closedError) return Promise.reject(this.closedError);
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject, onEvent });
+      this.pending.set(id, { resolve, reject });
       this.updateRef();
       writeMessage(this.socket, { id, method, params });
     });

@@ -9,11 +9,10 @@ import { DOVA_VERSION } from '../lib/version.js';
  * socket (a named pipe on Windows).
  *
  *   client -> daemon   { id, method, params }
- *   daemon -> client   { id, result } | { id, error } | { id, event }
+ *   daemon -> client   { id, result } | { id, error }
  *
- * `event` is progress for a call still in flight (a login waiting on
- * the browser). Several calls can be in flight on one connection —
- * `dova status` sends its requests all at once.
+ * Several calls can be in flight on one connection — `dova status`
+ * sends its requests all at once.
  *
  * The first call on every connection must be `hello`, carrying the
  * session key the daemon wrote to a user-only file when it started.
@@ -35,10 +34,7 @@ export interface WireError {
   exitCode: number;
 }
 
-export type WireResponse =
-  | { id: number; result: unknown }
-  | { id: number; error: WireError }
-  | { id: number; event: unknown };
+export type WireResponse = { id: number; result: unknown } | { id: number; error: WireError };
 
 export interface HelloParams {
   key: string;

@@ -31,6 +31,7 @@ export interface AdoResponse {
 
 export const API_VERSION = '7.1';
 
+/** `dova auth login` runs `az login` and makes the daemon pick up the new account. */
 export const SIGN_IN_HINT = 'Run: dova auth login';
 
 type QueryValue = string | number | boolean | undefined;

@@ -6,11 +6,10 @@ GitHub and `glab` gives GitLab — work items, pull requests, and
 pipeline runs, without leaving your shell, and without typing an
 organization or project name into every command.
 
-You sign in once, as yourself, with `dova auth login`. From then on a
-small background daemon holds that sign-in and makes every Azure DevOps
-request for the CLI over a warm connection, so commands answer in a
-few hundred milliseconds rather than waiting on a fresh process and
-token exchange every time. There's no Azure CLI involved anywhere.
+You sign in with the Azure CLI, as always. A small background daemon
+asks `az` for an Azure DevOps token once, keeps it in memory, and makes
+every request for the CLI straight against the REST API — so a command
+costs a few hundred milliseconds instead of a Python start per call.
 
 ## Features
 
@@ -42,26 +41,24 @@ npm install && npm run build
 npm link
 ```
 
-**Requirements:** Node 20+ and git. Then sign in:
+**Requirements:** Node 20+, git, and the
+[Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli),
+signed in:
 
 ```sh
-dova auth login
+dova auth login      # runs `az login`, then has the daemon pick it up
 ```
 
-That opens your browser to sign in with your Microsoft work or school
-account — the same account you use in the Azure DevOps web UI. Over SSH,
-or anywhere without a browser, it prints a device code to enter on
-another machine instead (`--device-code` forces this). An organization
-that only allows personal access tokens: `dova auth login --with-token
-< token.txt`.
-
-`dova auth status` shows who you're signed in as and checks that the
-current repo's organization accepts it.
+Already logged in with `az login`? Nothing to do. `dova auth status`
+shows who you're signed in as and checks that the current repo's
+organization accepts it. The azure-devops extension is no longer
+needed.
 
 ### The daemon
 
-Every command talks to `dovad`, a background process that holds your
-sign-in. You don't need to start it: the first `dova` command does, and
+Every command talks to `dovad`, a background process that holds the
+token az gave it and refreshes it from az shortly before it expires.
+You don't need to start it: the first `dova` command does, and
 a newer `dova` replaces an older daemon on its own after an upgrade. To
 have it start at login and restart if it ever dies:
 
@@ -70,17 +67,14 @@ dova daemon install      # systemd user service / launchd agent / Windows Startu
 dova daemon status       # pid, uptime, requests served, log file
 ```
 
-Your access token never leaves the daemon. The refresh token that keeps
-you signed in across restarts is stored encrypted, with its key in the
-OS keychain (Keychain, Credential Manager, or the Secret Service). The
-daemon's socket is readable only by you, and it only ever sends requests
-to Azure DevOps.
+The token never leaves the daemon or touches disk. Its socket is
+readable only by you, and it only ever sends requests to Azure DevOps.
 
-For CI, or anywhere a background process is unwelcome: `DOVA_TOKEN=<pat>`
-uses a personal access token from the environment, and `DOVA_NO_DAEMON=1`
-uses your stored sign-in from the CLI process itself. Both skip the
-daemon entirely. Behind a proxy, `HTTPS_PROXY`/`NO_PROXY` are honored,
-and `dova daemon install` carries them into the service.
+For CI, or anywhere a background process is unwelcome,
+`DOVA_NO_DAEMON=1` asks az for a token in the CLI process itself, every
+command. Behind a proxy, `HTTPS_PROXY`/`NO_PROXY` are honored, and
+`dova daemon install` carries them (and your `PATH`, so it can find
+`az`) into the service.
 
 Working with a coding agent? Run this once per machine — see
 [Teaching a coding agent to use it](#teaching-a-coding-agent-to-use-it):
@@ -429,12 +423,12 @@ src/
   lib/
     exec.ts              the Runner every command takes — git, plus Azure DevOps requests — so tests fake it
     ado.ts               REST request building and status-to-error mapping
-    transport.ts         where requests go: the daemon, or this process (DOVA_NO_DAEMON / DOVA_TOKEN)
+    transport.ts         where requests go: the daemon, or this process (DOVA_NO_DAEMON)
     context.ts            org/project/repo/branch resolution
     team-resolver.ts      team/area/iteration resolution
     link.ts / work-items.ts / pr.ts / pipelines.ts / wiql.ts / urls.ts
                             fetch/render logic per Azure DevOps entity, shared across commands
-  auth/                  Entra sign-in (browser, device code, refresh), credential storage, AuthSession
+  auth/session.ts        the token from `az account get-access-token`, cached; sends each request
   daemon/                dovad: socket server, client + auto-start, wire protocol, login service install
   types/azure-devops.ts  minimal REST object shapes
 tests/                    one *.test.ts per lib module — no real git process or network request ever runs

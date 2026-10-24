@@ -1,13 +1,13 @@
 import { ProxyAgent, setGlobalDispatcher } from 'undici';
 
 /* ------------------------------------------------------------------ *
- * Node's fetch ignores HTTPS_PROXY. dova only ever fetches Azure DevOps
- * and Entra, so one global proxy decision covers every request it makes.
+ * Node's fetch ignores HTTPS_PROXY. dova only ever fetches Azure DevOps,
+ * so one global proxy decision covers every request it makes.
  * (A TLS-inspecting proxy's CA comes from NODE_EXTRA_CA_CERTS, which Node
  * reads itself.)
  * ------------------------------------------------------------------ */
 
-const HOSTS = ['dev.azure.com', 'login.microsoftonline.com'];
+const HOSTS = ['dev.azure.com'];
 
 export function proxyUrl(env: NodeJS.ProcessEnv = process.env): string | null {
   const proxy = env.HTTPS_PROXY || env.https_proxy || env.HTTP_PROXY || env.http_proxy;

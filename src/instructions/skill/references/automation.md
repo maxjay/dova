@@ -128,7 +128,7 @@ $ dova status --json --jq '.pr.id'
 | `0` | success |
 | `1` | bad input — missing or contradictory flags |
 | `2` | not found — no such PR, work item or team |
-| `3` | prerequisite — not signed in (the user runs `dova auth login`), or the daemon could not start |
+| `3` | prerequisite — `az` missing or not logged in (the user runs `dova auth login`), or the daemon could not start |
 | `4` | an Azure DevOps request or a `git` call failed |
 | `5` | unanticipated |
 

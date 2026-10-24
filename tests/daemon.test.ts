@@ -9,8 +9,9 @@ import { dovaPaths, type DovaPaths } from '../src/lib/paths.js';
 import { ExitCode, NotFoundError, PrereqError, UserError } from '../src/lib/errors.js';
 
 /**
- * The real daemon, in this process, on a socket in a temp dir. Nothing
- * here signs in, so nothing touches the network or a real keychain.
+ * The real daemon, in this process, on a socket in a temp dir. Its token
+ * source fails as az does when nobody's logged in, so nothing here runs
+ * az or touches the network.
  */
 let paths: DovaPaths;
 let daemon: { close: () => Promise<void> };
@@ -18,7 +19,10 @@ let daemon: { close: () => Promise<void> };
 beforeAll(async () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'dova-d-'));
   paths = dovaPaths({ DOVA_HOME: home });
-  daemon = await runDaemon({ paths });
+  daemon = await runDaemon({
+    paths,
+    tokenSource: () => Promise.reject(new PrereqError('Not logged in to Azure CLI (or the login expired).', ['Run: dova auth login'])),
+  });
 });
 
 afterAll(async () => {

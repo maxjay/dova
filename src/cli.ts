@@ -27,7 +27,7 @@ export function buildProgram(): Command {
   program
     .name('dova')
     .description(
-      'A CLI for Azure DevOps, inferring org/project/repo/team from the current directory. Sign in once with `dova auth login`.'
+      'A CLI for Azure DevOps, inferring org/project/repo/team from the current directory. Sign in with `dova auth login` (it runs `az login`).'
     )
     .version(DOVA_VERSION)
     .showHelpAfterError(true)
