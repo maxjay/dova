@@ -61,8 +61,7 @@ async function readAll(stream: ReadableTTY): Promise<string> {
  * was omitted or passed as `-`. Trailing newlines (a heredoc always
  * adds one) and CRLF line endings are normalized away — that's the
  * "preprocess inside dova" half; everything downstream already handles
- * arbitrary text safely, since `az` is spawned without a shell and
- * REST bodies go through `toAsciiSafeJson`.
+ * arbitrary text safely, since it travels as a JSON request body.
  */
 export async function readTextArg(value: string | undefined, opts: ReadTextArgOptions): Promise<string> {
   if (value !== undefined && value !== '-') return value;

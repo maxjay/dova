@@ -68,7 +68,7 @@ export async function gatherStatus(
   flags: StatusFlags,
   cwd?: string,
   // Injectable like every other gather function here, so the call
-  // scheduling below can be asserted without a real az.
+  // scheduling below can be asserted without a real network.
   runner: Runner = defaultRunner
 ): Promise<StatusResult> {
   const ctx = await resolveContext(runner, {
@@ -89,10 +89,9 @@ export async function gatherStatus(
   const { orgUrl, project, repo, branch } = { ...ctx, repo: ctx.repo, branch: ctx.branch };
 
   // Wave 1 — everything that doesn't need to know whether a PR exists.
-  // Each `az` invocation pays for a Python interpreter start (~2-3s on
-  // Windows before any network), so what matters here is the number of
-  // *sequential* calls, not the number of calls. Pipeline runs need only
-  // the branch, and the tracked-id config reads are git, not az.
+  // What costs is the number of *sequential* round trips, not the number
+  // of requests. Pipeline runs need only the branch, and the tracked-id
+  // config reads are local git.
   const [pr, runs, tracked, primary] = await Promise.all([
     fetchActivePrForBranch(runner, orgUrl, project, repo, branch),
     fetchRecentRuns(runner, orgUrl, project, branch, 3),
@@ -102,8 +101,7 @@ export async function gatherStatus(
 
   // Wave 2 — the calls that genuinely need the PR, together. Work
   // items come from the PR when there is one, otherwise from what `dova
-  // link` recorded locally; comment threads only exist with a PR, and
-  // have no native `az` command, so they go through `az rest`.
+  // link` recorded locally; comment threads only exist with a PR.
   const trackedIds = (tracked ?? '')
     .split(',')
     .map((s) => s.trim())
@@ -112,7 +110,7 @@ export async function gatherStatus(
 
   const [rawWorkItems, rawThreads, prRuns] = await Promise.all([
     pr
-      ? fetchPrWorkItems(runner, orgUrl, pr.pullRequestId)
+      ? fetchPrWorkItems(runner, orgUrl, project, repo, pr.pullRequestId)
       : trackedIds.length > 0
         ? fetchWorkItemsByIds(runner, orgUrl, trackedIds)
         : Promise.resolve([]),

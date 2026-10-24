@@ -9,7 +9,7 @@ import {
 } from '../src/lib/team-resolver.js';
 import { NotFoundError, UserError } from '../src/lib/errors.js';
 import type { AzWorkItem } from '../src/types/azure-devops.js';
-import { createFakeRunner, ok, okJson, fail } from './fixtures/fake-runner.js';
+import { createFakeRunner, ok, fail, adoOk, unexpected, type FakeAdoRequest } from './fixtures/fake-runner.js';
 import {
   oneTeam,
   multipleTeams,
@@ -18,10 +18,15 @@ import {
   areaNoDefaultMultipleValues,
   currentIteration,
   noCurrentIteration,
-} from './fixtures/az-output.js';
+} from './fixtures/rest-output.js';
 
 const ORG_URL = 'https://dev.azure.com/contoso';
 const PROJECT = 'MyProject';
+
+const isTeamList = (req: FakeAdoRequest): boolean => req.method === 'GET' && req.path === '/contoso/_apis/projects/MyProject/teams';
+const isAreaList = (req: FakeAdoRequest): boolean => req.method === 'GET' && req.path.endsWith('/_apis/work/teamsettings/teamfieldvalues');
+const isIterationList = (req: FakeAdoRequest): boolean =>
+  req.method === 'GET' && req.path.endsWith('/_apis/work/teamsettings/iterations') && req.query.get('$timeframe') === 'current';
 
 function fakePrompts(overrides: Partial<TeamResolverPrompts> = {}): TeamResolverPrompts {
   return {
@@ -92,7 +97,7 @@ describe('resolveTeam', () => {
     const sets: Record<string, string> = {};
     const runner = createFakeRunner({
       git: gitConfigRunner({}, sets).git,
-      az: (args) => (args.join(' ').startsWith('devops team list') ? okJson(oneTeam) : fail()),
+      ado: (req) => (isTeamList(req) ? adoOk({ value: oneTeam }) : unexpected(req)),
     });
     const prompts = fakePrompts({ confirm: vi.fn().mockResolvedValue(true) });
 
@@ -107,7 +112,7 @@ describe('resolveTeam', () => {
     const sets: Record<string, string> = {};
     const runner = createFakeRunner({
       git: gitConfigRunner({}, sets).git,
-      az: (args) => (args.join(' ').startsWith('devops team list') ? okJson(multipleTeams) : fail()),
+      ado: (req) => (isTeamList(req) ? adoOk({ value: multipleTeams }) : unexpected(req)),
     });
     const prompts = fakePrompts({
       select: vi.fn().mockResolvedValue('Website Team'),
@@ -123,7 +128,7 @@ describe('resolveTeam', () => {
   it('throws NotFoundError when the project has no teams', async () => {
     const runner = createFakeRunner({
       git: gitConfigRunner({}).git,
-      az: () => okJson([]),
+      ado: () => adoOk({ value: [] }),
     });
     await expect(resolveTeam(runner, ORG_URL, PROJECT, {}, { prompts: fakePrompts() })).rejects.toBeInstanceOf(
       NotFoundError
@@ -133,7 +138,7 @@ describe('resolveTeam', () => {
   it('--reresolve skips the repo-local config and goes straight to interactive resolution', async () => {
     const runner = createFakeRunner({
       git: gitConfigRunner({ 'dova.team': 'StaleTeam' }).git,
-      az: (args) => (args.join(' ').startsWith('devops team list') ? okJson(oneTeam) : fail()),
+      ado: (req) => (isTeamList(req) ? adoOk({ value: oneTeam }) : unexpected(req)),
     });
     const prompts = fakePrompts({ confirm: vi.fn().mockResolvedValue(false) });
 
@@ -144,20 +149,20 @@ describe('resolveTeam', () => {
 
 describe('resolveAreaPath', () => {
   it('uses the flagged default area path with no prompt', async () => {
-    const runner = createFakeRunner({ az: () => okJson(areaWithDefault) });
+    const runner = createFakeRunner({ ado: () => adoOk(areaWithDefault) });
     const result = await resolveAreaPath(runner, ORG_URL, PROJECT, 'MyTeam', fakePrompts());
     expect(result).toEqual({ areaPath: 'MyProject\\MyTeam' });
   });
 
   it('warns and uses the only value when none is flagged default', async () => {
-    const runner = createFakeRunner({ az: () => okJson(areaNoDefaultSingleValue) });
+    const runner = createFakeRunner({ ado: () => adoOk(areaNoDefaultSingleValue) });
     const result = await resolveAreaPath(runner, ORG_URL, PROJECT, 'MyTeam', fakePrompts());
     expect(result.areaPath).toBe('MyProject\\MyTeam');
     expect(result.warning).toMatch(/no default area path/i);
   });
 
   it('prompts when there are multiple values and none is flagged default', async () => {
-    const runner = createFakeRunner({ az: () => okJson(areaNoDefaultMultipleValues) });
+    const runner = createFakeRunner({ ado: () => adoOk(areaNoDefaultMultipleValues) });
     const prompts = fakePrompts({ select: vi.fn().mockResolvedValue('MyProject\\MyTeam\\Sub') });
     const result = await resolveAreaPath(runner, ORG_URL, PROJECT, 'MyTeam', prompts);
     expect(result).toEqual({ areaPath: 'MyProject\\MyTeam\\Sub' });
@@ -167,13 +172,13 @@ describe('resolveAreaPath', () => {
 
 describe('resolveIterationPath', () => {
   it('uses the current sprint when one exists', async () => {
-    const runner = createFakeRunner({ az: () => okJson(currentIteration) });
+    const runner = createFakeRunner({ ado: () => adoOk({ value: currentIteration }) });
     const result = await resolveIterationPath(runner, ORG_URL, PROJECT, 'MyTeam');
     expect(result).toEqual({ iterationPath: 'MyProject\\Sprint 3' });
   });
 
   it('falls back to the project root iteration, with a warning, for a Kanban-only team', async () => {
-    const runner = createFakeRunner({ az: () => okJson(noCurrentIteration) });
+    const runner = createFakeRunner({ ado: () => adoOk({ value: noCurrentIteration }) });
     const result = await resolveIterationPath(runner, ORG_URL, PROJECT, 'MyTeam');
     expect(result.iterationPath).toBe(PROJECT);
     expect(result.warning).toMatch(/no current sprint/i);
@@ -192,21 +197,20 @@ function exampleWorkItem(id: number, areaPath: string | undefined, iterationPath
   };
 }
 
-/** az handler for the team-based resolution path: team list (if needed) + area list + iteration list. */
-function teamResolutionAz(teams = oneTeam) {
-  return (args: string[]) => {
-    const joined = args.join(' ');
-    if (joined.startsWith('devops team list')) return okJson(teams);
-    if (joined.startsWith('boards area team list')) return okJson(areaWithDefault);
-    if (joined.startsWith('boards iteration team list')) return okJson(currentIteration);
-    return fail(`unexpected az call: ${joined}`);
+/** Handler for the team-based resolution path: team list (if needed) + area list + iteration list. */
+function teamResolutionAdo(teams = oneTeam) {
+  return (req: FakeAdoRequest) => {
+    if (isTeamList(req)) return adoOk({ value: teams });
+    if (isAreaList(req)) return adoOk(areaWithDefault);
+    if (isIterationList(req)) return adoOk({ value: currentIteration });
+    return unexpected(req);
   };
 }
 
 describe('resolveCreateContext with --area/--iteration', () => {
-  it('given both, resolves nothing at all — no team lookup, no az call, no prompt', async () => {
-    const az = vi.fn(() => fail('should not call az when both paths are given outright'));
-    const runner = createFakeRunner({ git: gitConfigRunner({ 'dova.team': 'Platform' }).git, az });
+  it('given both, resolves nothing at all — no team lookup, no request, no prompt', async () => {
+    const ado = vi.fn(unexpected);
+    const runner = createFakeRunner({ git: gitConfigRunner({ 'dova.team': 'Platform' }).git, ado });
 
     const result = await resolveCreateContext(
       runner,
@@ -224,17 +228,13 @@ describe('resolveCreateContext with --area/--iteration', () => {
       fromCache: false,
       source: 'flags',
     });
-    expect(az).not.toHaveBeenCalled();
+    expect(ado).not.toHaveBeenCalled();
   });
 
   it('given only --area, still resolves the iteration from the team but never re-resolves the area', async () => {
-    const az = vi.fn((args: string[]) => {
-      const joined = args.join(' ');
-      if (joined.startsWith('boards area team list')) return fail('area was given explicitly — should not be looked up');
-      if (joined.startsWith('boards iteration team list')) return okJson(currentIteration);
-      return fail(`unexpected az call: ${joined}`);
-    });
-    const runner = createFakeRunner({ git: gitConfigRunner({ 'dova.team': 'Platform' }).git, az });
+    // The area was given explicitly, so an area lookup falls through to `unexpected`.
+    const ado = vi.fn((req: FakeAdoRequest) => (isIterationList(req) ? adoOk({ value: currentIteration }) : unexpected(req)));
+    const runner = createFakeRunner({ git: gitConfigRunner({ 'dova.team': 'Platform' }).git, ado });
 
     const result = await resolveCreateContext(runner, ORG_URL, PROJECT, { area: 'MyProject\\Override' }, {});
 
@@ -243,7 +243,7 @@ describe('resolveCreateContext with --area/--iteration', () => {
   });
 
   it('rejects --like together with --area, since --like already supplies both', async () => {
-    const runner = createFakeRunner({ git: gitConfigRunner({}).git, az: () => fail('should not reach az') });
+    const runner = createFakeRunner({ git: gitConfigRunner({}).git, ado: unexpected });
     await expect(
       resolveCreateContext(runner, ORG_URL, PROJECT, { area: 'X' }, { like: '4821' })
     ).rejects.toBeInstanceOf(UserError);
@@ -252,12 +252,12 @@ describe('resolveCreateContext with --area/--iteration', () => {
 
 describe('resolveCreateContext', () => {
   it('--like copies area/iteration straight off the example ticket, bypassing team resolution', async () => {
-    const az = vi.fn((args: string[]) =>
-      args.join(' ').startsWith('boards work-item show')
-        ? okJson(exampleWorkItem(4821, 'MyProject\\Data\\ETL', 'MyProject\\Sprint 3'))
-        : fail(`unexpected az call: ${args.join(' ')}`)
+    const ado = vi.fn((req: FakeAdoRequest) =>
+      req.method === 'GET' && req.path === '/contoso/_apis/wit/workitems/4821'
+        ? adoOk(exampleWorkItem(4821, 'MyProject\\Data\\ETL', 'MyProject\\Sprint 3'))
+        : unexpected(req)
     );
-    const runner = createFakeRunner({ git: gitConfigRunner({ 'dova.team': 'Platform' }).git, az });
+    const runner = createFakeRunner({ git: gitConfigRunner({ 'dova.team': 'Platform' }).git, ado });
 
     const result = await resolveCreateContext(runner, ORG_URL, PROJECT, {}, { like: '4821' });
 
@@ -269,13 +269,13 @@ describe('resolveCreateContext', () => {
       fromCache: false,
       source: 'like',
     });
-    expect(az).toHaveBeenCalledTimes(1);
+    expect(ado).toHaveBeenCalledTimes(1);
   });
 
   it('--like --save persists the copied area/iteration as repo-local git config', async () => {
     const sets: Record<string, string> = {};
-    const az = () => okJson(exampleWorkItem(4821, 'MyProject\\Data\\ETL', 'MyProject\\Sprint 3'));
-    const runner = createFakeRunner({ git: gitConfigRunner({}, sets).git, az });
+    const ado = () => adoOk(exampleWorkItem(4821, 'MyProject\\Data\\ETL', 'MyProject\\Sprint 3'));
+    const runner = createFakeRunner({ git: gitConfigRunner({}, sets).git, ado });
 
     await resolveCreateContext(runner, ORG_URL, PROJECT, {}, { like: '4821', save: true });
 
@@ -283,11 +283,11 @@ describe('resolveCreateContext', () => {
     expect(sets['dova.iteration']).toBe('MyProject\\Sprint 3');
   });
 
-  it('a saved dova.area/dova.iteration wins over team resolution, with no az calls', async () => {
-    const az = vi.fn(() => fail('az should not have been called'));
+  it('a saved dova.area/dova.iteration wins over team resolution, with no requests', async () => {
+    const ado = vi.fn(unexpected);
     const runner = createFakeRunner({
       git: gitConfigRunner({ 'dova.area': 'MyProject\\Data\\ETL', 'dova.iteration': 'MyProject\\Sprint 3', 'dova.team': 'Platform' }).git,
-      az,
+      ado,
     });
 
     const result = await resolveCreateContext(runner, ORG_URL, PROJECT, {});
@@ -300,12 +300,12 @@ describe('resolveCreateContext', () => {
       fromCache: true,
       source: 'repo-local-area',
     });
-    expect(az).not.toHaveBeenCalled();
+    expect(ado).not.toHaveBeenCalled();
   });
 
   it('falls back to team-based resolution when nothing is saved, then saves area/iteration', async () => {
     const sets: Record<string, string> = {};
-    const runner = createFakeRunner({ git: gitConfigRunner({ 'dova.team': 'MyTeam' }, sets).git, az: teamResolutionAz() });
+    const runner = createFakeRunner({ git: gitConfigRunner({ 'dova.team': 'MyTeam' }, sets).git, ado: teamResolutionAdo() });
 
     const result = await resolveCreateContext(runner, ORG_URL, PROJECT, {});
 
@@ -318,7 +318,7 @@ describe('resolveCreateContext', () => {
 
   it('does not persist area/iteration when the team came from a one-off --team flag', async () => {
     const sets: Record<string, string> = {};
-    const runner = createFakeRunner({ git: gitConfigRunner({}, sets).git, az: teamResolutionAz() });
+    const runner = createFakeRunner({ git: gitConfigRunner({}, sets).git, ado: teamResolutionAdo() });
 
     const result = await resolveCreateContext(runner, ORG_URL, PROJECT, { team: 'OneOffTeam' });
 
@@ -330,7 +330,7 @@ describe('resolveCreateContext', () => {
   it('--team reaches team-based resolution even when dova.area/dova.iteration are already saved', async () => {
     const runner = createFakeRunner({
       git: gitConfigRunner({ 'dova.area': 'Stale\\Area', 'dova.iteration': 'Stale\\Iter' }).git,
-      az: teamResolutionAz(),
+      ado: teamResolutionAdo(),
     });
 
     const result = await resolveCreateContext(runner, ORG_URL, PROJECT, { team: 'MyTeam' });
@@ -343,7 +343,7 @@ describe('resolveCreateContext', () => {
   it('--reresolve skips the saved dova.area/dova.iteration override too', async () => {
     const runner = createFakeRunner({
       git: gitConfigRunner({ 'dova.area': 'Stale\\Area', 'dova.iteration': 'Stale\\Iter' }).git,
-      az: teamResolutionAz(),
+      ado: teamResolutionAdo(),
     });
 
     const result = await resolveCreateContext(runner, ORG_URL, PROJECT, { team: 'MyTeam' }, { reresolve: true });
@@ -365,8 +365,8 @@ describe('resolveCreateContext', () => {
   });
 
   it('throws NotFoundError when the example ticket has no area/iteration path', async () => {
-    const az = () => okJson(exampleWorkItem(4821, undefined, undefined));
-    const runner = createFakeRunner({ git: gitConfigRunner({}).git, az });
+    const ado = () => adoOk(exampleWorkItem(4821, undefined, undefined));
+    const runner = createFakeRunner({ git: gitConfigRunner({}).git, ado });
     await expect(resolveCreateContext(runner, ORG_URL, PROJECT, {}, { like: '4821' })).rejects.toBeInstanceOf(
       NotFoundError
     );

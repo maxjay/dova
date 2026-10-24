@@ -1,20 +1,16 @@
 import { select as inquirerSelect, confirm as inquirerConfirm } from '@inquirer/prompts';
 import type { Runner } from './exec.js';
-import { runAzJson } from './exec.js';
+import { adoJson, adoUrl, projectBase } from './ado.js';
 import { gitConfigGet, gitConfigSet } from './config.js';
 import { fetchWorkItem, fieldValue } from './work-items.js';
 import { NotFoundError, UserError } from './errors.js';
 import { isInteractive, nonInteractiveError } from './interactive.js';
 
 /* ------------------------------------------------------------------ *
- * az output shapes.
- *
- * Verified against the azure-devops-cli-extension source (not just the
- * docs, since `az boards area team list`'s JSON shape isn't spelled out
- * on learn.microsoft.com):
- *   - `az devops team list`            -> core_client.get_teams(...)          -> WebApiTeam[]
- *   - `az boards area team list`       -> work_client.get_team_field_values() -> TeamFieldValues (one object, not a list!)
- *   - `az boards iteration team list`  -> work_client.get_team_iterations()   -> TeamSettingsIteration[]
+ * REST shapes:
+ *   - GET _apis/projects/{project}/teams                         -> { value: WebApiTeam[] }
+ *   - GET {project}/{team}/_apis/work/teamsettings/teamfieldvalues -> TeamFieldValues (one object, not a list!)
+ *   - GET {project}/{team}/_apis/work/teamsettings/iterations      -> { value: TeamSettingsIteration[] }
  * ------------------------------------------------------------------ */
 
 export interface AzTeam {
@@ -85,7 +81,7 @@ export interface ResolveProjectResult {
 /**
  * Resolution order: --project flag > `dova.project` (repo-local) > the
  * project already implied by context resolution (git remote / az devops
- * defaults).
+ * defaults file).
  */
 export async function resolveProject(
   runner: Runner,
@@ -125,7 +121,7 @@ export interface ResolveTeamOptions {
 
 /**
  * Resolution order: --team flag > `dova.team` (repo-local) > interactive
- * picker over `az devops team list` (auto-selected when the project has
+ * picker over the project's teams (auto-selected when the project has
  * exactly one team). On interactive resolution, offers to save the pick
  * to repo-local git config.
  */
@@ -147,11 +143,13 @@ export async function resolveTeam(
     if (repoLocal) return { team: repoLocal, source: 'repo-local' };
   }
 
-  const teams = await runAzJson<AzTeam[]>(runner, [
-    'devops', 'team', 'list',
-    '--organization', orgUrl,
-    '--project', project,
-  ]);
+  const teams =
+    (
+      await adoJson<{ value?: AzTeam[] }>(runner, {
+        method: 'GET',
+        url: adoUrl(orgUrl, `_apis/projects/${encodeURIComponent(project)}/teams`, { $top: 1000 }),
+      })
+    )?.value ?? [];
   if (!teams.length) {
     throw new NotFoundError(`Project "${project}" has no teams.`);
   }
@@ -194,18 +192,16 @@ export async function resolveAreaPath(
   team: string,
   prompts: TeamResolverPrompts = defaultPrompts
 ): Promise<ResolvedAreaPath> {
-  const data = await runAzJson<AzTeamFieldValues>(runner, [
-    'boards', 'area', 'team', 'list',
-    '--organization', orgUrl,
-    '--project', project,
-    '--team', team,
-  ]);
+  const data = await adoJson<AzTeamFieldValues | null>(runner, {
+    method: 'GET',
+    url: adoUrl(projectBase(orgUrl, project, team), '_apis/work/teamsettings/teamfieldvalues'),
+  });
 
-  if (data.defaultValue) {
+  if (data?.defaultValue) {
     return { areaPath: data.defaultValue };
   }
 
-  const values = data.values ?? [];
+  const values = data?.values ?? [];
   if (values.length === 0) {
     throw new NotFoundError(`Team "${team}" has no area paths configured.`);
   }
@@ -227,10 +223,8 @@ export async function resolveAreaPath(
 }
 
 /* ------------------------------------------------------------------ *
- * Iteration path resolution ("current sprint"). dova only ever targets
- * dev.azure.com, and the extension version that runs against it supports
- * `--timeframe` (confirmed from source) — so this is one az call, no
- * fallback for older extension versions that don't exist here.
+ * Iteration path resolution ("current sprint"): one request, filtered
+ * server-side with `$timeframe=current`.
  * ------------------------------------------------------------------ */
 
 export interface ResolvedIterationPath {
@@ -244,22 +238,19 @@ export async function resolveIterationPath(
   project: string,
   team: string
 ): Promise<ResolvedIterationPath> {
-  const current = await runAzJson<AzTeamIteration[]>(runner, [
-    'boards', 'iteration', 'team', 'list',
-    '--organization', orgUrl,
-    '--project', project,
-    '--team', team,
-    '--timeframe', 'current',
-  ]);
+  const current = await adoJson<{ value?: AzTeamIteration[] } | null>(runner, {
+    method: 'GET',
+    url: adoUrl(projectBase(orgUrl, project, team), '_apis/work/teamsettings/iterations', { $timeframe: 'current' }),
+  });
 
-  const iteration = current[0];
+  const iteration = current?.value?.[0];
   if (iteration?.path) {
     return { iterationPath: iteration.path };
   }
 
   // Kanban-only teams (and teams between sprints) have no "current"
   // iteration. The project's root iteration path is always the project
-  // name itself, so this needs no extra az call to compute.
+  // name itself, so this needs no extra request to compute.
   return {
     iterationPath: project,
     warning: `Team "${team}" has no current sprint (Kanban-only team, or between sprints); falling back to the project's root iteration ("${project}").`,
@@ -268,8 +259,8 @@ export async function resolveIterationPath(
 
 /* ------------------------------------------------------------------ *
  * Create-context resolution: what --area/--iteration a *new* work item
- * should get. Team is only ever a means to that pair (`az boards
- * work-item create` takes --area/--iteration, not --team), so once
+ * should get. Team is only ever a means to that pair (a work item
+ * carries an area and an iteration path, never a team), so once
  * they're known there's nothing left to resolve or ask about a team
  * name for — and everything durable here lives in one place, repo-local
  * git config, same as `dova.team`/`dova.project`. No separate cache
@@ -386,7 +377,7 @@ export async function resolveCreateContext(
 
   const prompts = opts.prompts ?? defaultPrompts;
   const teamResult = await resolveTeam(runner, orgUrl, project, flags, opts);
-  // A path given explicitly is used as-is: no az call to resolve it, and
+  // A path given explicitly is used as-is: no request to resolve it, and
   // no prompt to disambiguate one dova was told outright.
   const area: ResolvedAreaPath = flags.area
     ? { areaPath: flags.area }

@@ -1,63 +1,92 @@
 import type { ChalkInstance } from 'chalk';
 import type { Runner } from './exec.js';
-import { runAzJson } from './exec.js';
+import { adoJson, adoUrl, projectBase, accountFromConnectionData, type ConnectionData } from './ado.js';
 import { buildWiql } from './wiql.js';
 import { renderTable } from './output.js';
-import { NotFoundError, looksLikeAzNotFoundError } from './errors.js';
-import { azText } from './az-file-arg.js';
+import { NotFoundError } from './errors.js';
 import type { AzWorkItem } from '../types/azure-devops.js';
 
 /**
- * Web URL for a single work item. Format confirmed from the
- * azure-devops-cli-extension source (`_open_work_item` in
- * dev/boards/work_item.py): `{orgUrl}/{project}/_workitems?id={id}`.
+ * Web URL for a single work item: `{orgUrl}/{project}/_workitems?id={id}`,
+ * the same link the Azure DevOps UI hands out.
  */
 export function buildWiWebUrl(orgUrl: string, project: string, id: number): string {
   return `${orgUrl}/${encodeURIComponent(project)}/_workitems?id=${id}`;
 }
 
 export async function fetchWorkItem(runner: Runner, orgUrl: string, id: number): Promise<AzWorkItem> {
-  let result: AzWorkItem | null;
   try {
-    result = await runAzJson<AzWorkItem | null>(runner, [
-      'boards', 'work-item', 'show',
-      '--id', String(id),
-      '--organization', orgUrl,
-    ]);
+    return await adoJson<AzWorkItem>(runner, {
+      method: 'GET',
+      url: adoUrl(orgUrl, `_apis/wit/workitems/${id}`, { $expand: 'relations' }),
+    });
   } catch (err) {
-    // A nonexistent id fails the az call outright (nonzero exit), rather
-    // than succeeding with an empty result — see looksLikeAzNotFoundError.
-    if (err instanceof Error && looksLikeAzNotFoundError(err.message)) {
-      throw new NotFoundError(`Work item #${id} was not found.`);
-    }
+    if (err instanceof NotFoundError) throw new NotFoundError(`Work item #${id} was not found.`);
     throw err;
   }
-  if (!result) {
-    throw new NotFoundError(`Work item #${id} was not found.`);
-  }
-  return result;
+}
+
+/** The work items API takes at most this many ids per batch request. */
+const BATCH_SIZE = 200;
+
+/** Upper bound on what one query returns — far past anything a terminal shows. */
+const QUERY_TOP = 1000;
+
+interface WiqlResult {
+  workItems?: Array<{ id: number }>;
+  columns?: Array<{ referenceName: string }>;
 }
 
 /**
- * Batch-fetches several work items by id in a single call. There's no
- * native "show many" command (`work-item show` takes one --id), so this
- * goes through `az boards query --wiql` instead — one call for N ids.
- * Returns [] for an empty `ids` array without making a call.
+ * Runs a WIQL query and returns the matching work items, with the fields
+ * the query SELECTs, in the query's own order. WIQL itself only returns
+ * ids, so this is one query plus one batch fetch per 200 results.
  */
+export async function queryWorkItems(runner: Runner, orgUrl: string, wiql: string): Promise<AzWorkItem[]> {
+  const result = await adoJson<WiqlResult>(runner, {
+    method: 'POST',
+    url: adoUrl(orgUrl, '_apis/wit/wiql', { $top: QUERY_TOP }),
+    body: { query: wiql },
+  });
+  const ids = (result?.workItems ?? []).map((w) => w.id);
+  const fields = (result?.columns ?? []).map((c) => c.referenceName);
+  return fetchWorkItemsBatch(runner, orgUrl, ids, fields.length > 0 ? fields : undefined);
+}
+
+/**
+ * Work items by id, in the order asked for. Ids that don't exist (or
+ * that the user can't see) are left out rather than failing the batch.
+ * Every field when `fields` is omitted.
+ */
+export async function fetchWorkItemsBatch(runner: Runner, orgUrl: string, ids: number[], fields?: string[]): Promise<AzWorkItem[]> {
+  if (ids.length === 0) return [];
+  const chunks: number[][] = [];
+  for (let i = 0; i < ids.length; i += BATCH_SIZE) chunks.push(ids.slice(i, i + BATCH_SIZE));
+
+  const pages = await Promise.all(
+    chunks.map((chunk) =>
+      adoJson<{ value?: Array<AzWorkItem | null> }>(runner, {
+        method: 'POST',
+        url: adoUrl(orgUrl, '_apis/wit/workitemsbatch'),
+        body: { ids: chunk, ...(fields ? { fields } : {}), errorPolicy: 'omit' },
+      })
+    )
+  );
+  const byId = new Map<number, AzWorkItem>();
+  for (const page of pages) {
+    for (const item of page?.value ?? []) if (item) byId.set(item.id, item);
+  }
+  return ids.map((id) => byId.get(id)).filter((item): item is AzWorkItem => item !== undefined);
+}
+
+/** Batch-fetches several work items by id. Returns [] for an empty `ids` array without making a call. */
 export async function fetchWorkItemsByIds(
   runner: Runner,
   orgUrl: string,
   ids: number[],
   fields: string[] = ['System.Id', 'System.Title', 'System.State', 'System.WorkItemType', 'System.AssignedTo']
 ): Promise<AzWorkItem[]> {
-  if (ids.length === 0) return [];
-  const wiql = buildWiql({ fields, where: [{ field: 'System.Id', op: 'IN', value: ids }] });
-  const result = await runAzJson<AzWorkItem[] | null>(runner, [
-    'boards', 'query',
-    '--wiql', azText(wiql),
-    '--organization', orgUrl,
-  ]);
-  return result ?? [];
+  return fetchWorkItemsBatch(runner, orgUrl, ids, fields);
 }
 
 /** Direct children of a work item (via System.Parent — a queryable reference field on every process template). */
@@ -66,8 +95,51 @@ export async function fetchChildren(runner: Runner, orgUrl: string, parentId: nu
     fields: ['System.Id', 'System.Title', 'System.State', 'System.WorkItemType'],
     where: [{ field: 'System.Parent', op: '=', value: parentId }],
   });
-  const result = await runAzJson<AzWorkItem[] | null>(runner, ['boards', 'query', '--wiql', azText(wiql), '--organization', orgUrl]);
-  return result ?? [];
+  return queryWorkItems(runner, orgUrl, wiql);
+}
+
+export interface CreateWorkItemOptions {
+  type: string;
+  /** Field reference name -> value, e.g. `System.Title`. Undefined values are skipped. */
+  fields: Record<string, string | undefined>;
+  /** Link the new item as a child of this one, in the same request. */
+  parentId?: number;
+}
+
+/**
+ * Creates a work item in one request — fields and parent link together,
+ * so there is never a created-but-unlinked item to account for.
+ */
+export async function createWorkItem(runner: Runner, orgUrl: string, project: string, opts: CreateWorkItemOptions): Promise<AzWorkItem> {
+  const patch: Array<{ op: 'add'; path: string; value: unknown }> = [];
+  for (const [field, value] of Object.entries(opts.fields)) {
+    if (value !== undefined) patch.push({ op: 'add', path: `/fields/${field}`, value });
+  }
+  if (opts.parentId !== undefined) {
+    patch.push({
+      op: 'add',
+      path: '/relations/-',
+      value: { rel: 'System.LinkTypes.Hierarchy-Reverse', url: `${orgUrl}/_apis/wit/workItems/${opts.parentId}` },
+    });
+  }
+  return adoJson<AzWorkItem>(runner, {
+    method: 'POST',
+    url: adoUrl(projectBase(orgUrl, project), `_apis/wit/workitems/$${encodeURIComponent(opts.type)}`),
+    body: patch,
+    contentType: 'application/json-patch+json',
+  });
+}
+
+/**
+ * The signed-in user as a value `System.AssignedTo` accepts, for
+ * `--assign-to me`. The REST API has no "me" shorthand of its own.
+ */
+export async function currentUserIdentity(runner: Runner, orgUrl: string): Promise<string> {
+  const data = await adoJson<ConnectionData>(runner, { method: 'GET', url: adoUrl(orgUrl, '_apis/connectionData', { 'api-version': '7.1-preview' }) });
+  const account = accountFromConnectionData(data ?? {});
+  const identity = account.username ?? account.name;
+  if (!identity) throw new NotFoundError('Could not tell who the signed-in user is, to assign the item to.', ['Pass --assign-to <email> instead.']);
+  return identity;
 }
 
 /**

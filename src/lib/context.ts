@@ -1,5 +1,6 @@
 import type { Runner } from './exec.js';
-import { tryGit, runGit, runAzJson } from './exec.js';
+import { tryGit, runGit } from './exec.js';
+import { adoJson, adoUrl, projectBase } from './ado.js';
 import { isInsideGitRepo, readAzDevopsDefaults } from './config.js';
 import { UserError } from './errors.js';
 
@@ -239,7 +240,7 @@ export { runGit };
  *
  * `origin/HEAD` first, because it is local, free, and reflects what the
  * remote actually points at (a repo whose default is `develop` says so
- * there). Falls back to one `az repos show` when a plain clone hasn't
+ * there). Falls back to asking Azure DevOps for the repo when a plain clone hasn't
  * populated the symref.
  *
  * Returns null rather than throwing: callers differ on whether not
@@ -260,13 +261,11 @@ export async function resolveDefaultBranch(
   if (originHead) return { branch: originHead.replace(/^origin\//, ''), source: 'origin-head' };
 
   if (ctx.repo) {
-    const repository = await runAzJson<{ defaultBranch?: string }>(runner, [
-      'repos', 'show',
-      '--repository', ctx.repo,
-      '--organization', ctx.orgUrl,
-      '--project', ctx.project,
-    ]);
-    if (repository.defaultBranch) {
+    const repository = await adoJson<{ defaultBranch?: string } | null>(runner, {
+      method: 'GET',
+      url: adoUrl(projectBase(ctx.orgUrl, ctx.project), `_apis/git/repositories/${encodeURIComponent(ctx.repo)}`),
+    });
+    if (repository?.defaultBranch) {
       return { branch: repository.defaultBranch.replace(/^refs\/heads\//, ''), source: 'repo-default' };
     }
   }

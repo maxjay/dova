@@ -80,10 +80,9 @@ Every command taking free text accepts `-` for stdin; `--title -` and
 ## Length is never the problem
 
 `dova` takes text of any size and shape — markdown, code fences, blank
-lines, `---` rules, thousands of characters. It writes the body to a
-temp file and hands `az` the path, so nothing multi-line ever reaches a
-command line. Do not shorten, flatten or split a PR description to make
-it fit; there is nothing to fit it into.
+lines, `---` rules, thousands of characters. It sends the text to the
+REST API as JSON, exactly as it arrived. Do not shorten, flatten or
+split a PR description to make it fit; there is nothing to fit it into.
 
 The only hazard left is the **shell**, before `dova` runs. Use stdin, as
 above, and that one goes away too.
@@ -114,7 +113,7 @@ comma-separated list; `--jq <expr>` filters that JSON. Human output is
 for humans and its shape is not a contract.
 
 Decide before running. Running a command and then re-running it with
-`--json` pays the whole cost twice, `az` process included, for output
+`--json` pays the whole cost twice, every request included, for output
 already on screen.
 
 ```console
@@ -129,8 +128,8 @@ $ dova status --json --jq '.pr.id'
 | `0` | success |
 | `1` | bad input — missing or contradictory flags |
 | `2` | not found — no such PR, work item or team |
-| `3` | prerequisite — `az` missing, not logged in, or the azure-devops extension absent |
-| `4` | an underlying `az`/`git` call failed |
+| `3` | prerequisite — not signed in (the user runs `dova auth login`), or the daemon could not start |
+| `4` | an Azure DevOps request or a `git` call failed |
 | `5` | unanticipated |
 
 `2` is distinct from `1` on purpose: "no PR for this branch" is a
@@ -138,8 +137,9 @@ normal state to branch on, not a usage error.
 
 ## Speed
 
-Every `az` invocation starts a Python interpreter — around 2-3 seconds
-on Windows before any network. The number of *sequential* `az` calls
-dominates runtime, not the size of the responses. Prefer one command
-that returns everything (`dova status`, `dova summarize`) over several
-that each return part of it.
+Requests go through the dova daemon, which holds the sign-in and keeps
+connections to Azure DevOps open, so a command costs its round trips
+and little else. The number of *sequential* round trips dominates
+runtime, not the size of the responses. Prefer one command that returns
+everything (`dova status`, `dova summarize`) over several that each
+return part of it.

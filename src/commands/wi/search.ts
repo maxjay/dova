@@ -1,12 +1,10 @@
 import type { Command } from 'commander';
-import { defaultRunner, runAzJson } from '../../lib/exec.js';
-import { azText } from '../../lib/az-file-arg.js';
+import { defaultRunner } from '../../lib/exec.js';
 import { resolveContext } from '../../lib/context.js';
 import { buildWiql, isCurrentUserToken } from '../../lib/wiql.js';
-import { fieldValue } from '../../lib/work-items.js';
+import { fieldValue, queryWorkItems } from '../../lib/work-items.js';
 import { addContextOptions, addJsonOption, addJqOption, addNoColorOption } from '../../lib/command-helpers.js';
 import { emit, getColor, renderTable } from '../../lib/output.js';
-import type { AzWorkItem } from '../../types/azure-devops.js';
 
 interface WiSearchFlags {
   org?: string;
@@ -66,11 +64,7 @@ export function registerWiSearchCommand(wi: Command): void {
       orderBy: '[System.ChangedDate] DESC',
     });
 
-    const items = (await runAzJson<AzWorkItem[] | null>(runner, [
-      'boards', 'query',
-      '--wiql', azText(wiql),
-      '--organization', ctx.orgUrl,
-    ])) ?? [];
+    const items = await queryWorkItems(runner, ctx.orgUrl, wiql);
 
     const results = items.map((w) => ({
       id: w.id,

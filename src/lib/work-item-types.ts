@@ -1,5 +1,5 @@
 import type { Runner } from './exec.js';
-import { runAzRestJson } from './exec.js';
+import { adoJson, adoUrl, projectBase } from './ado.js';
 
 /**
  * Work item state -> category. "category" is the fixed, process-agnostic
@@ -9,9 +9,6 @@ import { runAzRestJson } from './exec.js';
  * Azure DevOps concept, so comparing against it (unlike comparing against
  * a literal state name) doesn't assume anything about the process template.
  *
- * There is no `az boards work-item-type` command group in the
- * azure-devops-cli-extension (confirmed absent from its command registry),
- * so this goes through `az rest` against the REST API directly:
  *   GET {orgUrl}/{project}/_apis/wit/workitemtypes/{type}/states?api-version=7.1
  */
 export interface WorkItemState {
@@ -26,9 +23,9 @@ export async function fetchWorkItemTypeStates(
   project: string,
   type: string
 ): Promise<WorkItemState[]> {
-  const uri = `${orgUrl}/${encodeURIComponent(project)}/_apis/wit/workitemtypes/${encodeURIComponent(type)}/states?api-version=7.1`;
-  const result = await runAzRestJson<{ value: WorkItemState[] }>(runner, { method: 'get', uri });
-  return result.value ?? [];
+  const url = adoUrl(projectBase(orgUrl, project), `_apis/wit/workitemtypes/${encodeURIComponent(type)}/states`);
+  const result = await adoJson<{ value?: WorkItemState[] }>(runner, { method: 'GET', url });
+  return result?.value ?? [];
 }
 
 export function categoryOf(states: WorkItemState[], stateName: string): string | null {

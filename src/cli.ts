@@ -1,4 +1,5 @@
 import { Command } from 'commander';
+import { DOVA_VERSION } from './lib/version.js';
 import { registerStatusCommand } from './commands/status.js';
 import { registerLinkCommand } from './commands/link.js';
 import { registerUnlinkCommand } from './commands/unlink.js';
@@ -12,6 +13,8 @@ import { registerPipelineCommand } from './commands/pipeline/index.js';
 import { registerInstructionsCommand } from './commands/instructions.js';
 import { registerApiCommand } from './commands/api.js';
 import { registerCompletionCommand } from './commands/completion.js';
+import { registerAuthCommand } from './commands/auth.js';
+import { registerDaemonCommand } from './commands/daemon.js';
 
 /**
  * Assembles the full dova command tree. This is the single source of
@@ -24,9 +27,9 @@ export function buildProgram(): Command {
   program
     .name('dova')
     .description(
-      'A CLI for Azure DevOps that wraps az + git, inferring org/project/repo/team from the current directory.'
+      'A CLI for Azure DevOps, inferring org/project/repo/team from the current directory. Sign in once with `dova auth login`.'
     )
-    .version('0.1.0')
+    .version(DOVA_VERSION)
     .showHelpAfterError(true)
     // Throw instead of calling process.exit directly, so index.ts owns exit-code mapping.
     .exitOverride();
@@ -43,6 +46,8 @@ export function buildProgram(): Command {
   registerPipelineCommand(program);
   registerInstructionsCommand(program);
   registerApiCommand(program);
+  registerAuthCommand(program);
+  registerDaemonCommand(program);
   registerCompletionCommand(program);
 
   return program;

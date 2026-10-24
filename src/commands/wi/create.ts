@@ -1,13 +1,14 @@
 import type { Command } from 'commander';
-import { defaultRunner, runAzJson } from '../../lib/exec.js';
-import { azText } from '../../lib/az-file-arg.js';
+import { defaultRunner } from '../../lib/exec.js';
 import { readTextArg } from '../../lib/stdin.js';
 import { resolveContext } from '../../lib/context.js';
 import { resolveProject, resolveCreateContext } from '../../lib/team-resolver.js';
-import { buildWiWebUrl } from '../../lib/work-items.js';
+import { buildWiWebUrl, createWorkItem, currentUserIdentity } from '../../lib/work-items.js';
+import { isCurrentUserToken } from '../../lib/wiql.js';
+import { parseIdArgument } from '../../lib/urls.js';
+import { UserError } from '../../lib/errors.js';
 import { addContextOptions, addJsonOption, addTeamOptions, addNoInputOption } from '../../lib/command-helpers.js';
 import { emit, getColor } from '../../lib/output.js';
-import type { AzWorkItem } from '../../types/azure-devops.js';
 
 interface WiCreateFlags {
   org?: string;
@@ -61,36 +62,23 @@ export function registerWiCreateCommand(wi: Command): void {
       { reresolve: opts.reresolve, like: opts.like, save: opts.save }
     );
 
-    const args = [
-      'boards', 'work-item', 'create',
-      '--type', opts.type,
-      '--title', azText(title),
-      '--area', createContext.areaPath,
-      '--iteration', createContext.iterationPath,
-      '--organization', ctx.orgUrl,
-      '--project', projectResult.project,
-    ];
-    if (opts.assignTo) args.push('--assigned-to', opts.assignTo);
+    const parentId = opts.parent !== undefined ? parseIdArgument(opts.parent) : undefined;
+    if (parentId === null) throw new UserError(`--parent "${opts.parent}" is not a work item id.`);
 
-    const created = await runAzJson<AzWorkItem>(runner, args);
+    const assignTo =
+      opts.assignTo && isCurrentUserToken(opts.assignTo) ? await currentUserIdentity(runner, ctx.orgUrl) : opts.assignTo;
+
+    const created = await createWorkItem(runner, ctx.orgUrl, projectResult.project, {
+      type: opts.type,
+      fields: {
+        'System.Title': title,
+        'System.AreaPath': createContext.areaPath,
+        'System.IterationPath': createContext.iterationPath,
+        'System.AssignedTo': assignTo,
+      },
+      parentId,
+    });
     const warnings = [...createContext.warnings];
-
-    if (opts.parent) {
-      // The item is already created at this point — a failure here should
-      // degrade to a warning, not lose track of the id we just created.
-      try {
-        await runAzJson(runner, [
-          'boards', 'work-item', 'relation', 'add',
-          '--id', String(created.id),
-          '--relation-type', 'Parent',
-          '--target-id', opts.parent,
-          '--organization', ctx.orgUrl,
-        ]);
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        warnings.push(`Created #${created.id}, but linking it as a child of #${opts.parent} failed: ${message}`);
-      }
-    }
 
     const result = {
       id: created.id,
@@ -99,7 +87,7 @@ export function registerWiCreateCommand(wi: Command): void {
       team: createContext.team,
       areaPath: createContext.areaPath,
       iterationPath: createContext.iterationPath,
-      parent: opts.parent ? Number(opts.parent) : null,
+      parent: parentId ?? null,
       warnings,
     };
 

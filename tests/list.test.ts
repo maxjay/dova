@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { gatherLinkedBranches } from '../src/commands/list.js';
-import { createFakeRunner, ok, okJson, fail } from './fixtures/fake-runner.js';
+import { createFakeRunner, ok, fail, adoOk, unexpected } from './fixtures/fake-runner.js';
 import type { AzWorkItem } from '../src/types/azure-devops.js';
 import type { ResolvedContext } from '../src/lib/context.js';
 
@@ -33,7 +33,10 @@ describe('gatherLinkedBranches', () => {
         }
         return fail(`unexpected git call: ${args.join(' ')}`);
       },
-      az: (args) => (args.join(' ').startsWith('boards query') ? okJson([item(200, 'Fix the bug'), item(205, 'Sub task'), item(300, 'New thing')]) : fail()),
+      ado: (req) =>
+        req.method === 'POST' && req.path === '/contoso/_apis/wit/workitemsbatch'
+          ? adoOk({ value: [item(200, 'Fix the bug'), item(205, 'Sub task'), item(300, 'New thing')] })
+          : unexpected(req),
     });
 
     const branches = await gatherLinkedBranches(runner, CTX);
@@ -58,7 +61,7 @@ describe('gatherLinkedBranches', () => {
         if (args[0] === 'for-each-ref') return fail('', 1);
         return fail(`unexpected git call: ${args.join(' ')}`);
       },
-      az: () => okJson([item(400, 'A'), item(401, 'B')]),
+      ado: () => adoOk({ value: [item(400, 'A'), item(401, 'B')] }),
     });
 
     const branches = await gatherLinkedBranches(runner, CTX);
@@ -67,7 +70,7 @@ describe('gatherLinkedBranches', () => {
   });
 
   it('makes exactly one batched work item fetch regardless of branch count', async () => {
-    let azCalls = 0;
+    let requests = 0;
     const runner = createFakeRunner({
       git: (args) => {
         if (args[0] === 'config' && args.includes('--get-regexp')) {
@@ -75,13 +78,13 @@ describe('gatherLinkedBranches', () => {
         }
         return fail('', 1);
       },
-      az: () => {
-        azCalls++;
-        return okJson([item(1, 'A'), item(2, 'B'), item(3, 'C')]);
+      ado: () => {
+        requests++;
+        return adoOk({ value: [item(1, 'A'), item(2, 'B'), item(3, 'C')] });
       },
     });
 
     await gatherLinkedBranches(runner, CTX);
-    expect(azCalls).toBe(1);
+    expect(requests).toBe(1);
   });
 });

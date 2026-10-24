@@ -5,9 +5,9 @@ description: Azure DevOps work through the `dova` CLI — reading work items, li
 
 # dova
 
-Azure DevOps from the command line. `dova` wraps `az` and `git`, and
-infers org, project and repo from the git remote — commands need no
-`--org` or `--project`.
+Azure DevOps from the command line. `dova` talks to the Azure DevOps
+REST API as the signed-in user and reads `git`, and infers org, project
+and repo from the git remote — commands need no `--org` or `--project`.
 
 Never call `az boards` or `az repos` directly. `dova` records the
 branch-to-ticket link that raw `az` can neither read nor write.

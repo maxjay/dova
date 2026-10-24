@@ -127,4 +127,5 @@ Error: Multiple teams in "MyProject" — which one?
 `--json` (with `--jq <expr>`) on any read command; human output is not
 a contract. `summarize`'s `Diff` is committed work only — uncommitted
 appears under `Uncommitted`. Exit codes: `1` bad input, `2` not found,
-`3` `az` missing, `4` `az`/`git` failed.
+`3` not signed in, `4` a request or `git` failed. On `3`, ask the user
+to run `dova auth login` — never sign in on their behalf.

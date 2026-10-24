@@ -1,9 +1,11 @@
 import type { ChalkInstance } from 'chalk';
 import type { Runner } from './exec.js';
-import { runAzJson, runAzRestJson } from './exec.js';
+import { adoJson, adoUrl, projectBase } from './ado.js';
 import { buildPrWebUrl } from './context.js';
 import { renderTable, truncate } from './output.js';
-import { UserError, NotFoundError, looksLikeAzNotFoundError } from './errors.js';
+import { UserError, NotFoundError } from './errors.js';
+import { fetchWorkItemsBatch } from './work-items.js';
+import { toHeadRef } from './pipelines.js';
 import type { AzPullRequest, AzWorkItem, AzCommentThread, AzComment } from '../types/azure-devops.js';
 
 export interface ThreadLocation {
@@ -28,36 +30,34 @@ export async function fetchActivePrForBranch(
   repo: string,
   branch: string
 ): Promise<AzPullRequest | null> {
-  const prs = await runAzJson<AzPullRequest[]>(runner, [
-    'repos', 'pr', 'list',
-    '--organization', orgUrl,
-    '--project', project,
-    '--repository', repo,
-    '--source-branch', branch,
-    '--status', 'active',
-  ]);
-  return prs[0] ?? null;
+  const res = await adoJson<{ value?: AzPullRequest[] }>(runner, {
+    method: 'GET',
+    url: adoUrl(projectBase(orgUrl, project), `_apis/git/repositories/${encodeURIComponent(repo)}/pullrequests`, {
+      'searchCriteria.sourceRefName': toHeadRef(branch),
+      'searchCriteria.status': 'active',
+    }),
+  });
+  return res?.value?.[0] ?? null;
 }
 
+/** A PR by id alone — the org-level endpoint, so neither project nor repo needs to be known. */
 export async function fetchPrById(runner: Runner, orgUrl: string, id: number): Promise<AzPullRequest> {
   try {
-    return await runAzJson<AzPullRequest>(runner, ['repos', 'pr', 'show', '--id', String(id), '--organization', orgUrl]);
+    return await adoJson<AzPullRequest>(runner, { method: 'GET', url: adoUrl(orgUrl, `_apis/git/pullrequests/${id}`) });
   } catch (err) {
-    if (err instanceof Error && looksLikeAzNotFoundError(err.message)) {
-      throw new NotFoundError(`Pull request #${id} was not found.`);
-    }
+    if (err instanceof NotFoundError) throw new NotFoundError(`Pull request #${id} was not found.`);
     throw err;
   }
 }
 
 /** Full work items (not just refs) linked to a PR — [] (not null) when there are none. */
-export async function fetchPrWorkItems(runner: Runner, orgUrl: string, prId: number): Promise<AzWorkItem[]> {
-  const raw = await runAzJson<AzWorkItem[] | null>(runner, [
-    'repos', 'pr', 'work-item', 'list',
-    '--id', String(prId),
-    '--organization', orgUrl,
-  ]);
-  return raw ?? [];
+export async function fetchPrWorkItems(runner: Runner, orgUrl: string, project: string, repo: string, prId: number): Promise<AzWorkItem[]> {
+  const refs = await adoJson<{ value?: Array<{ id: string | number }> }>(runner, {
+    method: 'GET',
+    url: adoUrl(projectBase(orgUrl, project), `_apis/git/repositories/${encodeURIComponent(repo)}/pullRequests/${prId}/workitems`),
+  });
+  const ids = (refs?.value ?? []).map((r) => Number(r.id)).filter((id) => Number.isInteger(id));
+  return fetchWorkItemsBatch(runner, orgUrl, ids);
 }
 
 /** A thread whose every comment is system-authored ("X created the PR", "X pushed N commits") isn't a real discussion. */
@@ -69,25 +69,20 @@ export function isUnresolvedThreadStatus(status: string): boolean {
   return status === 'active' || status === 'pending';
 }
 
-function pullRequestApiBase(orgUrl: string, project: string, repo: string, prId: number): string {
-  return `${orgUrl}/${encodeURIComponent(project)}/_apis/git/repositories/${encodeURIComponent(repo)}/pullRequests/${prId}`;
+function threadsPath(repo: string, prId: number): string {
+  return `_apis/git/repositories/${encodeURIComponent(repo)}/pullRequests/${prId}/threads`;
 }
 function threadsUri(orgUrl: string, project: string, repo: string, prId: number): string {
-  return `${pullRequestApiBase(orgUrl, project, repo, prId)}/threads?api-version=7.1`;
+  return adoUrl(projectBase(orgUrl, project), threadsPath(repo, prId));
 }
 function threadUri(orgUrl: string, project: string, repo: string, prId: number, threadId: number): string {
-  return `${pullRequestApiBase(orgUrl, project, repo, prId)}/threads/${threadId}?api-version=7.1`;
+  return adoUrl(projectBase(orgUrl, project), `${threadsPath(repo, prId)}/${threadId}`);
 }
 function threadCommentsUri(orgUrl: string, project: string, repo: string, prId: number, threadId: number): string {
-  return `${pullRequestApiBase(orgUrl, project, repo, prId)}/threads/${threadId}/comments?api-version=7.1`;
+  return adoUrl(projectBase(orgUrl, project), `${threadsPath(repo, prId)}/${threadId}/comments`);
 }
 
-/**
- * The azure-devops CLI extension has no native `pr thread` command, so
- * this goes through `az rest` against the PR threads endpoint directly.
- * Returns only real discussion threads (see `isDiscussionThread`), most
- * recently active first.
- */
+/** Only real discussion threads (see `isDiscussionThread`), most recently active first. */
 export async function fetchDiscussionThreads(
   runner: Runner,
   orgUrl: string,
@@ -95,8 +90,8 @@ export async function fetchDiscussionThreads(
   repo: string,
   prId: number
 ): Promise<AzCommentThread[]> {
-  const res = await runAzRestJson<{ value: AzCommentThread[] }>(runner, { method: 'get', uri: threadsUri(orgUrl, project, repo, prId) });
-  return (res.value ?? []).filter(isDiscussionThread);
+  const res = await adoJson<{ value?: AzCommentThread[] }>(runner, { method: 'GET', url: threadsUri(orgUrl, project, repo, prId) });
+  return (res?.value ?? []).filter(isDiscussionThread);
 }
 
 export async function fetchThreadById(
@@ -107,8 +102,7 @@ export async function fetchThreadById(
   prId: number,
   threadId: number
 ): Promise<AzCommentThread> {
-  const uri = threadUri(orgUrl, project, repo, prId, threadId);
-  return runAzRestJson<AzCommentThread>(runner, { method: 'get', uri });
+  return adoJson<AzCommentThread>(runner, { method: 'GET', url: threadUri(orgUrl, project, repo, prId, threadId) });
 }
 
 /** Posts a new top-level comment thread on a PR. */
@@ -121,12 +115,7 @@ export async function postPrComment(
   text: string
 ): Promise<AzCommentThread> {
   const body = { comments: [{ parentCommentId: 0, content: text, commentType: 'text' }], status: 'active' };
-  return runAzRestJson<AzCommentThread>(runner, {
-    method: 'post',
-    uri: threadsUri(orgUrl, project, repo, prId),
-    body,
-    headers: ['Content-Type=application/json'],
-  });
+  return adoJson<AzCommentThread>(runner, { method: 'POST', url: threadsUri(orgUrl, project, repo, prId), body });
 }
 
 /**
@@ -146,9 +135,8 @@ export async function replyToPrThread(
 ): Promise<AzComment> {
   const thread = await fetchThreadById(runner, orgUrl, project, repo, prId, threadId);
   const parentCommentId = thread.comments[thread.comments.length - 1]?.id ?? 1;
-  const uri = threadCommentsUri(orgUrl, project, repo, prId, threadId);
   const body = { content: text, commentType: 'text', parentCommentId };
-  return runAzRestJson<AzComment>(runner, { method: 'post', uri, body, headers: ['Content-Type=application/json'] });
+  return adoJson<AzComment>(runner, { method: 'POST', url: threadCommentsUri(orgUrl, project, repo, prId, threadId), body });
 }
 
 /** The API's raw thread status values. "resolved" isn't one of them — see `resolveThreadStatusInput`. */
@@ -192,8 +180,7 @@ export async function setPrThreadStatus(
   threadId: number,
   status: AzThreadStatusApi
 ): Promise<AzCommentThread> {
-  const uri = threadUri(orgUrl, project, repo, prId, threadId);
-  return runAzRestJson<AzCommentThread>(runner, { method: 'patch', uri, body: { status }, headers: ['Content-Type=application/json'] });
+  return adoJson<AzCommentThread>(runner, { method: 'PATCH', url: threadUri(orgUrl, project, repo, prId, threadId), body: { status } });
 }
 
 /* ------------------------------------------------------------------ *
@@ -245,7 +232,7 @@ export async function gatherPrDetail(
   const url = buildPrWebUrl({ orgUrl, project, repo }, pullRequest.pullRequestId);
 
   const [workItems, threads] = await Promise.all([
-    fetchPrWorkItems(runner, orgUrl, pullRequest.pullRequestId),
+    fetchPrWorkItems(runner, orgUrl, project, repo, pullRequest.pullRequestId),
     fetchDiscussionThreads(runner, orgUrl, project, repo, pullRequest.pullRequestId),
   ]);
 

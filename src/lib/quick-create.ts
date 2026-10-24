@@ -1,11 +1,9 @@
 import type { Runner } from './exec.js';
-import { azText } from './az-file-arg.js';
-import { runAzJson, tryGit } from './exec.js';
+import { tryGit } from './exec.js';
 import { resolveContext, type ResolvedContext } from './context.js';
 import { resolveProject, resolveCreateContext } from './team-resolver.js';
-import { buildWiWebUrl } from './work-items.js';
+import { buildWiWebUrl, createWorkItem } from './work-items.js';
 import { UserError } from './errors.js';
-import type { AzWorkItem } from '../types/azure-devops.js';
 
 export interface QuickCreateOptions {
   type: string;
@@ -91,21 +89,16 @@ export async function quickCreateWorkItem(runner: Runner, opts: QuickCreateOptio
     { cwd: opts.cwd, reresolve: opts.reresolve, like: opts.like, save: opts.save }
   );
 
-  const args = [
-    'boards', 'work-item', 'create',
-    '--type', opts.type,
-    '--title', azText(opts.title),
-    '--area', createContext.areaPath,
-    '--iteration', createContext.iterationPath,
-    '--organization', ctx.orgUrl,
-    '--project', projectResult.project,
-  ];
-  if (opts.at) {
-    const permalink = await buildFoundInPermalink(runner, ctx, opts.at, opts.cwd);
-    args.push('--description', azText(`Found in: ${permalink}`));
-  }
-
-  const created = await runAzJson<AzWorkItem>(runner, args);
+  const permalink = opts.at ? await buildFoundInPermalink(runner, ctx, opts.at, opts.cwd) : undefined;
+  const created = await createWorkItem(runner, ctx.orgUrl, projectResult.project, {
+    type: opts.type,
+    fields: {
+      'System.Title': opts.title,
+      'System.AreaPath': createContext.areaPath,
+      'System.IterationPath': createContext.iterationPath,
+      'System.Description': permalink ? `Found in: ${permalink}` : undefined,
+    },
+  });
 
   return {
     id: created.id,

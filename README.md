@@ -6,10 +6,11 @@ GitHub and `glab` gives GitLab — work items, pull requests, and
 pipeline runs, without leaving your shell, and without typing an
 organization or project name into every command.
 
-Under the hood there's no separate API client: every operation is a
-`git` command or an `az` call (Azure CLI's `azure-devops` extension).
-`dova` is the layer that knows which one to run, with which arguments,
-from nothing but the repository you're already standing in.
+You sign in once, as yourself, with `dova auth login`. From then on a
+small background daemon holds that sign-in and makes every Azure DevOps
+request for the CLI over a warm connection, so commands answer in a
+few hundred milliseconds rather than waiting on a fresh process and
+token exchange every time. There's no Azure CLI involved anywhere.
 
 ## Features
 
@@ -25,12 +26,13 @@ from nothing but the repository you're already standing in.
   corresponds to which work item; `dova pr create` reads it back out
   and attaches the ticket automatically. `dova list`/`dova summarize`
   make that history queryable later.
-- **Goes where `az` doesn't.** Comment threads, work item type/state
-  metadata, and pipeline run logs have no native `az` command at all —
-  `dova` fills the gap with direct, authenticated REST calls.
+- **Fast, because it stays running.** The daemon keeps your token in
+  memory and refreshes it before it expires, keeps connections to Azure
+  DevOps open, and is started for you on first use. `dova daemon
+  install` has your OS start it at login and keep it up.
 - **Script-friendly.** `--json [fields]` and `--jq <expr>` on every read
   command, exit codes that distinguish "not found" from "bad input"
-  from "az failed," shell completions for bash/zsh/fish/PowerShell.
+  from "not signed in," shell completions for bash/zsh/fish/PowerShell.
 
 ## Install
 
@@ -40,16 +42,45 @@ npm install && npm run build
 npm link
 ```
 
-**Requirements:** Node 20+, the [Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli)
-with the DevOps extension, and an existing session:
+**Requirements:** Node 20+ and git. Then sign in:
 
 ```sh
-az extension add --name azure-devops
-az login
+dova auth login
 ```
 
-`dova` reads your `az` credentials and configuration; it doesn't manage
-its own.
+That opens your browser to sign in with your Microsoft work or school
+account — the same account you use in the Azure DevOps web UI. Over SSH,
+or anywhere without a browser, it prints a device code to enter on
+another machine instead (`--device-code` forces this). An organization
+that only allows personal access tokens: `dova auth login --with-token
+< token.txt`.
+
+`dova auth status` shows who you're signed in as and checks that the
+current repo's organization accepts it.
+
+### The daemon
+
+Every command talks to `dovad`, a background process that holds your
+sign-in. You don't need to start it: the first `dova` command does, and
+a newer `dova` replaces an older daemon on its own after an upgrade. To
+have it start at login and restart if it ever dies:
+
+```sh
+dova daemon install      # systemd user service / launchd agent / Windows Startup
+dova daemon status       # pid, uptime, requests served, log file
+```
+
+Your access token never leaves the daemon. The refresh token that keeps
+you signed in across restarts is stored encrypted, with its key in the
+OS keychain (Keychain, Credential Manager, or the Secret Service). The
+daemon's socket is readable only by you, and it only ever sends requests
+to Azure DevOps.
+
+For CI, or anywhere a background process is unwelcome: `DOVA_TOKEN=<pat>`
+uses a personal access token from the environment, and `DOVA_NO_DAEMON=1`
+uses your stored sign-in from the CLI process itself. Both skip the
+daemon entirely. Behind a proxy, `HTTPS_PROXY`/`NO_PROXY` are honored,
+and `dova daemon install` carries them into the service.
 
 Working with a coding agent? Run this once per machine — see
 [Teaching a coding agent to use it](#teaching-a-coding-agent-to-use-it):
@@ -374,10 +405,8 @@ list`/`dova summarize`. It lives in that branch's own git config, so it
 never needs a server round-trip and travels with the branch. `dova
 unlink` undoes it.
 
-**Reading a diff** works the same way `az repos pr checkout` does under
-the hood (confirmed from source: a plain fetch of the PR's own branch
-name, no special merge ref). `az` itself has no diff command at all.
-`dova summarize` resolves the branch involved to a usable ref — local
+**Reading a diff** is a plain fetch of the PR's own branch, no special
+merge ref. `dova summarize` resolves the branch involved to a usable ref — local
 if it's already there, the existing remote-tracking ref if it's
 already been fetched, or one fresh `git fetch origin <branch>` if
 neither — then diffs locally. Nothing is checked out, so pointing
@@ -398,26 +427,28 @@ src/
   cli.ts / index.ts     command tree + entrypoint
   commands/              one file per command
   lib/
-    exec.ts              the only place that shells out to az/git — every command takes a Runner, so tests fake it
+    exec.ts              the Runner every command takes — git, plus Azure DevOps requests — so tests fake it
+    ado.ts               REST request building and status-to-error mapping
+    transport.ts         where requests go: the daemon, or this process (DOVA_NO_DAEMON / DOVA_TOKEN)
     context.ts            org/project/repo/branch resolution
     team-resolver.ts      team/area/iteration resolution
     link.ts / work-items.ts / pr.ts / pipelines.ts / wiql.ts / urls.ts
                             fetch/render logic per Azure DevOps entity, shared across commands
+  auth/                  Entra sign-in (browser, device code, refresh), credential storage, AuthSession
+  daemon/                dovad: socket server, client + auto-start, wire protocol, login service install
   types/azure-devops.ts  minimal REST object shapes
-tests/                    one *.test.ts per lib module — no real az/git process ever runs
+tests/                    one *.test.ts per lib module — no real git process or network request ever runs
 ```
 
 **No organization-specific value is hardcoded anywhere** — not in
 source, not in examples, not in tests. Fixtures throughout use
 `contoso`/`MyProject`/`my-repo` as placeholders.
 
-**When `az` doesn't have a command for something**, the fix is direct
-`az rest` calls against the REST API, not a workaround. Before assuming
-a shape or writing a fallback for an edge case, check the
-[`azure-devops-cli-extension`](https://github.com/Azure/azure-devops-cli-extension)
-source — its `commands.py` per command group is the ground truth for
-what's actually registered, more reliable than `--help` or the docs
-site for anything obscure.
+**Everything is the REST API**, pinned to `api-version=7.1`, through
+`adoJson`/`adoText` in `lib/ado.ts`. The
+[Azure DevOps REST reference](https://learn.microsoft.com/rest/api/azure/devops/)
+is the ground truth for shapes; `dova api` is the quickest way to look
+at a real response.
 
 ## License
 

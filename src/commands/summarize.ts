@@ -1,5 +1,5 @@
 import type { Command } from 'commander';
-import { defaultRunner, runAzJson, tryGit, resolveOrFetchBranchRef, type Runner } from '../lib/exec.js';
+import { defaultRunner, tryGit, resolveOrFetchBranchRef, type Runner } from '../lib/exec.js';
 import { resolveContext, resolveDefaultBranch, type ResolvedContext } from '../lib/context.js';
 import { gitConfigGet } from '../lib/config.js';
 import { fetchActivePrForBranch, fetchPrById } from '../lib/pr.js';
@@ -72,8 +72,8 @@ const DESCRIPTION_TRUNCATE = 500;
  * active PR's own target branch is the authoritative answer when one
  * exists; otherwise the repo's default branch, found for free from a
  * locally-known `origin/HEAD` symref first, falling back to one
- * `az repos show` call only if that's unset (a plain clone doesn't
- * always populate it).
+ * repository lookup only if that's unset (a plain clone doesn't always
+ * populate it).
  */
 export async function resolveBase(
   runner: Runner,

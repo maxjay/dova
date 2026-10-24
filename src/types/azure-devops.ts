@@ -1,9 +1,8 @@
 /**
- * Minimal shapes for the Azure DevOps REST objects dova reads back from
- * `az ... --output json` / `az rest`. These are intentionally partial —
- * only the fields dova actually uses — since the real objects carry many
- * more fields we don't care about. Field names are the wire (camelCase)
- * names, since that's what az's JSON output uses.
+ * Minimal shapes for the Azure DevOps REST objects dova reads. These are
+ * intentionally partial — only the fields dova actually uses — since the
+ * real objects carry many more fields we don't care about. Field names
+ * are the wire (camelCase) names.
  */
 
 export interface AzIdentityRef {
@@ -12,7 +11,7 @@ export interface AzIdentityRef {
   id?: string;
 }
 
-/** GitPullRequest, from `az repos pr list` / `az repos pr show`. */
+/** GitPullRequest, from `_apis/git/.../pullrequests`. */
 export interface AzPullRequest {
   pullRequestId: number;
   title: string;
@@ -29,11 +28,10 @@ export interface AzPullRequest {
 }
 
 /**
- * WorkItem, from `az repos pr work-item list` (which — per the extension
- * source — resolves refs and returns full work items, not just refs) and
- * `az boards work-item show`. Fields are keyed by their process reference
- * name (e.g. "System.Title"), never hardcoded beyond the System.* fields
- * that exist on every process template.
+ * WorkItem, from `_apis/wit/workitems` and `_apis/wit/workitemsbatch`.
+ * Fields are keyed by their process reference name (e.g. "System.Title"),
+ * never hardcoded beyond the System.* fields that exist on every process
+ * template.
  */
 export interface AzWorkItem {
   id: number;
@@ -51,7 +49,7 @@ export interface AzWorkItem {
 
 /**
  * Build (Azure Pipelines runs are "Build" objects under the REST API's
- * `_apis/build/builds` namespace), from `az pipelines runs list` / `show`.
+ * `_apis/build/builds` namespace).
  */
 export interface AzBuild {
   id: number;
@@ -90,7 +88,7 @@ export interface AzCommentThreadContext {
   leftFileEnd?: AzCommentPosition;
 }
 
-/** GitPullRequestCommentThread, from `az rest` against the PR threads endpoint. */
+/** GitPullRequestCommentThread, from the PR threads endpoint. */
 export interface AzCommentThread {
   id: number;
   /** "active" | "fixed" | "wontFix" | "closed" | "pending" | "unknown" */
@@ -111,7 +109,7 @@ export interface AzComment {
   commentType?: string;
 }
 
-/** GitRepository, from `az repos show` — only used for its `defaultBranch` (e.g. "refs/heads/main"). */
+/** GitRepository — only used for its `defaultBranch` (e.g. "refs/heads/main"). */
 export interface AzGitRepository {
   id: string;
   name: string;

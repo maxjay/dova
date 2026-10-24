@@ -53,5 +53,4 @@ watches this branch's most recent run.
 `dova pipeline status` lists recent runs, `--branch` for another
 branch. `dova status` already includes this branch's last three
 alongside the PR, work items and comment threads — prefer it when you
-want more than CI, since it is one command rather than several, and
-each `az` call costs seconds.
+want more than CI, since it is one command rather than several.

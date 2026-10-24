@@ -1,6 +1,6 @@
 import type { AzTeam, AzTeamFieldValues, AzTeamIteration } from '../../src/lib/team-resolver.js';
 
-/** `az devops team list --project MyProject` fixtures. */
+/** `GET _apis/projects/MyProject/teams` fixtures — the `value` array of the response. */
 export const oneTeam: AzTeam[] = [
   { id: 'team-1', name: 'MyTeam', url: 'https://dev.azure.com/contoso/_apis/projects/MyProject/teams/MyTeam' },
 ];
@@ -10,7 +10,7 @@ export const multipleTeams: AzTeam[] = [
   { id: 'team-2', name: 'Website Team', url: 'https://dev.azure.com/contoso/_apis/projects/MyProject/teams/WebsiteTeam' },
 ];
 
-/** `az boards area team list --team MyTeam` fixtures. */
+/** `GET MyProject/MyTeam/_apis/work/teamsettings/teamfieldvalues` fixtures (one object, not a list). */
 export const areaWithDefault: AzTeamFieldValues = {
   field: { referenceName: 'System.AreaPath', url: '' },
   defaultValue: 'MyProject\\MyTeam',
@@ -35,7 +35,7 @@ export const areaNoDefaultMultipleValues: AzTeamFieldValues = {
   ],
 };
 
-/** `az boards iteration team list --team MyTeam --timeframe current` fixtures. */
+/** `GET MyProject/MyTeam/_apis/work/teamsettings/iterations?$timeframe=current` fixtures — the `value` array of the response. */
 export const currentIteration: AzTeamIteration[] = [
   {
     id: 'iter-1',

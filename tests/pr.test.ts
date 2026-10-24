@@ -6,10 +6,9 @@ import {
   renderPrDetailHuman,
   THREAD_COMMENT_TRUNCATE,
 } from '../src/lib/pr.js';
-import { describeLostDescription } from '../src/commands/pr/create.js';
 import { getColor } from '../src/lib/output.js';
 import { UserError } from '../src/lib/errors.js';
-import { createFakeRunner, okJson, fail } from './fixtures/fake-runner.js';
+import { createFakeRunner, adoOk, unexpected } from './fixtures/fake-runner.js';
 import type { AzCommentThread } from '../src/types/azure-devops.js';
 
 const ORG_URL = 'https://dev.azure.com/contoso';
@@ -74,9 +73,9 @@ describe('threadLocation', () => {
 describe('gatherThreadDetail', () => {
   it('returns every comment in order, plus status and location', async () => {
     const runner = createFakeRunner({
-      az: (args) =>
-        args.join(' ').includes('/threads/4?api-version=7.1')
-          ? okJson({
+      ado: (req) =>
+        req.method === 'GET' && req.path === '/contoso/MyProject/_apis/git/repositories/my-repo/pullRequests/612/threads/4'
+          ? adoOk({
               id: 4,
               status: 'active',
               threadContext: { filePath: '/src/auth.ts', rightFileStart: { line: 42 } },
@@ -85,7 +84,7 @@ describe('gatherThreadDetail', () => {
                 { id: 2, content: 'Can you also handle the null case?', author: { displayName: 'Jane Doe' }, publishedDate: '2026-08-22T10:15:00Z', commentType: 'text' },
               ],
             })
-          : fail(`unexpected az call: ${args.join(' ')}`),
+          : unexpected(req),
     });
 
     const detail = await gatherThreadDetail(runner, ORG_URL, PROJECT, REPO, 612, 4);
@@ -105,47 +104,9 @@ describe('gatherThreadDetail', () => {
 });
 
 /* ------------------------------------------------------------------ *
- * A description passed as a command-line argument does not survive
- * Windows reliably — the .cmd/.ps1 shim rebuilds the command line and
- * the body arrives empty or cut at the first newline. az reports success
- * either way, so dova has to check what came back.
- * ------------------------------------------------------------------ */
-
-describe('describeLostDescription', () => {
-  it('says nothing when the body came back intact', () => {
-    expect(describeLostDescription('## Summary\nBody text', '## Summary\nBody text')).toBeNull();
-  });
-
-  it('ignores line-ending and trailing-whitespace normalization', () => {
-    expect(describeLostDescription('## Summary\nBody', '## Summary\r\nBody\n')).toBeNull();
-  });
-
-  it('reports a body that vanished entirely', () => {
-    expect(describeLostDescription('## Summary\nBody', '')).toContain('no description');
-    expect(describeLostDescription('## Summary\nBody', undefined)).toContain('no description');
-  });
-
-  it('reports a body cut at the first newline', () => {
-    const lost = describeLostDescription('## Summary\nBody text here', '## Summary');
-    expect(lost).toContain('truncated');
-    expect(lost).toContain('10 of 25');
-  });
-
-  it('stays quiet when nothing was sent', () => {
-    expect(describeLostDescription(undefined, '')).toBeNull();
-    expect(describeLostDescription('   ', '')).toBeNull();
-  });
-
-  it('does not cry wolf when the server returns something longer', () => {
-    // Azure DevOps can append to a body; that is not a loss.
-    expect(describeLostDescription('Body', 'Body\n\nRelated work items: #1')).toBeNull();
-  });
-});
-
-/* ------------------------------------------------------------------ *
  * Threads render as blocks, not table rows. A 60-character cell reduced
  * a Sonar finding to the opening of its badge URL, which forced a
- * `pr comment show` — another `az` start — on every single thread.
+ * `pr comment show` on every single thread.
  * ------------------------------------------------------------------ */
 
 describe('renderPrDetailHuman comment threads', () => {

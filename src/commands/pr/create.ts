@@ -1,13 +1,15 @@
 import type { Command } from 'commander';
 import type { Runner } from '../../lib/exec.js';
-import { defaultRunner, runAzJson, tryGit } from '../../lib/exec.js';
+import { defaultRunner, tryGit } from '../../lib/exec.js';
+import { adoJson, adoUrl, projectBase } from '../../lib/ado.js';
 import { readTextArg, stdinHasData } from '../../lib/stdin.js';
-import { azText, type AzArg } from '../../lib/az-file-arg.js';
 import { gitConfigGet } from '../../lib/config.js';
 import { resolveContext, buildPrWebUrl, resolveDefaultBranch } from '../../lib/context.js';
 import { addContextOptions, addJsonOption, addNoColorOption } from '../../lib/command-helpers.js';
 import { emit, getColor } from '../../lib/output.js';
 import { UserError } from '../../lib/errors.js';
+import { parseIdArgument } from '../../lib/urls.js';
+import { toHeadRef } from '../../lib/pipelines.js';
 import type { AzPullRequest } from '../../types/azure-devops.js';
 
 interface PrCreateFlags {
@@ -22,29 +24,6 @@ interface PrCreateFlags {
   draft?: boolean;
   json?: string | boolean;
   color: boolean;
-}
-
-/** Line endings and trailing whitespace differ harmlessly between what's sent and what comes back. */
-function normalizeBody(text: string): string {
-  return text.replace(/\r\n/g, '\n').trim();
-}
-
-/**
- * Whether the description dova sent actually arrived, phrased for the
- * warning. Only reports a *loss* — empty, or shorter than what was sent
- * — so that server-side normalization never trips a false alarm.
- */
-export function describeLostDescription(sent: string | undefined, returned: string | undefined): string | null {
-  if (!sent) return null;
-  const want = normalizeBody(sent);
-  if (!want) return null;
-  const got = normalizeBody(returned ?? '');
-  if (got === want) return null;
-  if (!got) return 'did not reach Azure DevOps — the PR has no description';
-  if (got.length < want.length) {
-    return `arrived truncated (${got.length} of ${want.length} characters)`;
-  }
-  return null;
 }
 
 /** Recent commit subjects on this branch that reference a work item as `#<id>`, most recent first, deduped. */
@@ -119,44 +98,35 @@ export function registerPrCreateCommand(pr: Command): void {
       ]);
     }
 
-    const args: AzArg[] = [
-      'repos', 'pr', 'create',
-      '--organization', ctx.orgUrl,
-      '--project', ctx.project,
-      '--repository', ctx.repo,
-      '--source-branch', ctx.branch,
-      // A commit subject is a person's text: it can hold quotes, parens,
-      // `&`, anything. Off the command line it goes.
-      '--title', azText(title),
-      '--transition-work-items', 'true',
-    ];
     // Resolved, not asked for. `origin/HEAD` already says what this repo
     // merges into — `dova summarize` has always read it to pick a diff
-    // base — so a PR has no business making the caller name it. Left to
-    // az's own default this silently targets the repo default branch,
-    // which is wrong wherever a team integrates into `develop`.
+    // base — so a PR has no business making the caller name it, and a
+    // team that integrates into `develop` gets `develop`.
     const target = opts.target ?? (await resolveDefaultBranch(runner, ctx))?.branch;
-    if (target) args.push('--target-branch', target);
-
-    if (workItems.length > 0) args.push('--work-items', ...workItems);
-    if (opts.draft) args.push('--draft', 'true');
-
-    if (description) args.push('--description', azText(description));
-
-    const created = await runAzJson<AzPullRequest>(runner, args);
-
-    // Belt and braces over the temp-file route above: az reports success
-    // whether or not the body reached it, so a silent loss would look
-    // exactly like a clean create. Cheap to check, and it turns a
-    // mystery into a message.
-    const lost = describeLostDescription(description, created.description);
-    if (lost) {
-      process.stderr.write(
-        `${color.yellow('Warning')}: the description ${lost}.\n` +
-          `  The PR itself was created fine — only the body is missing.\n` +
-          `  Please report this: dova sent the body via a temp file, which should not be able to fail.\n`
-      );
+    if (!target) {
+      throw new UserError('Could not tell which branch this PR should merge into.', ['Pass --target <branch>.']);
     }
+
+    const ids = workItems.map((id) => {
+      const n = parseIdArgument(id.replace(/^#/, ''));
+      if (n === null) throw new UserError(`"${id}" is not a work item id.`);
+      return n;
+    });
+
+    const created = await adoJson<AzPullRequest>(runner, {
+      method: 'POST',
+      url: adoUrl(projectBase(ctx.orgUrl, ctx.project), `_apis/git/repositories/${encodeURIComponent(ctx.repo)}/pullrequests`),
+      body: {
+        sourceRefName: toHeadRef(ctx.branch),
+        targetRefName: toHeadRef(target),
+        title,
+        ...(description ? { description } : {}),
+        isDraft: Boolean(opts.draft),
+        workItemRefs: ids.map((id) => ({ id: String(id) })),
+        // Linked work items move to their resolved state when the PR completes.
+        completionOptions: { transitionWorkItems: true },
+      },
+    });
 
     const result = {
       id: created.pullRequestId,
@@ -164,7 +134,7 @@ export function registerPrCreateCommand(pr: Command): void {
       status: created.status,
       isDraft: Boolean(created.isDraft),
       url: buildPrWebUrl(ctx, created.pullRequestId),
-      workItems: workItems.map(Number),
+      workItems: ids,
     };
 
     await emit(result, opts, () => {

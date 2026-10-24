@@ -2,13 +2,24 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { runUnlink, runLink } from '../src/lib/link.js';
 import { setNonInteractive } from '../src/lib/interactive.js';
 import { UserError, NotFoundError } from '../src/lib/errors.js';
-import { createFakeRunner, ok, okJson, fail } from './fixtures/fake-runner.js';
+import { createFakeRunner, ok, fail, adoOk, unexpected, type FakeAdoRequest } from './fixtures/fake-runner.js';
 import type { AzWorkItem } from '../src/types/azure-devops.js';
 
 const COLOR = { bold: (s: string) => s, dim: (s: string) => s, cyan: (s: string) => s, yellow: (s: string) => s, green: (s: string) => s } as any;
 
 function item(id: number, title: string): AzWorkItem {
   return { id, url: '', fields: { 'System.Title': title, 'System.WorkItemType': 'Bug' } };
+}
+
+const isBatch = (req: FakeAdoRequest): boolean => req.method === 'POST' && req.path === '/contoso/_apis/wit/workitemsbatch';
+const isWiql = (req: FakeAdoRequest): boolean => req.method === 'POST' && req.path === '/contoso/_apis/wit/wiql';
+const batchIds = (req: FakeAdoRequest): number[] => (req.json as { ids: number[] }).ids;
+/** The children lookup is the only WIQL query `dova link` runs — it filters on System.Parent. */
+const isChildrenQuery = (req: FakeAdoRequest): boolean => isWiql(req) && (req.json as { query: string }).query.includes('System.Parent');
+
+/** A work items batch endpoint that answers from `items`, for whichever ids were asked for. */
+function batchOf(items: AzWorkItem[]) {
+  return (req: FakeAdoRequest) => (isBatch(req) ? adoOk({ value: items.filter((i) => batchIds(req).includes(i.id)) }) : unexpected(req));
 }
 
 /** git handler for a branch "fix/200" with tracked ids/primary, supporting --unset and re-set. */
@@ -41,7 +52,7 @@ describe('runUnlink', () => {
     const sets: Record<string, string> = {};
     const runner = createFakeRunner({
       git: gitFor({ workitems: '200,201,202', primary: '201', sets }),
-      az: () => okJson([item(200, 'A'), item(202, 'C')]),
+      ado: batchOf([item(200, 'A'), item(202, 'C')]),
     });
 
     const result = await runUnlink({ ids: ['201'], runner, org: 'contoso', project: 'MyProject', color: COLOR });
@@ -60,7 +71,7 @@ describe('runUnlink', () => {
     const sets: Record<string, string> = {};
     const runner = createFakeRunner({
       git: gitFor({ workitems: '200,201,202', primary: '200', sets }),
-      az: () => okJson([item(200, 'A'), item(202, 'C')]),
+      ado: batchOf([item(200, 'A'), item(202, 'C')]),
     });
 
     await runUnlink({ ids: ['201'], runner, org: 'contoso', project: 'MyProject', color: COLOR });
@@ -72,7 +83,8 @@ describe('runUnlink', () => {
     const unset: string[] = [];
     const runner = createFakeRunner({
       git: gitFor({ workitems: '200,201', primary: '200', unset }),
-      az: () => fail('should not be called — nothing left to hydrate'),
+      // Nothing left to hydrate, so no request at all.
+      ado: unexpected,
     });
 
     const result = await runUnlink({ ids: [], all: true, runner, org: 'contoso', project: 'MyProject', color: COLOR });
@@ -86,7 +98,7 @@ describe('runUnlink', () => {
     const sets: Record<string, string> = {};
     const runner = createFakeRunner({
       git: gitFor({ workitems: '200,201', primary: '200', sets }),
-      az: () => okJson([item(200, 'A')]),
+      ado: batchOf([item(200, 'A')]),
     });
 
     const result = await runUnlink({ ids: ['201', '999'], runner, org: 'contoso', project: 'MyProject', color: COLOR });
@@ -99,7 +111,7 @@ describe('runUnlink', () => {
     const sets: Record<string, string> = {};
     const runner = createFakeRunner({
       git: gitFor({ workitems: '200,201,202', primary: '200', sets }),
-      az: () => okJson([item(201, 'B'), item(202, 'C')]),
+      ado: batchOf([item(201, 'B'), item(202, 'C')]),
     });
 
     await runUnlink({ ids: ['200'], primary: '202', runner, org: 'contoso', project: 'MyProject', color: COLOR });
@@ -159,13 +171,7 @@ describe('runLink without a terminal', () => {
         if (args[0] === 'checkout') return ok('');
         return fail(`unexpected git call: ${args.join(' ')}`);
       },
-      az: (args) => {
-        const joined = args.join(' ');
-        // Both the seed fetch and the children lookup are `boards query`;
-        // only the children one filters on System.Parent.
-        if (joined.includes('System.Parent')) return okJson([]);
-        return okJson([item(200, 'A')]);
-      },
+      ado: (req) => (isChildrenQuery(req) ? adoOk({ workItems: [], columns: [] }) : batchOf([item(200, 'A')])(req)),
     });
   }
 
@@ -189,11 +195,10 @@ describe('runLink without a terminal', () => {
 });
 
 /* ------------------------------------------------------------------ *
- * Concurrency. Every `az` invocation starts a Python interpreter —
- * ~2-3s on Windows before any network — so independent calls running
- * one after another, rather than the requests themselves, dominate how
- * long `dova link` takes. These assert overlap, not just correctness:
- * re-serializing the calls would still return the right answer.
+ * Concurrency. Independent requests running one after another, rather
+ * than the requests themselves, dominate how long `dova link` takes.
+ * These assert overlap, not just correctness: re-serializing the calls
+ * would still return the right answer.
  * ------------------------------------------------------------------ */
 
 function linkGit() {
@@ -215,17 +220,17 @@ function child(id: number, type: string, parent: number): AzWorkItem {
   };
 }
 
-describe('runLink az call scheduling', () => {
+describe('runLink request scheduling', () => {
   it('starts the seed fetch and the children query together — neither needs the other', async () => {
     const events: string[] = [];
     const runner = createFakeRunner({
       git: linkGit(),
-      az: async (args) => {
-        const kind = args.join(' ').includes('System.Parent') ? 'children' : 'seeds';
+      ado: async (req) => {
+        const kind = isChildrenQuery(req) ? 'children' : 'seeds';
         events.push(`start:${kind}`);
         await new Promise((resolve) => setTimeout(resolve, 5));
         events.push(`end:${kind}`);
-        return okJson(kind === 'children' ? [] : [item(200, 'A')]);
+        return kind === 'children' ? adoOk({ workItems: [], columns: [] }) : batchOf([item(200, 'A')])(req);
       },
     });
 
@@ -240,17 +245,19 @@ describe('runLink az call scheduling', () => {
     const events: string[] = [];
     const runner = createFakeRunner({
       git: linkGit(),
-      az: async (args) => {
-        const joined = args.join(' ');
-        if (joined.includes('System.Parent')) return okJson([child(201, 'Bug', 200), child(202, 'Task', 200)]);
-        if (joined.includes('workitemtypes')) {
-          const type = joined.includes('Bug') ? 'Bug' : 'Task';
+      ado: async (req) => {
+        if (isChildrenQuery(req)) {
+          return adoOk({ workItems: [{ id: 201 }, { id: 202 }], columns: [{ referenceName: 'System.Id' }, { referenceName: 'System.Parent' }] });
+        }
+        const states = req.path.match(/\/_apis\/wit\/workitemtypes\/([^/]+)\/states$/);
+        if (req.method === 'GET' && states) {
+          const type = states[1]!;
           events.push(`start:${type}`);
           await new Promise((resolve) => setTimeout(resolve, 5));
           events.push(`end:${type}`);
-          return okJson({ value: [{ name: 'Active', category: 'InProgress' }] });
+          return adoOk({ value: [{ name: 'Active', category: 'InProgress' }] });
         }
-        return okJson([item(200, 'A')]);
+        return batchOf([item(200, 'A'), child(201, 'Bug', 200), child(202, 'Task', 200)])(req);
       },
     });
 

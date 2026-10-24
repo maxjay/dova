@@ -1,12 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import { gatherStatus } from '../src/commands/status.js';
-import { createFakeRunner, ok, okJson, fail } from './fixtures/fake-runner.js';
+import { createFakeRunner, ok, fail, adoOk } from './fixtures/fake-runner.js';
 
 /* ------------------------------------------------------------------ *
  * `dova status` answers four questions, but only two of them depend on
- * knowing whether a PR exists. Since every `az` invocation starts a
- * Python interpreter (~2-3s on Windows before any network), the number
- * of *sequential* calls is what this command's latency is made of.
+ * knowing whether a PR exists. The number of *sequential* round trips is
+ * what this command's latency is made of.
  * These assert the scheduling, not just the result — a re-serialized
  * version would still return the same status.
  * ------------------------------------------------------------------ */
@@ -21,17 +20,16 @@ function statusRunner(events: string[], opts: { pr?: boolean } = {}) {
       if (args[0] === 'config') return fail('', 1);
       return fail(`unexpected git call: ${args.join(' ')}`);
     },
-    az: async (args) => {
-      const joined = args.join(' ');
-      const kind = joined.includes('repos pr list')
+    ado: async (req) => {
+      const kind = req.path.endsWith('/pullrequests')
         ? 'pr'
-        : joined.includes('build') || joined.includes('pipelines')
-          ? // The branch query and the PR build-validation query are both
-            // `pipelines runs list`; only the ref tells them apart.
-            joined.includes('refs/pull')
+        : req.path.endsWith('/_apis/build/builds')
+          ? // The branch query and the PR build-validation query hit the
+            // same endpoint; only the ref tells them apart.
+            req.query.get('branchName')?.startsWith('refs/pull/')
             ? 'prruns'
             : 'runs'
-          : joined.includes('work-item')
+          : req.path.endsWith('/workitems') || req.path.endsWith('/workitemsbatch')
             ? 'workitems'
             : 'threads';
       events.push(`start:${kind}`);
@@ -39,8 +37,8 @@ function statusRunner(events: string[], opts: { pr?: boolean } = {}) {
       events.push(`end:${kind}`);
 
       if (kind === 'pr') {
-        return okJson(
-          withPr
+        return adoOk({
+          value: withPr
             ? [
                 {
                   pullRequestId: 612,
@@ -53,11 +51,10 @@ function statusRunner(events: string[], opts: { pr?: boolean } = {}) {
                   url: '',
                 },
               ]
-            : []
-        );
+            : [],
+        });
       }
-      if (kind === 'threads') return okJson({ value: [] });
-      return okJson([]);
+      return adoOk({ value: [] });
     },
   });
 }

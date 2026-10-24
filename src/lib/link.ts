@@ -1,14 +1,13 @@
 import { confirm as inquirerConfirm, checkbox as inquirerCheckbox } from '@inquirer/prompts';
 import type { ChalkInstance } from 'chalk';
 import type { Runner } from './exec.js';
-import { defaultRunner, runAzJson, tryGit, runGit } from './exec.js';
+import { defaultRunner, tryGit, runGit } from './exec.js';
 import { resolveContext } from './context.js';
 import { gitConfigGet, gitConfigSet } from './config.js';
-import { fetchWorkItemsByIds, fieldValue } from './work-items.js';
+import { fetchWorkItemsByIds, fieldValue, queryWorkItems } from './work-items.js';
 import { buildWiql } from './wiql.js';
 import { fetchWorkItemTypeStates, categoryOf } from './work-item-types.js';
 import { UserError, NotFoundError } from './errors.js';
-import { azText } from './az-file-arg.js';
 import { isInteractive, nonInteractiveError } from './interactive.js';
 import type { AzWorkItem } from '../types/azure-devops.js';
 
@@ -118,15 +117,10 @@ export async function runLink(opts: LinkOptions): Promise<LinkResult> {
   });
 
   // Both calls need only the seed ids and the already-resolved context,
-  // so neither has to wait for the other. Every `az` invocation pays for
-  // a Python interpreter start — around 2-3 seconds on Windows before
-  // any network happens — which makes serialized independent calls, not
-  // the requests themselves, the dominant cost of this command.
+  // so neither has to wait for the other.
   const [seedItems, children] = await Promise.all([
     fetchWorkItemsByIds(runner, ctx.orgUrl, seedIds),
-    runAzJson<AzWorkItem[] | null>(runner, [
-      'boards', 'query', '--wiql', azText(childrenWiql), '--organization', ctx.orgUrl,
-    ]).then((result) => result ?? []),
+    queryWorkItems(runner, ctx.orgUrl, childrenWiql),
   ]);
 
   const seedById = new Map(seedItems.map((i) => [i.id, i]));
@@ -136,7 +130,7 @@ export async function runLink(opts: LinkOptions): Promise<LinkResult> {
   const workItemById = new Map<number, AzWorkItem>(seedItems.map((i) => [i.id, i]));
   for (const child of children) workItemById.set(child.id, child);
 
-  // One `az` call per distinct child type, all at once, rather than
+  // One request per distinct child type, all at once, rather than
   // lazily inside the loop below where they'd go one at a time. No
   // children means no types, and so no calls at all — the common case.
   const uniqueChildTypes = [...new Set(children.map(itemType))];
@@ -325,7 +319,7 @@ export interface UnlinkResult {
  * `dova unlink` — the undo for a bad `dova link`. Same git-config-only
  * scope as `link`: removes id(s) from the branch you're already on,
  * picks a new primary if the old one got removed, and clears the config
- * entirely once nothing's left linked. No az calls beyond hydrating
+ * entirely once nothing's left linked. No requests beyond hydrating
  * titles for the remaining items, for a confirmation that reads the
  * same way `link`'s own output does.
  */

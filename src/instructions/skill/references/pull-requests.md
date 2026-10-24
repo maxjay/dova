@@ -135,7 +135,7 @@ Comment Threads (2 open, 1 resolved)
 That last comment is usually the whole request — act on it. Run
 `dova pr comment show` **only** on threads whose `…` line says there is
 more, and only when the last comment alone doesn't say what to change.
-Every run costs another `az` start.
+Every run is another round trip.
 
 Comments truncate at 600 characters; `dova pr view --full` prints them
 whole. A thread anchored to a line carries its file and line; a general

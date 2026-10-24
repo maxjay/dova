@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { fetchTimeline, fetchLogText, failedRecords, fetchRecentRuns, type AzTimelineRecord } from '../src/lib/pipelines.js';
-import { NotFoundError, ExternalCommandError } from '../src/lib/errors.js';
-import { createFakeRunner, ok, okJson } from './fixtures/fake-runner.js';
+import { NotFoundError } from '../src/lib/errors.js';
+import { createFakeRunner, adoOk, adoTextOk, adoError, unexpected, type FakeAdoRequest } from './fixtures/fake-runner.js';
 
 const ORG_URL = 'https://dev.azure.com/contoso';
 const PROJECT = 'MyProject';
@@ -41,44 +41,51 @@ describe('failedRecords', () => {
 
 describe('fetchTimeline', () => {
   it('returns the records array', async () => {
-    const runner = createFakeRunner({ az: () => okJson({ records: [record({ name: 'A' })] }) });
+    const runner = createFakeRunner({
+      ado: (req) =>
+        req.method === 'GET' && req.path === '/contoso/MyProject/_apis/build/builds/42/timeline'
+          ? adoOk({ records: [record({ name: 'A' })] })
+          : unexpected(req),
+    });
     const records = await fetchTimeline(runner, ORG_URL, PROJECT, 42);
     expect(records).toEqual([record({ name: 'A' })]);
   });
 
   it('returns [] when the response has no records', async () => {
-    const runner = createFakeRunner({ az: () => okJson(null) });
+    const runner = createFakeRunner({ ado: () => adoOk(null) });
     expect(await fetchTimeline(runner, ORG_URL, PROJECT, 42)).toEqual([]);
   });
 
   it('throws NotFoundError for a run that does not exist', async () => {
-    // Mirrors what defaultRunner.az actually does on a nonzero az exit
-    // (interpretAzFailure, in exec.ts) — the fake runner here doesn't
-    // replicate that exit-code-to-throw translation itself, so the test
-    // throws directly with the same kind of message az would produce.
-    const runner = createFakeRunner({
-      az: () => {
-        throw new ExternalCommandError('az exited with code 1:\nTF401180: Build 999 does not exist.');
-      },
-    });
+    const runner = createFakeRunner({ ado: () => adoError(404, 'TF401180: Build 999 does not exist.') });
     await expect(fetchTimeline(runner, ORG_URL, PROJECT, 999)).rejects.toBeInstanceOf(NotFoundError);
   });
 });
 
 describe('fetchLogText', () => {
   it('returns the raw log text', async () => {
-    const runner = createFakeRunner({ az: () => ok('line one\nline two\nBuild FAILED') });
+    let accept: string | undefined;
+    const runner = createFakeRunner({
+      ado: (req) => {
+        if (req.path !== '/contoso/MyProject/_apis/build/builds/42/logs/7') return unexpected(req);
+        accept = req.accept;
+        return adoTextOk('line one\nline two\nBuild FAILED');
+      },
+    });
     const text = await fetchLogText(runner, ORG_URL, PROJECT, 42, 7);
     expect(text).toBe('line one\nline two\nBuild FAILED');
+    // Asked for as text: with a JSON Accept header the logs endpoint answers in JSON lines.
+    expect(accept).toBe('text');
   });
 });
 
 describe('fetchRecentRuns branch filtering', () => {
-  function runsRunner(runs: unknown[], seen: string[][] = []) {
+  function runsRunner(runs: unknown[], seen: FakeAdoRequest[] = []) {
     return createFakeRunner({
-      az: (args) => {
-        seen.push(args);
-        return okJson(runs);
+      ado: (req) => {
+        if (req.method !== 'GET' || req.path !== '/contoso/MyProject/_apis/build/builds') return unexpected(req);
+        seen.push(req);
+        return adoOk({ value: runs });
       },
     });
   }
@@ -111,7 +118,7 @@ describe('fetchRecentRuns branch filtering', () => {
   });
 
   it('over-fetches so filtering still returns the number asked for', async () => {
-    const seen: string[][] = [];
+    const seen: FakeAdoRequest[] = [];
     const many = Array.from({ length: 30 }, (_, i) => ({
       id: i, buildNumber: String(i), status: 'completed', result: 'succeeded',
       sourceBranch: i % 2 === 0 ? 'refs/heads/feature/x' : 'refs/heads/main', url: '',
@@ -122,7 +129,8 @@ describe('fetchRecentRuns branch filtering', () => {
 
     expect(runs).toHaveLength(3);
     expect(runs.every((r) => r.sourceBranch === 'refs/heads/feature/x')).toBe(true);
-    // Asked az for more than 3, or the filter would leave fewer.
-    expect(Number(seen[0]![seen[0]!.indexOf('--top') + 1])).toBeGreaterThan(3);
+    // Asked for more than 3, or the filter would leave fewer.
+    expect(Number(seen[0]!.query.get('$top'))).toBeGreaterThan(3);
+    expect(seen[0]!.query.get('branchName')).toBe('refs/heads/feature/x');
   });
 });

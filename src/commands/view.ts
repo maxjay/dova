@@ -97,14 +97,11 @@ export function registerViewCommand(program: Command): void {
       if (!(err instanceof NotFoundError)) throw err;
     }
 
-    // Not a work item — try it as a PR id instead. A PR lookup failure
-    // here could be "doesn't exist" or something else entirely (az isn't
-    // precise enough server-side to tell apart reliably), but since we
-    // already know it isn't a work item, any failure means dova has
-    // nothing left to try.
+    // Not a work item — try it as a PR id instead.
     try {
       await showPr(runner, ctx.orgUrl, bareId, ctx, opts, color);
-    } catch {
+    } catch (err) {
+      if (!(err instanceof NotFoundError)) throw err;
       throw new NotFoundError(`#${bareId} was not found as a work item or a pull request.`);
     }
   });

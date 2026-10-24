@@ -1,11 +1,14 @@
 import { describe, it, expect } from 'vitest';
 import { resolveBase, resolveDiffableRef, gatherSummary } from '../src/commands/summarize.js';
 import { UserError, NotFoundError } from '../src/lib/errors.js';
-import { createFakeRunner, ok, okJson, fail } from './fixtures/fake-runner.js';
+import { createFakeRunner, ok, fail, adoOk, unexpected, type FakeAdoRequest } from './fixtures/fake-runner.js';
 import type { AzWorkItem, AzPullRequest, AzGitRepository } from '../src/types/azure-devops.js';
 import type { ResolvedContext } from '../src/lib/context.js';
 
 const CTX: ResolvedContext = { org: 'contoso', orgUrl: 'https://dev.azure.com/contoso', project: 'MyProject', repo: 'my-repo', source: 'git-remote' };
+const isPrList = (req: FakeAdoRequest): boolean =>
+  req.method === 'GET' && req.path === '/contoso/MyProject/_apis/git/repositories/my-repo/pullrequests';
+
 const CTX_NO_REPO: ResolvedContext = { org: 'contoso', orgUrl: 'https://dev.azure.com/contoso', project: 'MyProject', source: 'az-devops-defaults' };
 
 function pr(targetRefName: string): AzPullRequest {
@@ -41,32 +44,34 @@ function gitFor(opts: { verify?: (ref: string) => boolean; symbolicRef?: string 
 
 describe('resolveBase', () => {
   it('--base always wins, no calls made', async () => {
-    const runner = createFakeRunner({ az: () => fail('should not be called'), git: () => fail('should not be called') });
+    const runner = createFakeRunner({ ado: unexpected, git: () => fail('should not be called') });
     const result = await resolveBase(runner, CTX, 'fix/200', 'develop', undefined);
     expect(result).toEqual({ ref: 'develop', source: 'flag' });
   });
 
   it('uses the active PR target when one exists', async () => {
-    const runner = createFakeRunner({ az: () => okJson([pr('refs/heads/release/1.0')]) });
+    const runner = createFakeRunner({ ado: (req) => (isPrList(req) ? adoOk({ value: [pr('refs/heads/release/1.0')] }) : unexpected(req)) });
     const result = await resolveBase(runner, CTX, 'fix/200', undefined, undefined);
     expect(result).toEqual({ ref: 'release/1.0', source: 'pr-target' });
   });
 
   it('falls back to origin/HEAD when no PR exists', async () => {
     const runner = createFakeRunner({
-      az: () => okJson([]),
+      ado: (req) => (isPrList(req) ? adoOk({ value: [] }) : unexpected(req)),
       git: (args) => (args[0] === 'symbolic-ref' ? ok('origin/main') : fail()),
     });
     const result = await resolveBase(runner, CTX, 'fix/200', undefined, undefined);
     expect(result).toEqual({ ref: 'main', source: 'origin-head' });
   });
 
-  it('falls back to `az repos show`s defaultBranch when origin/HEAD is unset', async () => {
+  it("falls back to the repository's defaultBranch when origin/HEAD is unset", async () => {
     const runner = createFakeRunner({
-      az: (args) => {
-        if (args[0] === 'repos' && args[1] === 'pr') return okJson([]);
-        if (args[0] === 'repos' && args[1] === 'show') return okJson({ id: 'r1', name: 'my-repo', defaultBranch: 'refs/heads/main' } satisfies AzGitRepository);
-        return fail(`unexpected az call: ${args.join(' ')}`);
+      ado: (req) => {
+        if (isPrList(req)) return adoOk({ value: [] });
+        if (req.method === 'GET' && req.path === '/contoso/MyProject/_apis/git/repositories/my-repo') {
+          return adoOk({ id: 'r1', name: 'my-repo', defaultBranch: 'refs/heads/main' } satisfies AzGitRepository);
+        }
+        return unexpected(req);
       },
       git: () => fail('', 1),
     });
@@ -76,7 +81,8 @@ describe('resolveBase', () => {
 
   it('skips the PR lookup entirely when there is no repo in context', async () => {
     const runner = createFakeRunner({
-      az: () => fail('should not be called — no repo to look up a PR for'),
+      // No repo to look up a PR for, so no request at all.
+      ado: unexpected,
       git: (args) => (args[0] === 'symbolic-ref' ? ok('origin/main') : fail()),
     });
     const result = await resolveBase(runner, CTX_NO_REPO, 'fix/200', undefined, undefined);
@@ -84,7 +90,7 @@ describe('resolveBase', () => {
   });
 
   it('throws UserError when nothing resolves', async () => {
-    const runner = createFakeRunner({ az: () => okJson([]), git: () => fail('', 1) });
+    const runner = createFakeRunner({ ado: () => adoOk({ value: [] }), git: () => fail('', 1) });
     await expect(resolveBase(runner, CTX, 'fix/200', undefined, undefined)).rejects.toBeInstanceOf(UserError);
   });
 });
@@ -128,7 +134,10 @@ describe('gatherSummary', () => {
         if (args[0] === 'diff') return ok('full diff text');
         return fail(`unexpected git call: ${args.join(' ')}`);
       },
-      az: (args) => (args.join(' ').startsWith('boards query') ? okJson([item(200, 'Fix the bug', '<p>Root cause: null check</p>')]) : fail()),
+      ado: (req) =>
+        req.method === 'POST' && req.path === '/contoso/_apis/wit/workitemsbatch'
+          ? adoOk({ value: [item(200, 'Fix the bug', '<p>Root cause: null check</p>')] })
+          : unexpected(req),
     });
   }
 
@@ -166,15 +175,15 @@ describe('gatherSummary', () => {
     expect(result.fullLog).toBeUndefined();
   });
 
-  it('works with no linked work items — no az call made', async () => {
-    let azCalled = false;
+  it('works with no linked work items — no request made', async () => {
+    let requested = false;
     const runner = fullRunner({});
-    const runnerNoAz = { ...runner, az: async (args: string[]) => { azCalled = true; return runner.az(args); } };
+    const counting = { ...runner, ado: async (req: Parameters<typeof runner.ado>[0]) => { requested = true; return runner.ado(req); } };
 
-    const result = await gatherSummary(runnerNoAz, 'fix/200', { org: 'contoso', project: 'MyProject', base: 'develop' });
+    const result = await gatherSummary(counting, 'fix/200', { org: 'contoso', project: 'MyProject', base: 'develop' });
 
     expect(result.workItems).toEqual([]);
-    expect(azCalled).toBe(false);
+    expect(requested).toBe(false);
   });
 
   it('--full also fetches the full log and full diff', async () => {
@@ -205,7 +214,8 @@ describe('gatherSummary', () => {
         if (args[0] === 'diff' && args.includes('--stat')) return ok(' a.ts | 1 +');
         return fail(`unexpected git call: ${args.join(' ')}`);
       },
-      az: () => fail('should not be called — no linked work items'),
+      // No linked work items, so no request at all.
+      ado: unexpected,
     });
 
     const result = await gatherSummary(runner, 'feature/other', { org: 'contoso', project: 'MyProject', base: 'develop' });
@@ -240,7 +250,7 @@ describe('gatherSummary uncommitted changes', () => {
         if (args[0] === 'diff') return ok('committed patch');
         return fail(`unexpected git call: ${args.join(' ')}`);
       },
-      az: () => okJson([]),
+      ado: () => adoOk({ value: [] }),
     });
   }
 
@@ -309,7 +319,7 @@ describe('gatherSummary --files', () => {
         if (args[0] === 'diff') return ok('@@ -1,3 +1,4 @@\n+const guard = true;');
         return fail(`unexpected git call: ${args.join(' ')}`);
       },
-      az: () => okJson([]),
+      ado: () => adoOk({ value: [] }),
     });
   }
 

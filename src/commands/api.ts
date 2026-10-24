@@ -1,5 +1,8 @@
+import fs from 'node:fs/promises';
 import type { Command } from 'commander';
-import { defaultRunner, runAzRestJson, type AzRestOptions } from '../lib/exec.js';
+import { defaultRunner } from '../lib/exec.js';
+import { adoText, type HttpMethod } from '../lib/ado.js';
+import { readTextArg } from '../lib/stdin.js';
 import { resolveContext } from '../lib/context.js';
 import { addContextOptions, addJqOption, addNoColorOption } from '../lib/command-helpers.js';
 import type { JqInput } from 'jq-wasm';
@@ -13,17 +16,32 @@ export interface ApiFlags {
   repo?: string;
   method: string;
   body?: string;
+  contentType?: string;
   jq?: string;
 }
 
-const REST_METHODS: AzRestOptions['method'][] = ['get', 'post', 'patch', 'put', 'delete'];
+const REST_METHODS: HttpMethod[] = ['GET', 'POST', 'PATCH', 'PUT', 'DELETE'];
 
-function validateMethod(raw: string): AzRestOptions['method'] {
-  const lower = raw.toLowerCase();
-  if ((REST_METHODS as string[]).includes(lower)) {
-    return lower as AzRestOptions['method'];
+function validateMethod(raw: string): HttpMethod {
+  const upper = raw.toUpperCase();
+  if ((REST_METHODS as string[]).includes(upper)) {
+    return upper as HttpMethod;
   }
   throw new UserError(`Unknown HTTP method "${raw}".`, [`Supported: ${REST_METHODS.join(', ')}`]);
+}
+
+/** `--body`: inline text, `@path` to read a file, or `-` for stdin. */
+async function readBody(body: string | undefined): Promise<string | undefined> {
+  if (body === undefined) return undefined;
+  if (body === '-') return readTextArg('-', { what: 'request body' });
+  if (body.startsWith('@')) {
+    try {
+      return await fs.readFile(body.slice(1), 'utf8');
+    } catch {
+      throw new UserError(`Could not read the body file "${body.slice(1)}".`);
+    }
+  }
+  return body;
 }
 
 const DEFAULT_API_VERSION = '7.1';
@@ -62,7 +80,8 @@ export function registerApiCommand(program: Command): void {
   addContextOptions(cmd);
   cmd
     .option('-X, --method <verb>', 'HTTP method', 'GET')
-    .option('-f, --body <json>', 'request body: inline JSON, or @path/to/file.json');
+    .option('-f, --body <json>', "request body: inline JSON, @path/to/file.json, or '-' for stdin")
+    .option('--content-type <type>', 'request body content type (default: application/json; work item edits need application/json-patch+json)');
   addJqOption(cmd);
   addNoColorOption(cmd);
 
@@ -76,15 +95,23 @@ export function registerApiCommand(program: Command): void {
     });
 
     const url = buildApiUrl(path, ctx.orgUrl, ctx.project);
-    const data = await runAzRestJson<unknown>(runner, {
+    const text = await adoText(runner, {
       method: validateMethod(opts.method),
-      uri: url,
-      // Passed straight through, not via `body`/toAsciiSafeJson: this is
-      // the user's own raw text, which may already use az's own
-      // @path/to/file.json syntax that must not be re-encoded.
-      rawBody: opts.body,
+      url,
+      rawBody: await readBody(opts.body),
+      contentType: opts.contentType,
+      accept: 'json',
     });
 
+    let data: unknown;
+    try {
+      data = text.trim() ? JSON.parse(text) : null;
+    } catch {
+      // Not every endpoint answers in JSON (build logs); show it as it came.
+      if (opts.jq) throw new UserError('--jq needs a JSON response, and this one is not JSON.');
+      process.stdout.write(text.endsWith('\n') ? text : `${text}\n`);
+      return;
+    }
     if (opts.jq) {
       process.stdout.write(`${await applyJq(data as JqInput, opts.jq)}\n`);
     } else {
