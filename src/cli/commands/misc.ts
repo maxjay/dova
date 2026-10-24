@@ -194,3 +194,9 @@ export const rpcCommand = command<never, never, undefined>({
   description: 'Serve every command as JSON-RPC over stdin/stdout, for other tools (method list: rpc.methods)',
   run: async () => void (await (await import('../rpc.js')).serveRpc(commands)),
 });
+
+export const mcpCommand = command<never, never, undefined>({
+  name: 'mcp',
+  description: 'Serve dova as an MCP server over stdio, for AI agents',
+  run: async () => void (await (await import('../mcp.js')).serveMcp(commands)),
+});

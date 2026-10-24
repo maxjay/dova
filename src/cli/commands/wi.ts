@@ -126,6 +126,7 @@ export async function resolvePlace(app: App, flags: PlaceFlags & GlobalFlags): P
 
 interface CreateFlags extends PlaceFlags {
   type?: string;
+  body?: string;
   parent?: string;
   assignee?: string;
   at?: string;
@@ -133,6 +134,7 @@ interface CreateFlags extends PlaceFlags {
 }
 
 const createOptions: Array<[string, string]> = [
+  ['--body <text>', "description ('-' reads stdin)"],
   ['--parent <id>', 'make it a child of this work item'],
   ['--assignee <user>', 'assign it ("me" for yourself)'],
   ['--at <file:line>', 'add a "Found in:" link to this line at HEAD'],
@@ -150,7 +152,7 @@ export async function createWorkItem(app: App, titleArg: string | undefined, typ
   const place = await resolvePlace(app, flags);
   const scope = await app.scope();
   const ado = app.ado(scope.orgUrl);
-  let description: string | undefined;
+  let description = flags.body === undefined ? undefined : await app.stdin.text(flags.body, 'body');
   if (flags.at) {
     const s = needRepo(scope, 'wi create --at');
     const [, file, line] = flags.at.match(/^(.*?)(?::(\d+))?$/)!;
@@ -158,7 +160,7 @@ export async function createWorkItem(app: App, titleArg: string | undefined, typ
     url.searchParams.set('path', `/${file!.replace(/^\//, '')}`);
     url.searchParams.set('version', `GC${await app.git.run(['rev-parse', 'HEAD'])}`);
     if (line) for (const [k, v] of [['line', line], ['lineEnd', String(Number(line) + 1)], ['lineStartColumn', '1'], ['lineEndColumn', '1']]) url.searchParams.set(k!, v!);
-    description = `Found in: ${url}`;
+    description = [description, `Found in: ${url}`].filter(Boolean).join('\n\n');
   }
   const parentId = flags.parent ? parseId(flags.parent) ?? undefined : undefined;
   if (flags.parent && !parentId) throw new UserError(`--parent "${flags.parent}" isn't a work item id.`);

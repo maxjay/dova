@@ -35,12 +35,16 @@ Needs Node 20+, git, and the [Azure CLI](https://learn.microsoft.com/cli/azure/i
 | `dova pr comment\|thread\|reply\|resolve` | review threads |
 | `dova pipeline list\|log\|watch` | runs for the branch, the failed task's log, follow a run |
 | `dova api <path>` | any REST call, signed in |
-| `dova rpc` | all of the above as JSON-RPC over stdio, for other tools |
+| `dova mcp` · `dova rpc` | an MCP server for AI agents · every command as JSON-RPC, for other tools |
 | `dova auth status` · `dova daemon status\|stop` | who you're signed in as · the background process |
 | `dova instructions [--repo]` | teach coding agents (Copilot, Windsurf/Devin, Cursor, Codex) to use dova |
 | `dova completion <shell>` | bash, zsh, fish, powershell |
 
 Every command takes `--json [fields]` and `--jq <expr>`, and `--org`/`--project`/`--repo` (or `$DOVA_ORG`/`$DOVA_PROJECT`) outside an Azure Repos clone. Free text can be piped in with `-`. Exit codes: `1` bad input, `2` not found, `3` not signed in or no access, `4` a request failed.
+
+## For AI agents: `dova mcp`
+
+`dova mcp` is an MCP server over stdio. Register it with your agent as the command `dova mcp`. It exposes ten tools shaped around what an agent does rather than one per command — `status`, `view`, `summarize`, `search_work_items`, `create_work_item`, `link_work_items`, `create_pull_request`, `review_thread` (read, reply, resolve or start a thread in one tool), `pipeline_log`, `azure_devops_api` — with the workflow rules in their descriptions. Text goes in as JSON, so none of the shell-quoting rules apply. Every tool takes an optional `cwd` for the repo to act in.
 
 ## From other tools: `dova rpc`
 

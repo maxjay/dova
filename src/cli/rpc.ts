@@ -35,7 +35,7 @@ export interface Method {
 const camel = (s: string) => s.replace(/-(\w)/g, (_, c: string) => c.toUpperCase());
 
 /** Commands that make no sense as a request (run forever, need a terminal, or are this). */
-const EXCLUDED = new Set(['rpc', 'daemon.run', 'completion', '__complete']);
+const EXCLUDED = new Set(['rpc', 'mcp', 'daemon.run', 'completion', '__complete']);
 
 export function methods(commands: Group['commands'], prefix = ''): Method[] {
   return commands.flatMap((node): Method[] => {
@@ -64,14 +64,14 @@ const paramStdin: Stdin = {
   },
 };
 
-interface Request {
+export interface Request {
   jsonrpc?: string;
   id?: string | number | null;
   method?: string;
   params?: Record<string, unknown>;
 }
 
-export interface ServeRpcOptions {
+export interface ServeOptions {
   input?: NodeJS.ReadableStream;
   output?: Writable;
   env?: NodeJS.ProcessEnv;
@@ -79,36 +79,50 @@ export interface ServeRpcOptions {
   app?: (params: Record<string, unknown>) => App;
 }
 
-/** Answers requests until stdin closes. */
-export async function serveRpc(commands: Group['commands'], opts: ServeRpcOptions = {}): Promise<void> {
+export type Invoke = (method: string, params?: Record<string, unknown>) => Promise<unknown>;
+
+/**
+ * Runs a command by method name with params, as `dova rpc` and `dova mcp`
+ * both do: one App per call, all sharing one daemon connection.
+ */
+export function invoker(commands: Group['commands'], opts: ServeOptions = {}): Invoke {
   const env = opts.env ?? process.env;
-  const output = opts.output ?? process.stdout;
-  // The client hung up: nobody is left to answer.
-  if (!opts.output) process.stdout.on('error', (err: NodeJS.ErrnoException) => err.code === 'EPIPE' && process.exit(0));
   const table = new Map(methods(commands).map((m) => [m.name, m]));
   let transport: Transport | undefined;
   const appFor = (p: Record<string, unknown>): App =>
-    opts.app ? { ...opts.app(p), stdin: paramStdin } : createApp({
-      env,
-      interactive: false,
-      cwd: typeof p.cwd === 'string' ? p.cwd : undefined,
-      flags: { org: p.org as string, project: p.project as string, repo: p.repo as string },
-      transport: (transport ??= createTransport(env, false)),
-      stdin: paramStdin,
-    });
+    opts.app
+      ? { ...opts.app(p), stdin: paramStdin }
+      : createApp({
+          env,
+          interactive: false,
+          cwd: typeof p.cwd === 'string' ? p.cwd : undefined,
+          flags: { org: p.org as string, project: p.project as string, repo: p.repo as string },
+          transport: (transport ??= createTransport(env, false)),
+          stdin: paramStdin,
+        });
   // Notes a command prints (pipeline.watch's progress) go to stderr, never into the protocol.
   const out = new Out(new Chalk({ level: 0 }), { write: () => true }, process.stderr);
-  const reply = (msg: object) => output.write(`${JSON.stringify({ jsonrpc: '2.0', ...msg })}\n`);
-
-  const handle = async (req: Request) => {
-    const method = req.method === undefined ? undefined : table.get(req.method);
-    if (req.method === 'rpc.methods') return [...table.values()].map(({ spec: _spec, ...m }) => m);
-    if (!method) throw Object.assign(new Error(`Unknown method "${req.method}".`), { code: -32601 });
-    const params = req.params ?? {};
+  return async (name, params = {}) => {
+    if (name === 'rpc.methods') return [...table.values()].map(({ spec: _spec, ...m }) => m);
+    const method = table.get(name);
+    if (!method) throw Object.assign(new Error(`Unknown method "${name}".`), { code: -32601 });
     const args = Object.fromEntries(method.args.map((a) => [a.replace('…', ''), params[a.replace('…', '')]]));
     return (await method.spec.run(appFor(params), args, { ...params, color: false, input: false }, out)) ?? null;
   };
+}
 
+/** dova's error kind, for a client to branch on: exitCode 2 not found, 3 not signed in or no access, … */
+export function errorData(err: unknown) {
+  const e = err as Error;
+  return { name: e.name, exitCode: e instanceof DovaError ? e.exitCode : ExitCode.Unexpected, hints: e instanceof DovaError ? e.hints : [] };
+}
+
+/** A newline-delimited JSON-RPC 2.0 server on stdin/stdout, answering until stdin closes. Notifications get no reply. */
+export async function serveLines(handle: (req: Request) => Promise<unknown>, opts: ServeOptions = {}): Promise<void> {
+  const output = opts.output ?? process.stdout;
+  // The client hung up: nobody is left to answer.
+  if (!opts.output) process.stdout.on('error', (err: NodeJS.ErrnoException) => err.code === 'EPIPE' && process.exit(0));
+  const reply = (msg: object) => output.write(`${JSON.stringify({ jsonrpc: '2.0', ...msg })}\n`);
   const pending = new Set<Promise<void>>();
   for await (const line of readline.createInterface({ input: opts.input ?? process.stdin, crlfDelay: Infinity })) {
     if (!line.trim()) continue;
@@ -121,22 +135,16 @@ export async function serveRpc(commands: Group['commands'], opts: ServeRpcOption
     }
     const task = handle(req).then(
       (result) => void (req.id !== undefined && reply({ id: req.id, result })),
-      (err: unknown) => {
-        const e = err as Error & { code?: number };
-        if (req.id === undefined) return;
-        reply({
-          id: req.id,
-          error: {
-            code: typeof e.code === 'number' ? e.code : -32000,
-            message: e.message,
-            // dova's own error kinds: exitCode says which (2 not found, 3 not signed in, …).
-            data: { name: e.name, exitCode: e instanceof DovaError ? e.exitCode : ExitCode.Unexpected, hints: e instanceof DovaError ? e.hints : [] },
-          },
-        });
-      }
+      (err: Error & { code?: unknown }) =>
+        void (req.id !== undefined && reply({ id: req.id, error: { code: typeof err.code === 'number' ? err.code : -32000, message: err.message, data: errorData(err) } }))
     );
     pending.add(task);
     void task.finally(() => pending.delete(task));
   }
   await Promise.all(pending);
+}
+
+export function serveRpc(commands: Group['commands'], opts: ServeOptions = {}): Promise<void> {
+  const invoke = invoker(commands, opts);
+  return serveLines((req) => invoke(req.method ?? '', req.params), opts);
 }
