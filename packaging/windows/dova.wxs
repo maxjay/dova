@@ -20,7 +20,8 @@
     </StandardDirectory>
 
     <Feature Id="Main" Title="dova">
-      <Component Id="Dova" Directory="INSTALLFOLDER">
+      <!-- A fixed Guid: WiX only generates one for a component that is a single file or a single registry value. -->
+      <Component Id="Dova" Directory="INSTALLFOLDER" Guid="ceff127f-219c-4a6f-bd00-116dacc02952">
         <File Id="DovaExe" Source="$(var.Binary)" Name="dova.exe" />
         <!-- A per-user component is tracked by a registry value, not by its file. -->
         <RegistryValue Root="HKCU" Key="Software\dova" Name="InstallFolder" Type="string" Value="[INSTALLFOLDER]" KeyPath="yes" />

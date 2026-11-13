@@ -1,29 +1,35 @@
-# Every push: test on Linux and Windows, and build both installers.
-# A tag like v0.3.0: also publish them as a GitHub release.
+# Every pull request, and every push to main: test on Linux and Windows,
+# and build both installers. A tag like v0.3.0: also publish them as a
+# GitHub release.
 name: build
 
 on:
   push:
-    branches: ["**"]
+    branches: [main]
     tags: ["v*"]
   pull_request:
 
 permissions:
   contents: read
 
+# A newer push to the same branch or pull request replaces the run in progress.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   linux:
     # The oldest Ubuntu on offer, so the .deb runs on that and everything newer (WSL included).
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: rustup toolchain install stable --profile minimal --component rustfmt,clippy && rustup default stable
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
       - run: cargo install cargo-deb --locked
       - run: cargo deb --locked
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: deb
           path: target/debian/*.deb
@@ -32,12 +38,12 @@ jobs:
   windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: rustup toolchain install stable --profile minimal; rustup default stable
       - run: cargo test --locked
       - run: dotnet tool install --global wix --version 5.0.2
       - run: ./packaging/build-msi.ps1
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: msi
           path: target/*.msi
@@ -50,7 +56,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           merge-multiple: true
       - run: gh release create "$GITHUB_REF_NAME" *.deb *.msi --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
