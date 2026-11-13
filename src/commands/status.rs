@@ -182,4 +182,39 @@ mod tests {
         assert_eq!((ids("workItems"), ids("runs"), ids("threads")), (vec![30], vec![2, 1], vec![2, 1]));
         assert_eq!(cli(bed.app(), &["status", "--web"]).stdout, "");
     }
+
+    /// The README shows this screen. When the rendering changes, this fails and prints the new one to paste there.
+    #[test]
+    fn the_readme_shows_what_status_really_prints() {
+        let branch = "refs/heads/fix/4821-login";
+        let bed = Bed::new(Box::new(move |r: &Recorded| {
+            let run = |id: u64, result: &str| {
+                json!({ "id": id, "status": "completed", "result": result, "definition": { "name": "CI" }, "queueTime": "2026-08-22T10:02:11Z" })
+            };
+            if r.path.ends_with("/pullrequests") {
+                let jane = json!({ "displayName": "Jane Doe" });
+                ok(json!({ "value": [rest_pr(612, json!({ "title": "Fix login redirect", "createdBy": jane, "sourceRefName": branch }))] }))
+            } else if r.path.ends_with("/builds") {
+                let validation = r.query("branchName").unwrap().contains("pull");
+                ok(json!({ "value": [if validation { run(4102, "failed") } else { run(4098, "succeeded") }] }))
+            } else if r.path.ends_with("/workitems") {
+                ok(json!({ "value": [{ "id": "4821" }, { "id": "5219" }] }))
+            } else if r.path.ends_with("/threads") {
+                let said = |id: u64, who: &str, text: &str| json!({ "id": id, "content": text, "author": { "displayName": who } });
+                let on_line_42 = json!({ "filePath": "/src/auth.ts", "rightFileStart": { "line": 42 } });
+                let review = [said(1, "SonarQube", "Reduce the complexity of this function."), said(2, "Jane Doe", "Can you also handle the null case here?")];
+                ok(json!({ "value": [
+                    { "id": 7, "status": "fixed", "comments": [said(1, "Sam Lee", "Nice catch.")] },
+                    { "id": 4, "status": "active", "threadContext": on_line_42, "comments": review },
+                ] }))
+            } else {
+                let bug = |id: u64, title: &str, state: &str| wi(id, json!({ "System.Title": title, "System.WorkItemType": "Bug", "System.State": state }));
+                batch(vec![bug(4821, "Login redirects to the wrong page", "Active"), bug(5219, "Null check missing on empty session token", "New")])(r)
+            }
+        }))
+        .git(GitOpts::default().branch("fix/4821-login"));
+        let screen = cli(bed.app(), &["status"]).stdout;
+        let readme = include_str!("../../README.md").replace("\r\n", "\n");
+        assert!(readme.contains(screen.trim_end()), "README.md is out of date. `dova status` prints:\n\n{screen}");
+    }
 }
