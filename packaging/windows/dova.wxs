@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  dova for Windows: dova.exe in %LOCALAPPDATA%\Programs\dova, on your PATH.
+  Per-user, so installing takes no administrator. A newer version replaces
+  an older one in place. Built by packaging/build-msi.ps1 (WiX 5).
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="dova" Manufacturer="maxjay" Version="$(var.Version)" Scope="perUser"
+           UpgradeCode="16d6375e-fdf5-4163-99bc-3cceb45b70f8" Compressed="yes">
+    <SummaryInformation Description="Azure DevOps from the terminal" />
+    <MajorUpgrade DowngradeErrorMessage="A newer version of dova is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/maxjay/dova" />
+    <Property Id="ARPNOMODIFY" Value="1" />
+
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="ProgramsFolder" Name="Programs">
+        <Directory Id="INSTALLFOLDER" Name="dova" />
+      </Directory>
+    </StandardDirectory>
+
+    <Feature Id="Main" Title="dova">
+      <Component Id="Dova" Directory="INSTALLFOLDER">
+        <File Id="DovaExe" Source="$(var.Binary)" Name="dova.exe" />
+        <!-- A per-user component is tracked by a registry value, not by its file. -->
+        <RegistryValue Root="HKCU" Key="Software\dova" Name="InstallFolder" Type="string" Value="[INSTALLFOLDER]" KeyPath="yes" />
+        <Environment Id="Path" Name="PATH" Value="[INSTALLFOLDER]" Part="last" Action="set" System="no" Permanent="no" />
+        <RemoveFolder Id="RemoveInstallFolder" Directory="INSTALLFOLDER" On="uninstall" />
+        <RemoveFolder Id="RemoveProgramsFolder" Directory="ProgramsFolder" On="uninstall" />
+      </Component>
+    </Feature>
+
+    <!-- A running daemon holds dova.exe open: stop it before the file is replaced or removed. -->
+    <CustomAction Id="StopDaemon" Directory="INSTALLFOLDER" ExeCommand="&quot;[INSTALLFOLDER]dova.exe&quot; daemon stop"
+                  Execute="immediate" Return="ignore" />
+    <InstallExecuteSequence>
+      <Custom Action="StopDaemon" Before="InstallValidate" Condition="Installed OR WIX_UPGRADE_DETECTED" />
+    </InstallExecuteSequence>
+  </Package>
+</Wix>
