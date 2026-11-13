@@ -157,6 +157,12 @@ impl GitOpts {
         GitOpts::default().config("branch.feature/x.dova-workitems", "11,12")
     }
 
+    /// On this branch instead of `feature/x`.
+    pub fn branch(mut self, name: &str) -> GitOpts {
+        self.branch = Some(name.to_string());
+        self
+    }
+
     pub fn config(mut self, key: &str, value: &str) -> GitOpts {
         self.config.insert(key.to_string(), value.to_string());
         self
