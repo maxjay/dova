@@ -1,0 +1,58 @@
+[package]
+name = "dova"
+version = "0.3.0"
+edition = "2021"
+rust-version = "1.80"
+description = "Azure DevOps from the terminal: work items, pull requests and pipelines for the repo you are in."
+license = "MIT"
+repository = "https://github.com/maxjay/dova"
+readme = "README.md"
+
+[dependencies]
+base64 = "0.22"
+clap = { version = "4", features = ["derive"] }
+console = "0.15"
+dialoguer = { version = "0.11", default-features = false }
+interprocess = "2"
+jaq-core = "2"
+jaq-json = { version = "1", features = ["serde_json"] }
+jaq-std = "2"
+open = "5"
+percent-encoding = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier", "gzip"] }
+url = "2"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Threading"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+# `cargo deb` builds target/debian/dova_<version>-1_amd64.deb (cargo install cargo-deb).
+[package.metadata.deb]
+maintainer = "maxjay <maxjay@users.noreply.github.com>"
+copyright = "2026, maxjay"
+section = "utils"
+priority = "optional"
+depends = "$auto, git"
+recommends = "azure-cli"
+extended-description = "Work items, pull requests and pipeline runs for the repo you are in, the way gh does it for GitHub. Organization, project and repo come from the git remote; you sign in with az login."
+assets = [
+    ["target/release/dova", "usr/bin/", "755"],
+    ["README.md", "usr/share/doc/dova/", "644"],
+    ["completions/dova.bash", "usr/share/bash-completion/completions/dova", "644"],
+    ["completions/_dova", "usr/share/zsh/vendor-completions/", "644"],
+    ["completions/dova.fish", "usr/share/fish/vendor_completions.d/", "644"],
+]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
