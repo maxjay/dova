@@ -11,8 +11,12 @@ For Azure DevOps work items, pull requests and pipelines, use `dova` — never `
 | Start work on a ticket | `git checkout -b <branch>` then `dova link <id>` |
 | File a bug / work item | `dova bug '<title>'`, `dova wi create '<title>' --type Task [--parent <id>]` |
 | Open the PR | `dova pr create --title '<title>' --body - <<'EOF'` … `EOF` |
+| The user's own pull requests, with checks and open threads | `dova pr list [--state active\|completed\|abandoned\|all]` |
 | Answer review threads | `dova pr reply <pr> <thread> - --resolve <<'EOF'` … `EOF` |
 | Read one whole thread | `dova pr thread <pr> <thread>` |
+| Fix a comment you posted | `dova pr amend <pr> <thread> - <<'EOF'` … `EOF` (rewrites your last comment there) |
+| Change a PR's title or description | `dova pr edit [pr] --title '<title>' --body - <<'EOF'` … `EOF` |
+| Show a picture in a PR description or comment | write `![what it shows](path/to/file.png)` in the text; dova uploads the file |
 | Why CI failed | `dova pipeline log` |
 
 Rules:

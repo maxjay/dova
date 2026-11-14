@@ -79,8 +79,9 @@ Needs git and the [Azure CLI](https://learn.microsoft.com/cli/azure/install-azur
 | `dova summarize [branch\|pr]` | catch up: tickets, commits, diff |
 | `dova link <ids…>` · `unlink` · `list` | which work items a branch is for |
 | `dova wi view\|search\|create` · `dova bug <title>` | work items |
-| `dova pr create\|view` | pull requests |
-| `dova pr comment\|thread\|reply\|resolve` | review threads |
+| `dova pr create\|view\|edit` | pull requests |
+| `dova pr list` | the pull requests you opened, with their checks and open threads |
+| `dova pr comment\|thread\|reply\|amend\|resolve` | review threads |
 | `dova pipeline list\|log\|watch` | pipeline runs |
 | `dova api <path>` | any REST call, signed in |
 
@@ -91,6 +92,7 @@ Needs git and the [Azure CLI](https://learn.microsoft.com/cli/azure/install-azur
 - **Scriptable.** `--json` on every command, `--jq <expr>` for just the part you want.
 - **Never hangs.** Without a terminal it doesn't prompt: it fails and names the flag to pass.
 - **Safe with text.** Pass `-` and pipe the text in; the shell never touches it.
+- **Pictures.** `![the new screen](shot.png)` in a PR description or comment uploads the file and shows it.
 - **Fast.** A background process holds your sign-in and keeps connections open. `DOVA_NO_DAEMON=1` turns it off.
 - **Exit codes.** `1` bad input · `2` not found · `3` not signed in or no access · `4` a request failed.
 - **Tab completion.** Included in the `.deb`; elsewhere, `dova completion <shell>`.
@@ -99,7 +101,7 @@ Needs git and the [Azure CLI](https://learn.microsoft.com/cli/azure/install-azur
 
 | | |
 |---|---|
-| `dova mcp` | an MCP server: ten tools for AI agents |
+| `dova mcp` | an MCP server: eleven tools for AI agents |
 | `dova rpc` | every command as JSON-RPC over stdio (`rpc.methods` lists them) |
 | `dova instructions` | teaches Copilot, Windsurf, Cursor and Codex to use dova |
 

@@ -14,7 +14,7 @@ use crate::app::{App, ScopeHint};
 use crate::cli::Output;
 use crate::error::{Error, Kind, Result};
 use crate::par;
-use crate::text::{truncate, Style};
+use crate::text::{to_html, truncate, Style};
 use crate::urls::{enc, looks_like_url, parse_id, parse_work_item_link};
 
 /* ---------------- view ---------------- */
@@ -360,10 +360,13 @@ fn permalink(app: &App, at: &str) -> Result<String> {
 
 pub fn create_work_item(app: &App, kind: &str, args: &CreateArgs) -> Result<Created> {
     let title = app.text(args.title.as_deref(), "title")?;
-    let mut description = args.body.as_deref().map(|body| app.text(Some(body), "body")).transpose()?;
+    // The field is HTML: the body goes in as typed, and the permalink as a link.
+    let mut description =
+        args.body.as_deref().map(|body| app.text(Some(body), "body")).transpose()?.map(|body| to_html(&body));
     if let Some(at) = &args.at {
-        let found = format!("Found in: {}", permalink(app, at)?);
-        description = Some(description.map_or(found.clone(), |body| format!("{body}\n\n{found}")));
+        let url = to_html(&permalink(app, at)?);
+        let found = format!("Found in: <a href=\"{url}\">{url}</a>");
+        description = Some(description.map_or(found.clone(), |body| format!("{body}<br><br>{found}")));
     }
     let parent_id = match &args.parent {
         Some(parent) => {
@@ -547,7 +550,7 @@ mod tests {
             "bug",
             "Null check",
             "--body",
-            "Details",
+            "Use Vec<u8>\nnot String",
             "--at",
             "src/auth.ts:88",
             "--link",
@@ -558,8 +561,14 @@ mod tests {
             "--json",
         ];
         assert_eq!(cli(bed.app(), &args).json()["linked"], "feature/x");
-        let link = "https://dev.azure.com/contoso/MyProject/_git/web?path=%2Fsrc%2Fauth.ts&version=GCabc123&line=88&lineEnd=89&lineStartColumn=1&lineEndColumn=1";
-        assert_eq!(created_with(&bed)[3], json!(format!("Details\n\nFound in: {link}")));
+        // The field is HTML: the body shows as typed, and the permalink is a link that reads back as its address.
+        let link = "https://dev.azure.com/contoso/MyProject/_git/web?path=%2Fsrc%2Fauth.ts&amp;version=GCabc123&amp;line=88&amp;lineEnd=89&amp;lineStartColumn=1&amp;lineEndColumn=1";
+        let html = format!("Use Vec&lt;u8&gt;<br>not String<br><br>Found in: <a href=\"{link}\">{link}</a>");
+        assert_eq!(created_with(&bed)[3], json!(html));
+        assert_eq!(
+            crate::text::strip_html(&html),
+            format!("Use Vec<u8>\nnot String\n\nFound in: {}", link.replace("&amp;", "&"))
+        );
         assert_eq!(bed.git.config("branch.feature/x.dova-workitems").as_deref(), Some("60"));
     }
 

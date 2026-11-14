@@ -52,11 +52,14 @@ pub struct Request {
     /// Ask for plain text back (a build log) instead of JSON.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub text: bool,
+    /// The body is base64, to be sent as the bytes it stands for (an image).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub base64: bool,
 }
 
 impl Request {
     pub fn get(url: impl Into<String>) -> Request {
-        Request { method: Method::Get, url: url.into(), body: None, content_type: None, text: false }
+        Request { method: Method::Get, url: url.into(), body: None, content_type: None, text: false, base64: false }
     }
 }
 
@@ -84,5 +87,7 @@ pub trait Transport: Send + Sync {
     /// `daemon` or `in-process`.
     fn kind(&self) -> &'static str;
     fn send(&self, req: &Request) -> Result<Response>;
+    /// The bearer token that signs requests to an organization, for git to fetch with.
+    fn token(&self, org: &str) -> Result<String>;
     fn auth_status(&self) -> Result<AuthStatus>;
 }

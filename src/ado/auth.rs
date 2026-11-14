@@ -96,6 +96,13 @@ impl Session {
         Ok(self.signed(req, &tenant, Some(&token))?.0)
     }
 
+    /// The token requests to this organization go out with.
+    pub fn token_for(&self, org: &str) -> Result<String> {
+        self.forget_tokens_if_az_login_changed();
+        let tenant = self.state.lock().unwrap().org_tenants.get(org).cloned().unwrap_or_default();
+        Ok(self.token(&tenant, None)?.access_token)
+    }
+
     pub fn status(&self) -> AuthStatus {
         self.forget_tokens_if_az_login_changed();
         match self.token("", None) {
@@ -195,6 +202,12 @@ pub fn https() -> Fetch {
         }
         let invalid = |_| Error::user(format!("\"{}\" isn't a request dova can send.", req.url));
         let sent = match &req.body {
+            Some(body) if req.base64 => {
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(body)
+                    .map_err(|_| Error::user("That upload isn't base64."))?;
+                agent.run(builder.body(bytes).map_err(invalid)?)
+            }
             Some(body) => agent.run(builder.body(body.as_str()).map_err(invalid)?),
             None => agent.run(builder.body(()).map_err(invalid)?),
         };

@@ -112,7 +112,8 @@ pub fn to_thread(raw: &Value) -> Thread {
             .map(|c| Comment {
                 id: c["id"].as_u64().unwrap_or(0),
                 author: c["author"]["displayName"].as_str().map(str::to_string),
-                published_at: c["publishedDate"].as_str().map(str::to_string),
+                author_id: c["author"]["id"].as_str().map(str::to_string),
+                published_at: c["publishedDate"].as_str().map(to_the_second),
                 text: c["content"].as_str().unwrap_or("").to_string(),
                 kind: c["commentType"].as_str().unwrap_or("text").to_string(),
             })
@@ -128,17 +129,27 @@ pub fn to_run(raw: &Value, org_url: &str, project: &str) -> Run {
         name: raw["definition"]["name"].as_str().map_or_else(numbered, str::to_string),
         status: raw["status"].as_str().unwrap_or("unknown").to_string(),
         result: raw["result"].as_str().map(str::to_string),
-        queued_at: raw["queueTime"].as_str().map(str::to_string),
+        queued_at: raw["queueTime"].as_str().map(to_the_second),
         source_branch: raw["sourceBranch"].as_str().map(str::to_string),
-        url: raw["_links"]["web"]["href"].as_str().map_or_else(|| urls::run_url(org_url, project, id), str::to_string),
+        url: urls::run_url(org_url, project, id),
+    }
+}
+
+/// `2026-11-14T19:48:07.7530236Z` → `2026-11-14T19:48:07Z`: nobody reads the fraction.
+fn to_the_second(time: &str) -> String {
+    match (time.find('.'), time.strip_suffix('Z')) {
+        (Some(dot), Some(_)) => format!("{}Z", &time[..dot]),
+        _ => time.to_string(),
     }
 }
 
 pub fn to_timeline_record(raw: &Value) -> TimelineRecord {
+    let errors = items(&raw["issues"]).iter().filter(|issue| issue["type"] == "error");
     TimelineRecord {
         name: raw["name"].as_str().unwrap_or("").to_string(),
         result: raw["result"].as_str().map(str::to_string),
         start_time: raw["startTime"].as_str().map(str::to_string),
         log_id: raw["log"]["id"].as_u64(),
+        errors: errors.filter_map(|issue| issue["message"].as_str().map(str::to_string)).collect(),
     }
 }

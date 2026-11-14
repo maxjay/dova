@@ -133,12 +133,10 @@ impl App {
     /// in. The branch is whatever is checked out.
     pub fn scope_for(&self, hint: &ScopeHint) -> Result<Scope> {
         let in_repo = self.git.is_repo()?;
-        let remote = if in_repo { self.git.remote_url()?.and_then(|url| urls::parse_remote(&url)) } else { None };
-        let pick = |hint: &Option<String>, flag: &Option<String>, env: &str, remote: Option<&String>| {
-            hint.clone().or_else(|| flag.clone()).or_else(|| self.env.get(env).map(str::to_string)).or(remote.cloned())
-        };
-        let org = pick(&hint.org, &self.flags.org, "DOVA_ORG", remote.as_ref().map(|r| &r.org));
-        let project = pick(&hint.project, &self.flags.project, "DOVA_PROJECT", remote.as_ref().map(|r| &r.project));
+        let remote = self.remote(in_repo)?;
+        let org = self.pick(&hint.org, &self.flags.org, "DOVA_ORG", remote.as_ref().map(|r| &r.org));
+        let project =
+            self.pick(&hint.project, &self.flags.project, "DOVA_PROJECT", remote.as_ref().map(|r| &r.project));
         let (Some(org), Some(project)) = (org, project) else {
             return Err(Error::user("Could not tell which Azure DevOps organization and project this is about.").hint(
                 "Run it inside a repo cloned from Azure Repos, or pass --org and --project (or set DOVA_ORG and DOVA_PROJECT).",
@@ -153,6 +151,25 @@ impl App {
             repo: hint.repo.clone().or_else(|| self.flags.repo.clone()).or(remote_repo),
             branch: if in_repo { self.git.current_branch()? } else { None },
         })
+    }
+
+    /// The organization alone, for what isn't about any one project.
+    pub fn org_url(&self) -> Result<String> {
+        let remote = self.remote(self.git.is_repo()?)?;
+        let org = self.pick(&None, &self.flags.org, "DOVA_ORG", remote.as_ref().map(|r| &r.org));
+        Ok(urls::org_url(&org.ok_or_else(|| {
+            Error::user("Could not tell which Azure DevOps organization this is about.")
+                .hint("Run it inside a repo cloned from Azure Repos, or pass --org (or set DOVA_ORG).")
+        })?))
+    }
+
+    fn remote(&self, in_repo: bool) -> Result<Option<urls::RemoteRepo>> {
+        Ok(if in_repo { self.git.remote_url()?.and_then(|url| urls::parse_remote(&url)) } else { None })
+    }
+
+    /// First answer wins: a link's, the flag's, the environment's, the remote's.
+    fn pick(&self, hint: &Option<String>, flag: &Option<String>, env: &str, remote: Option<&String>) -> Option<String> {
+        hint.clone().or_else(|| flag.clone()).or_else(|| self.env.get(env).map(str::to_string)).or(remote.cloned())
     }
 
     /// Free text a command takes: `value` as given, or all of stdin when it's omitted or `-`.

@@ -14,9 +14,9 @@ clap = { version = "4", features = ["derive"] }
 console = "0.15"
 dialoguer = { version = "0.11", default-features = false }
 interprocess = "2"
-jaq-core = "2"
-jaq-json = { version = "1", features = ["serde_json"] }
-jaq-std = "2"
+jaq-core = "3"
+jaq-json = { version = "2", features = ["serde"] }
+jaq-std = "3"
 open = "5"
 percent-encoding = "2"
 serde = { version = "1", features = ["derive"] }

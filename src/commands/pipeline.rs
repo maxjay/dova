@@ -26,7 +26,7 @@ fn find_run<'a>(app: &'a App, run: Option<&str>, branch: Option<&str>) -> Result
             let branch = branch
                 .or(scope.branch.as_deref())
                 .ok_or_else(|| Error::user("No run id, and not on a branch.").hint("Pass a run id or --branch."))?;
-            ado.runs(&scope.project, branch, 1)?
+            ado.runs(&scope.project, scope.repo.as_deref(), branch, 1)?
                 .pop()
                 .ok_or_else(|| Error::not_found(format!("No pipeline runs for branch \"{branch}\".")))?
         }
@@ -102,7 +102,7 @@ impl List {
             .as_deref()
             .or(scope.branch.as_deref())
             .ok_or_else(|| Error::user("Not on a branch — pass --branch."))?;
-        let runs = app.ado(&scope.org_url).runs(&scope.project, branch, 10)?;
+        let runs = app.ado(&scope.org_url).runs(&scope.project, scope.repo.as_deref(), branch, 10)?;
         let s = app.style;
         let row = |run: &Run| {
             vec![
@@ -124,11 +124,12 @@ impl List {
 impl Log {
     fn run(&self, app: &App) -> Result<Output> {
         let (scope, ado, run) = find_run(app, self.run.as_deref(), self.branch.as_deref())?;
-        let mut failed: Vec<_> = ado
-            .timeline(&scope.project, run.id)?
-            .into_iter()
-            .filter(|r| r.result.as_deref() == Some("failed") && r.log_id.is_some())
-            .collect();
+        let timeline = ado.timeline(&scope.project, run.id)?;
+        // A run can fail before any task does (no agent, a bad YAML file): only these say why.
+        let mut errors: Vec<&str> = timeline.iter().flat_map(|r| r.errors.iter().map(String::as_str)).collect();
+        errors.dedup();
+        let mut failed: Vec<_> =
+            timeline.iter().filter(|r| r.result.as_deref() == Some("failed") && r.log_id.is_some()).collect();
         failed.sort_by(|a, b| a.start_time.cmp(&b.start_time));
         // Every failed task is named; only the first (or --task, or --all) has its log fetched.
         let picked: Vec<_> = match &self.task {
@@ -154,7 +155,12 @@ impl Log {
 
         let s = app.style;
         let mut out = Vec::new();
-        if logs.is_empty() {
+        if !errors.is_empty() {
+            out.push(s.bold("Errors"));
+            out.extend(errors.iter().map(|error| s.red(&format!("  {error}"))));
+            out.push(String::new());
+        }
+        if logs.is_empty() && errors.is_empty() {
             out.push(s.dim(&format!("Nothing failed in run #{} ({}).", run.id, run.outcome())));
         }
         for log in &logs {
@@ -175,7 +181,10 @@ impl Log {
             )));
         }
         out.push(s.dim(&run.url));
-        Ok(Output::new(&json!({ "run": run, "failedTasks": failed_tasks, "logs": logs }), out.join("\n")))
+        Ok(Output::new(
+            &json!({ "run": run, "errors": errors, "failedTasks": failed_tasks, "logs": logs }),
+            out.join("\n"),
+        ))
     }
 }
 
@@ -245,6 +254,26 @@ mod tests {
 
         let text = cli(bed.app(), &["pipeline", "log"]).stdout;
         assert!(text.contains("Test\nlog 11") && text.contains("1 more failed: Lint"), "{text}");
+    }
+
+    #[test]
+    fn log_says_why_a_run_failed_before_any_task_did() {
+        let bed = Bed::new(Box::new(|r: &Recorded| {
+            if r.path.ends_with("/builds") {
+                ok(json!({ "value": [{ "id": 9, "status": "completed", "result": "failed" }] }))
+            } else if r.path.ends_with("/timeline") {
+                let no_agent = json!([{ "type": "error", "message": "No agent found in pool Azure Pipelines" }, { "type": "warning", "message": "Slow" }]);
+                ok(
+                    json!({ "records": [{ "name": "Job", "result": "failed", "issues": no_agent }, { "name": "Stage", "result": "failed" }] }),
+                )
+            } else {
+                None
+            }
+        }));
+        let log = cli(bed.app(), &["pipeline", "log", "--json"]).json();
+        assert_eq!((&log["errors"], &log["logs"]), (&json!(["No agent found in pool Azure Pipelines"]), &json!([])));
+        let text = cli(bed.app(), &["pipeline", "log"]).stdout;
+        assert!(text.starts_with("Errors\n  No agent found in pool Azure Pipelines\n"), "{text}");
     }
 
     #[test]

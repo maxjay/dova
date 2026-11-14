@@ -12,7 +12,7 @@ use crate::ado::{AuthStatus, Request, Response, Transport};
 use crate::app::{cannot_ask, no_stdin, App, Env, ScopeHint};
 use crate::cli::{self, Finished};
 use crate::error::{Error, Result};
-use crate::git::{Git, GitOutput};
+use crate::git::{Git, GitEnv, GitOutput};
 use crate::rpc::Invoker;
 use crate::text::Style;
 
@@ -70,6 +70,10 @@ impl Transport for FakeAdo {
         let unrouted =
             || json_response(404, json!({ "message": format!("no route for {} {}", recorded.method, recorded.path) }));
         Ok((self.route)(&recorded).unwrap_or_else(unrouted))
+    }
+
+    fn token(&self, _org: &str) -> Result<String> {
+        Ok("test-token".to_string())
     }
 
     fn auth_status(&self) -> Result<AuthStatus> {
@@ -157,6 +161,11 @@ impl GitOpts {
         GitOpts::default().config("branch.feature/x.dova-workitems", "11,12")
     }
 
+    /// Not in a git repo at all.
+    pub fn outside_a_repo() -> GitOpts {
+        GitOpts { in_repo: false, ..GitOpts::default() }
+    }
+
     /// On this branch instead of `feature/x`.
     pub fn branch(mut self, name: &str) -> GitOpts {
         self.branch = Some(name.to_string());
@@ -177,6 +186,7 @@ impl GitOpts {
 pub struct FakeGit {
     opts: GitOpts,
     config: Mutex<Vec<(String, String)>>,
+    fetches: Mutex<Vec<Vec<(String, String)>>>,
 }
 
 impl FakeGit {
@@ -184,8 +194,16 @@ impl FakeGit {
         self.config.lock().unwrap().iter().find(|(k, _)| k == key).map(|(_, v)| v.clone())
     }
 
-    fn run(&self, args: &[&str]) -> GitOutput {
+    /// The environment each `git fetch` was given, in order.
+    pub fn fetches(&self) -> Vec<Vec<(String, String)>> {
+        self.fetches.lock().unwrap().clone()
+    }
+
+    fn run(&self, args: &[&str], env: &GitEnv) -> GitOutput {
         let said = |stdout: &str| GitOutput { stdout: stdout.to_string(), stderr: String::new(), ok: true };
+        if args.first() == Some(&"fetch") {
+            self.fetches.lock().unwrap().push(env.to_vec());
+        }
         let no = || GitOutput { stdout: String::new(), stderr: "nope".to_string(), ok: false };
         let mut config = self.config.lock().unwrap();
         if let Some(answer) = self.opts.answers.get(&args.join(" ")) {
@@ -266,7 +284,7 @@ impl Bed {
         let (choice, stdin, git) = (self.choice.clone(), self.stdin.clone(), self.git.clone());
         App {
             env: Env::default(),
-            git: Git::new(Box::new(move |args, _| Ok(git.run(args))), PathBuf::from("/repo")),
+            git: Git::new(Box::new(move |args, _, env| Ok(git.run(args, env))), PathBuf::from("/repo")),
             transport: self.ado.clone(),
             flags: ScopeHint::default(),
             style: Style::PLAIN,
@@ -286,7 +304,7 @@ impl Bed {
 }
 
 fn fake_git(opts: GitOpts) -> FakeGit {
-    FakeGit { config: Mutex::new(opts.config.clone().into_iter().collect()), opts }
+    FakeGit { config: Mutex::new(opts.config.clone().into_iter().collect()), fetches: Mutex::default(), opts }
 }
 
 impl Finished {

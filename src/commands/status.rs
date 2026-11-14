@@ -30,7 +30,7 @@ pub fn branch_status(app: &App) -> Result<BranchStatus> {
     let ado = app.ado(&scope.org_url);
     let linked = app.git.links(branch)?;
     let (pr, branch_runs) =
-        par::join(|| ado.active_pull_request(project, repo, branch), || ado.runs(project, branch, 3));
+        par::join(|| ado.active_pull_request(project, repo, branch), || ado.runs(project, Some(repo), branch, 3));
     let (pr, branch_runs) = (pr?, branch_runs?);
 
     let Some(pr) = pr else {
@@ -45,8 +45,11 @@ pub fn branch_status(app: &App) -> Result<BranchStatus> {
     };
     // PR validation builds run on the merge commit, under refs/pull/<id>/merge, and gate the merge, so they come first.
     let merge_ref = format!("refs/pull/{}/merge", pr.id);
-    let (items, threads, pr_runs) =
-        par::join3(|| ado.pull_request_work_items(&pr), || ado.threads(&pr), || ado.runs(project, &merge_ref, 3));
+    let (items, threads, pr_runs) = par::join3(
+        || ado.pull_request_work_items(&pr),
+        || ado.threads(&pr),
+        || ado.runs(project, Some(repo), &merge_ref, 3),
+    );
     let mut runs: Vec<Run> = Vec::new();
     for run in pr_runs?.into_iter().chain(branch_runs) {
         if runs.len() < 3 && !runs.iter().any(|seen| seen.id == run.id) {
