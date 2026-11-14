@@ -81,6 +81,9 @@ pub struct ThreadLocation {
 pub struct Comment {
     pub id: u64,
     pub author: Option<String>,
+    /// Who that is to Azure DevOps: how dova tells your comments from everyone else's.
+    #[serde(skip)]
+    pub author_id: Option<String>,
     pub published_at: Option<String>,
     pub text: String,
     /// text | codeChange | system
@@ -126,6 +129,8 @@ pub struct TimelineRecord {
     pub result: Option<String>,
     pub start_time: Option<String>,
     pub log_id: Option<u64>,
+    /// What Azure Pipelines says went wrong here, which a log doesn't always show.
+    pub errors: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

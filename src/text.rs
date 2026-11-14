@@ -45,6 +45,12 @@ pub fn strip_html(html: &str) -> String {
     out
 }
 
+/// The other way: plain text as the HTML a rich-text field shows exactly as typed.
+/// Sent as it is, `Vec<String>` would vanish as a tag and every line break would collapse.
+pub fn to_html(text: &str) -> String {
+    text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace("\r\n", "\n").replace('\n', "<br>")
+}
+
 /// Cuts text at `max` characters, saying whether it did so callers can offer `--full`.
 pub fn truncate(text: &str, max: usize) -> (String, bool) {
     match text.char_indices().nth(max) {

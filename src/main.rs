@@ -16,6 +16,7 @@ mod commands;
 mod daemon;
 mod error;
 mod git;
+mod images;
 mod mcp;
 mod par;
 mod rpc;

@@ -5,14 +5,15 @@ use serde::Serialize;
 use serde_json::json;
 
 use super::work_item_table;
-use crate::ado::client::{AdoClient, NewPullRequest};
-use crate::ado::types::{PullRequest, Thread, ThreadLocation, WorkItem, WorkItemRef};
+use crate::ado::client::{AdoClient, NewPullRequest, MOST};
+use crate::ado::types::{PullRequest, Run, Thread, ThreadLocation, WorkItem, WorkItemRef};
 use crate::app::{App, ScopeHint};
 use crate::cli::Output;
 use crate::error::{Error, Result};
+use crate::images::Illustrated;
 use crate::par;
-use crate::text::{truncate, Style};
-use crate::urls::{parse_id, parse_pull_request_link};
+use crate::text::{table, truncate, Style};
+use crate::urls::{my_pull_requests_url, parse_id, parse_pull_request_link};
 
 /// A PR from an id or a link, or with neither, the current branch's active PR — and the client for its org.
 pub fn find_pull_request<'a>(app: &'a App, id_or_url: Option<&str>) -> Result<(PullRequest, AdoClient<'a>)> {
@@ -42,7 +43,7 @@ pub struct Create {
     /// Title (default: the last commit's subject; '-' reads stdin)
     #[arg(long)]
     pub title: Option<String>,
-    /// Description ('-' reads stdin)
+    /// Description ('-' reads stdin; `![alt](shot.png)` uploads that file)
     #[arg(long, value_name = "TEXT")]
     pub body: Option<String>,
     /// Branch to merge into (default: the repo's default branch)
@@ -72,7 +73,10 @@ impl Create {
             Some(title) => app.text(Some(title), "title")?,
             None => app.git.try_run(&["log", "-1", "--format=%s"])?.unwrap_or_else(|| branch.to_string()),
         };
-        let description = self.body.as_deref().map(|body| app.text(Some(body), "body")).transpose()?;
+        let description = match &self.body {
+            Some(body) => Some(Illustrated::read(app.text(Some(body), "body")?, app.git.cwd())?),
+            None => None,
+        };
         let work_item_ids = match self.work_items.as_slice() {
             [] => app.git.links(branch)?,
             given => given
@@ -90,16 +94,33 @@ impl Create {
                 })?,
             },
         };
-        ado.create_pull_request(&NewPullRequest {
+        let created = ado.create_pull_request(&NewPullRequest {
             project: scope.project.clone(),
             repo: repo.to_string(),
             source_branch: branch.to_string(),
             target_branch,
             title,
-            description,
+            description: description.as_ref().map(|body| body.as_written().to_string()),
             is_draft: self.draft,
             work_item_ids,
-        })
+        });
+        // Azure DevOps allows one active PR per pair of branches (TF401179): say which one is in the way.
+        let pr = match created {
+            Err(refused) if refused.message.contains("TF401179") => {
+                let Some(open) = ado.active_pull_request(&scope.project, repo, branch)? else { return Err(refused) };
+                return Err(Error::user(format!(
+                    "\"{branch}\" already has an active pull request: #{} {}",
+                    open.id, open.title
+                ))
+                .hint(open.url));
+            }
+            other => other?,
+        };
+        // A picture can only be uploaded to a pull request that exists, so the description is finished afterwards.
+        match description.filter(Illustrated::has_images) {
+            Some(body) => ado.update_pull_request(&pr, None, Some(&body.upload(&ado, &pr)?)),
+            None => Ok(pr),
+        }
     }
 
     pub fn run(&self, app: &App) -> Result<Output> {
@@ -114,6 +135,86 @@ impl Create {
             s.dim(&format!("  {}", pr.url))
         );
         Ok(Output::new(&pr, text).web(self.web, &pr.url))
+    }
+}
+
+/* ---------------- list ---------------- */
+
+#[derive(Args)]
+pub struct List {
+    /// Which ones
+    #[arg(long, default_value = "active", value_parser = ["active", "completed", "abandoned", "all"])]
+    pub state: String,
+    /// Open your pull requests in the browser (every project's)
+    #[arg(short, long)]
+    pub web: bool,
+}
+
+/// A pull request as a list shows it: with its check, and how many review threads are still open.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListedPullRequest {
+    #[serde(flatten)]
+    pub pr: PullRequest,
+    /// Its latest validation run, or without one, its branch's latest run.
+    pub check: Option<Run>,
+    pub open_threads: usize,
+}
+
+/// How many pull requests are looked into at the same time.
+const AT_ONCE: usize = 8;
+
+/// Each pull request's check and open threads, a few pull requests at a time.
+fn listed(ado: &AdoClient, prs: Vec<PullRequest>) -> Result<Vec<ListedPullRequest>> {
+    let look = |pr: &PullRequest| -> Result<(Option<Run>, usize)> {
+        let merge_ref = format!("refs/pull/{}/merge", pr.id);
+        let (validation, branch, threads) = par::join3(
+            || ado.runs(&pr.project, Some(&pr.repo), &merge_ref, 1),
+            || ado.runs(&pr.project, Some(&pr.repo), &pr.source_branch, 1),
+            || ado.threads(pr),
+        );
+        let check = validation?.pop().or(branch?.pop());
+        Ok((check, threads?.iter().filter(|t| t.unresolved).count()))
+    };
+    let looked: Vec<_> = prs.chunks(AT_ONCE).flat_map(|some| par::map(some, look)).collect::<Result<_>>()?;
+    Ok(prs
+        .into_iter()
+        .zip(looked)
+        .map(|(pr, (check, open_threads))| ListedPullRequest { pr, check, open_threads })
+        .collect())
+}
+
+impl List {
+    pub fn run(&self, app: &App) -> Result<Output> {
+        let scope = app.scope()?;
+        if self.web {
+            return Ok(Output::none().web(true, &my_pull_requests_url(&scope.org_url)));
+        }
+        let ado = app.ado(&scope.org_url);
+        let prs = listed(&ado, ado.my_pull_requests(&scope.project, &self.state)?)?;
+        let s = app.style;
+        let text = if prs.is_empty() {
+            let which = if self.state == "all" { String::new() } else { format!("{} ", self.state) };
+            s.dim(&format!("You have no {which}pull requests in {}.", scope.project))
+        } else {
+            let row = |l: &ListedPullRequest| {
+                let open = l.open_threads.to_string();
+                vec![
+                    format!("#{}", l.pr.id),
+                    l.pr.title.clone(),
+                    l.pr.repo.clone(),
+                    format!("{} -> {}", l.pr.source_branch, l.pr.target_branch),
+                    if l.pr.is_draft { s.dim("draft") } else { l.pr.status.clone() },
+                    l.check.as_ref().map_or_else(|| s.dim("none"), |run| s.outcome(run.outcome())),
+                    if l.open_threads == 0 { s.dim(&open) } else { s.yellow(&open) },
+                ]
+            };
+            let rows: Vec<Vec<String>> = prs.iter().map(row).collect();
+            let more = (prs.len() == MOST).then(|| s.dim(&format!("\nThe newest {MOST}; there may be more.")));
+            table(&["ID", "Title", "Repo", "Branch", "State", "Check", "Open threads"], &rows)
+                + &more.unwrap_or_default()
+        };
+        Ok(Output::new(&prs, text))
     }
 }
 
@@ -225,6 +326,51 @@ impl View {
     }
 }
 
+/* ---------------- edit ---------------- */
+
+#[derive(Args)]
+pub struct Edit {
+    /// PR id or link (default: the current branch's active PR)
+    pub id_or_url: Option<String>,
+    /// New title ('-' reads stdin)
+    #[arg(long)]
+    pub title: Option<String>,
+    /// New description ('-' reads stdin; `![alt](shot.png)` uploads that file)
+    #[arg(long, value_name = "TEXT")]
+    pub body: Option<String>,
+}
+
+impl Edit {
+    pub fn run(&self, app: &App) -> Result<Output> {
+        match (self.title.as_deref(), self.body.as_deref()) {
+            (None, None) => return Err(Error::user("Nothing to change.").hint("Pass --title, --body, or both.")),
+            (Some("-"), Some("-")) => return Err(Error::user("Only one of --title and --body can read stdin.")),
+            _ => {}
+        }
+        let (pr, ado) = find_pull_request(app, self.id_or_url.as_deref())?;
+        let title = self.title.as_deref().map(|title| app.text(Some(title), "title")).transpose()?;
+        let body = match &self.body {
+            Some(body) => Some(illustrated(app, &ado, &pr, app.text(Some(body), "body")?)?),
+            None => None,
+        };
+        let pr = ado.update_pull_request(&pr, title.as_deref(), body.as_deref())?;
+        let s = app.style;
+        let text = format!(
+            "{} PR {} — {}\n{}",
+            s.green("Updated"),
+            s.bold(&format!("#{}", pr.id)),
+            pr.title,
+            s.dim(&format!("  {}", pr.url))
+        );
+        Ok(Output::new(&pr, text))
+    }
+}
+
+/// Text for a pull request, once the files its images point at are uploaded there.
+fn illustrated(app: &App, ado: &AdoClient, pr: &PullRequest, text: String) -> Result<String> {
+    Illustrated::read(text, app.git.cwd())?.upload(ado, pr)
+}
+
 /* ---------------- threads ---------------- */
 
 /// A status as people say it → as the API names it. The UI's "Resolved" is the API's `fixed`.
@@ -276,6 +422,16 @@ pub struct Reply {
 }
 
 #[derive(Args)]
+pub struct Amend {
+    /// PR id or link
+    pub pr: String,
+    /// Thread id
+    pub thread: String,
+    /// The comment as it should now read ('-' or nothing reads stdin)
+    pub text: Option<String>,
+}
+
+#[derive(Args)]
 pub struct Resolve {
     /// PR id or link
     pub pr: String,
@@ -298,14 +454,20 @@ struct ThreadOnPr<'a> {
 pub enum Pr {
     /// Open a PR from the current branch, linking its work items
     Create(Create),
+    /// The pull requests you opened in this project, each with its check and open threads
+    List(List),
     /// A PR with its work items and review threads (default: the current branch's)
     View(View),
+    /// Change a PR's title or description (default: the current branch's)
+    Edit(Edit),
     /// Start a review thread
     Comment(Comment),
     /// Every comment in one review thread
     Thread(ThreadArgs),
     /// Reply in a review thread
     Reply(Reply),
+    /// Rewrite your last comment in a review thread
+    Amend(Amend),
     /// Set a review thread's status (default: resolved)
     Resolve(Resolve),
 }
@@ -315,10 +477,13 @@ impl Pr {
         let s = app.style;
         match self {
             Pr::Create(c) => c.run(app),
+            Pr::List(c) => c.run(app),
             Pr::View(c) => c.run(app),
+            Pr::Edit(c) => c.run(app),
             Pr::Comment(c) => {
                 let (pr, ado) = find_pull_request(app, Some(&c.pr))?;
-                let thread = ado.add_comment(&pr, &app.text(c.text.as_deref(), "comment")?)?;
+                let comment = illustrated(app, &ado, &pr, app.text(c.text.as_deref(), "comment")?)?;
+                let thread = ado.add_comment(&pr, &comment)?;
                 let text = format!("{} thread #{} on PR #{}.", s.green("Posted"), thread.id, pr.id);
                 Ok(Output::new(&json!({ "prId": pr.id, "threadId": thread.id }), text))
             }
@@ -332,13 +497,21 @@ impl Pr {
                 let id = thread_id(&c.thread)?;
                 let status = c.resolve.as_deref().map(parse_thread_status).transpose()?;
                 let (pr, ado) = find_pull_request(app, Some(&c.pr))?;
-                ado.reply(&pr, id, &app.text(c.text.as_deref(), "reply")?)?;
+                ado.reply(&pr, id, &illustrated(app, &ado, &pr, app.text(c.text.as_deref(), "reply")?)?)?;
                 if let Some(status) = status {
                     ado.set_thread_status(&pr, id, status)?;
                 }
                 let now = status.map_or(String::new(), |status| format!(", now {status}"));
                 let text = format!("{} in thread #{id} on PR #{}{now}.", s.green("Replied"), pr.id);
                 Ok(Output::new(&json!({ "prId": pr.id, "threadId": id, "status": status }), text))
+            }
+            Pr::Amend(c) => {
+                let id = thread_id(&c.thread)?;
+                let (pr, ado) = find_pull_request(app, Some(&c.pr))?;
+                let comment = illustrated(app, &ado, &pr, app.text(c.text.as_deref(), "comment")?)?;
+                let amended = ado.amend_comment(&pr, id, &comment)?;
+                let text = format!("{} your comment in thread #{id} on PR #{}.", s.green("Amended"), pr.id);
+                Ok(Output::new(&json!({ "prId": pr.id, "threadId": id, "commentId": amended }), text))
             }
             Pr::Resolve(c) => {
                 let (id, status) = (thread_id(&c.thread)?, parse_thread_status(&c.status)?);
@@ -417,6 +590,22 @@ mod tests {
     }
 
     #[test]
+    fn a_second_pull_request_for_the_branch_names_the_one_already_open() {
+        let bed = Bed::new(Box::new(|r: &Recorded| {
+            if r.method == "POST" {
+                let refused = json!({ "message": "TF401179: An active pull request for the source and target branch already exists." });
+                Some(crate::testing::json_response(409, refused))
+            } else {
+                ok(json!({ "value": [rest_pr(7, json!({}))] }))
+            }
+        }));
+        let res = cli(bed.app(), &["pr", "create", "--title", "Again", "--target", "main"]);
+        assert_eq!(res.code, 1, "{}", res.stderr);
+        assert!(res.stderr.contains("\"feature/x\" already has an active pull request: #7 PR 7"), "{}", res.stderr);
+        assert!(res.stderr.contains("https://dev.azure.com/contoso/MyProject/_git/web/pullrequest/7"));
+    }
+
+    #[test]
     fn reads_the_body_from_stdin_only_when_told_to() {
         let bed = Bed::new(route()).stdin("Uses `npm test` and $total");
         assert_eq!(cli(bed.app(), &["pr", "create", "--title", "x", "--body", "-"]).code, 0);
@@ -425,6 +614,151 @@ mod tests {
         let bed = Bed::new(route()).stdin("left alone");
         assert_eq!(cli(bed.app(), &["pr", "create", "--title", "x"]).code, 0);
         assert!(posted(&bed).get("description").is_none());
+    }
+
+    /// Signed in as `me-1`, with whatever pull requests are given. PR 9 failed validation and has one thread
+    /// open of two; nothing else has a validation run or a thread, and every branch's own run succeeded.
+    fn mine(prs: Value) -> Route {
+        Box::new(move |r: &Recorded| {
+            let run =
+                |id: u64, result: &str| json!({ "value": [{ "id": id, "status": "completed", "result": result }] });
+            let said = |status: &str| json!({ "id": 1, "status": status, "comments": [{ "id": 1, "content": "fix" }] });
+            if r.path.ends_with("/connectionData") {
+                ok(json!({ "authenticatedUser": { "id": "me-1" } }))
+            } else if r.path.ends_with("/builds") {
+                match r.query("branchName").unwrap().as_str() {
+                    "refs/pull/9/merge" => ok(run(2, "failed")),
+                    "refs/heads/feature/x" => ok(run(1, "succeeded")),
+                    _ => ok(json!({ "value": [] })),
+                }
+            } else if r.path.ends_with("/pullRequests/9/threads") {
+                ok(json!({ "value": [said("active"), said("fixed")] }))
+            } else if r.path.ends_with("/threads") {
+                ok(json!({ "value": [] }))
+            } else {
+                ok(json!({ "value": prs }))
+            }
+        })
+    }
+
+    fn asked_for_the_list(bed: &Bed) -> Recorded {
+        bed.ado.requests().into_iter().find(|r| r.path.ends_with("/pullrequests")).unwrap()
+    }
+
+    #[test]
+    fn lists_only_the_pull_requests_you_opened_each_with_its_check_and_open_threads() {
+        let draft = rest_pr(8, json!({ "isDraft": true, "repository": { "name": "api" } }));
+        let bed = Bed::new(mine(json!([rest_pr(9, json!({})), draft])));
+        let listed = cli(bed.app(), &["pr", "list", "--json"]).json();
+        // A validation run wins; without one, the branch's own run is the check.
+        let seen = |at: usize| (&listed[at]["id"], &listed[at]["check"]["result"], &listed[at]["openThreads"]);
+        assert_eq!(seen(0), (&json!(9), &json!("failed"), &json!(1)));
+        assert_eq!(seen(1), (&json!(8), &json!("succeeded"), &json!(0)));
+
+        let asked = asked_for_the_list(&bed);
+        assert_eq!(asked.path, "/MyProject/_apis/git/pullrequests");
+        assert_eq!(asked.query("searchCriteria.creatorId").as_deref(), Some("me-1"));
+        assert_eq!(asked.query("searchCriteria.status").as_deref(), Some("active"));
+
+        let screen = cli(bed.app(), &["pr", "list"]).stdout;
+        let row = |id: &str| screen.lines().find(|line| line.contains(id)).unwrap().to_string();
+        assert_eq!(row("#9"), "│ #9 │ PR 9  │ web  │ feature/x -> main │ active │ failed    │ 1            │");
+        assert_eq!(row("#8"), "│ #8 │ PR 8  │ api  │ feature/x -> main │ draft  │ succeeded │ 0            │");
+    }
+
+    #[test]
+    fn a_pull_request_nothing_ran_for_has_no_check() {
+        let bed = Bed::new(mine(json!([rest_pr(7, json!({ "sourceRefName": "refs/heads/docs" }))])));
+        assert_eq!(cli(bed.app(), &["pr", "list", "--jq", ".[0].check"]).stdout, "null\n");
+        assert!(cli(bed.app(), &["pr", "list"]).stdout.contains("│ active │ none  │ 0 "));
+    }
+
+    #[test]
+    fn lists_other_states_and_says_when_there_is_nothing() {
+        let bed = Bed::new(mine(json!([])));
+        let res = cli(bed.app(), &["pr", "list", "--state", "completed"]);
+        assert_eq!((res.code, res.stdout.as_str()), (0, "You have no completed pull requests in MyProject.\n"));
+        assert_eq!(asked_for_the_list(&bed).query("searchCriteria.status").as_deref(), Some("completed"));
+        assert_eq!(cli(bed.app(), &["pr", "list", "--json"]).json(), json!([]));
+
+        let bed = Bed::new(mine(json!([])));
+        assert_eq!(cli(bed.app(), &["pr", "list", "--state", "open"]).code, 1);
+        assert!(bed.ado.requests().is_empty());
+    }
+
+    #[test]
+    fn a_picture_in_the_description_is_uploaded_once_the_pull_request_exists() {
+        use base64::Engine;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("shot.png");
+        std::fs::write(&file, b"\x89PNG bytes").unwrap();
+        let bed = Bed::new(Box::new(|r: &Recorded| match r.method.as_str() {
+            "POST" if r.path.contains("/attachments/") => {
+                ok(json!({ "url": "https://dev.azure.com/contoso/up/shot.png" }))
+            }
+            "POST" | "PATCH" => ok(rest_pr(9, json!({ "description": r.body["description"] }))),
+            _ => None,
+        }));
+        let body = format!("See ![the screen](<{}>) and ![web](https://example.com/x.png)", file.display());
+        let made = cli(bed.app(), &["pr", "create", "--title", "T", "--target", "main", "--body", &body, "--json"]);
+        let shown =
+            "See ![the screen](<https://dev.azure.com/contoso/up/shot.png>) and ![web](https://example.com/x.png)";
+        assert_eq!(made.json()["description"], shown, "{}", made.stderr);
+
+        let requests = bed.ado.requests();
+        let [create, upload, finish] = requests.as_slice() else { panic!("{} requests", requests.len()) };
+        assert_eq!(create.body["description"], json!(body), "created with the text as written");
+        assert!(upload.path.contains("/pullRequests/9/attachments/shot-") && upload.path.ends_with(".png"));
+        assert_eq!(upload.raw.content_type.as_deref(), Some("application/octet-stream"));
+        let sent = base64::engine::general_purpose::STANDARD.decode(upload.raw.body.as_deref().unwrap()).unwrap();
+        assert_eq!((upload.raw.base64, sent.as_slice()), (true, b"\x89PNG bytes".as_slice()));
+        assert_eq!((finish.method.as_str(), &finish.body), ("PATCH", &json!({ "description": shown })));
+
+        // A picture that isn't there stops the command before anything is created.
+        let bed = Bed::new(route());
+        assert_eq!(cli(bed.app(), &["pr", "create", "--title", "T", "--body", "![x](/no/such/file.png)"]).code, 1);
+        assert!(bed.ado.requests().is_empty());
+    }
+
+    #[test]
+    fn edit_changes_only_what_it_is_given() {
+        let bed = Bed::new(Box::new(|r: &Recorded| ok(rest_pr(7, json!({ "title": r.body["title"] })))));
+        assert_eq!(cli(bed.app(), &["pr", "edit", "7", "--title", "Better", "--jq", ".title"]).stdout, "Better\n");
+        let patch = bed.ado.requests().pop().unwrap();
+        assert_eq!(
+            (patch.method.as_str(), patch.path.as_str(), &patch.body),
+            ("PATCH", "/MyProject/_apis/git/repositories/web/pullrequests/7", &json!({ "title": "Better" }))
+        );
+
+        let bed = Bed::new(route());
+        assert_eq!(cli(bed.app(), &["pr", "edit", "7"]).code, 1);
+        assert!(bed.ado.requests().is_empty());
+    }
+
+    #[test]
+    fn amend_rewrites_your_last_comment_and_nobody_elses() {
+        let bed = Bed::new(Box::new(|r: &Recorded| {
+            let by = |id: u64, who: &str| json!({ "id": id, "content": "x", "author": { "id": who } });
+            match (r.method.as_str(), r.path.as_str()) {
+                ("GET", p) if p.ends_with("/connectionData") => ok(json!({ "authenticatedUser": { "id": "me" } })),
+                ("GET", p) if p.ends_with("/pullrequests/7") => ok(rest_pr(7, json!({}))),
+                ("GET", p) if p.ends_with("/threads/3") => {
+                    ok(json!({ "id": 3, "comments": [by(1, "me"), by(2, "me"), by(3, "someone-else")] }))
+                }
+                ("GET", p) if p.ends_with("/threads/4") => ok(json!({ "id": 4, "comments": [by(1, "someone-else")] })),
+                ("PATCH", _) => ok(json!({})),
+                _ => None,
+            }
+        }));
+        let amended = cli(bed.app(), &["pr", "amend", "7", "3", "What I meant", "--json"]);
+        assert_eq!(amended.json(), json!({ "prId": 7, "threadId": 3, "commentId": 2 }), "{}", amended.stderr);
+        let patch = bed.ado.requests().pop().unwrap();
+        assert!(patch.path.ends_with("/pullRequests/7/threads/3/comments/2"), "{}", patch.path);
+        assert_eq!(patch.body, json!({ "content": "What I meant" }));
+
+        let none = cli(bed.app(), &["pr", "amend", "7", "4", "x"]);
+        assert_eq!((none.code, none.stderr.contains("You have no comment in thread #4 on PR #7.")), (2, true));
+        assert!(!bed.ado.requests().iter().any(|r| r.method == "PATCH" && r.path.contains("/threads/4/")));
     }
 
     #[test]

@@ -66,22 +66,36 @@ pub struct Summary {
 
 impl Summarize {
     pub fn summarize(&self, app: &App) -> Result<Summary> {
-        let mut branch = self.target.clone();
-        let mut base: Option<(String, &'static str)> = self.base.clone().map(|base| (base, "flag"));
+        let mut pr = None;
         if let Some(target) = self.target.as_deref().filter(|t| looks_like_url(t) || parse_id(t).is_some()) {
-            let (pr, _) = find_pull_request(app, Some(target))?;
-            branch = Some(pr.source_branch);
-            base = base.or(Some((pr.target_branch, "pr-target")));
+            let (named, _) = find_pull_request(app, Some(target))?;
+            // Its commits are read with git, so they have to be in this clone's repo.
+            if let Some(here) = app.scope()?.repo.filter(|here| !here.eq_ignore_ascii_case(&named.repo)) {
+                return Err(Error::user(format!(
+                    "PR #{} is in the repo \"{}\", not \"{here}\".",
+                    named.id, named.repo
+                ))
+                .hint(format!("Run this in a clone of \"{}\".", named.repo)));
+            }
+            pr = Some(named);
         }
         let scope = app.scope()?;
-        let branch = branch
-            .or_else(|| scope.branch.clone())
-            .ok_or_else(|| Error::user("Not on a branch — pass a branch, PR id or PR link."))?;
+        let branch = match &pr {
+            Some(pr) => pr.source_branch.clone(),
+            None => self
+                .target
+                .clone()
+                .or_else(|| scope.branch.clone())
+                .ok_or_else(|| Error::user("Not on a branch — pass a branch, PR id or PR link."))?,
+        };
         let ado = app.ado(&scope.org_url);
-
-        if let (None, Some(repo)) = (&base, &scope.repo) {
-            base = ado.active_pull_request(&scope.project, repo, &branch)?.map(|pr| (pr.target_branch, "pr-target"));
+        // A branch's own active PR says what it merges into and which work items it carries.
+        if let (None, Some(repo)) = (&pr, &scope.repo) {
+            pr = ado.active_pull_request(&scope.project, repo, &branch)?;
         }
+
+        let mut base: Option<(String, &'static str)> = self.base.clone().map(|base| (base, "flag"));
+        base = base.or_else(|| pr.as_ref().map(|pr| (pr.target_branch.clone(), "pr-target")));
         if base.is_none() {
             base = match (app.git.origin_head()?, &scope.repo) {
                 (Some(head), _) => Some((head, "origin-head")),
@@ -96,9 +110,13 @@ impl Summarize {
         })?;
 
         let git = &app.git;
-        let head = git.readable_ref(&branch)?;
+        let head = git.readable_ref(&branch, || app.transport.token(&scope.org))?;
         let base = if git.has_ref(&format!("origin/{base}"))? { format!("origin/{base}") } else { base };
-        let work_items = ado.work_items(&git.links(&branch)?)?;
+        // The PR's work items; with no PR, the ones `dova link` recorded.
+        let work_items = match &pr {
+            Some(pr) => ado.pull_request_work_items(pr)?,
+            None => ado.work_items(&git.links(&branch)?)?,
+        };
         let want_diff = self.full || !self.files.is_empty();
         let (since, range) = (format!("{base}..{head}"), format!("{base}...{head}"));
         // `git <args> [-- <paths>]`, empty when git has nothing to say.
@@ -194,8 +212,31 @@ mod tests {
     use crate::testing::{batch, cli, ok, rest_pr, wi, Bed, GitOpts};
 
     #[test]
-    fn compares_against_the_prs_target_with_the_branchs_tickets_and_commits() {
-        let git = GitOpts::linked()
+    fn fetches_a_branch_with_dovas_sign_in_and_never_gits_own() {
+        let bed = Bed::new(Box::new(|_| ok(json!({ "value": [] }))));
+        // The fake has no such branch anywhere, so dova fetches it (and here, fails to).
+        assert_eq!(cli(bed.app(), &["summarize", "someone/elses", "--base", "main"]).code, 2);
+        let env = &bed.git.fetches()[0];
+        let set = |key: &str| env.iter().find(|(k, _)| k == key).map(|(_, value)| value.as_str());
+        assert_eq!(set("GIT_CONFIG_KEY_0"), Some("credential.helper"));
+        assert_eq!(set("GIT_CONFIG_VALUE_0"), Some(""));
+        assert_eq!(set("GIT_CONFIG_KEY_1"), Some("http.https://dev.azure.com/.extraheader"));
+        assert_eq!(set("GIT_CONFIG_VALUE_1"), Some("Authorization: Bearer test-token"));
+    }
+
+    #[test]
+    fn a_pr_from_another_repo_is_refused_before_git_is_asked_for_its_branch() {
+        let elsewhere = rest_pr(7, json!({ "repository": { "name": "api" } }));
+        let bed = Bed::new(Box::new(move |_| ok(elsewhere.clone())));
+        let res = cli(bed.app(), &["summarize", "7"]);
+        assert_eq!((res.code, res.stderr.contains("PR #7 is in the repo \"api\", not \"web\".")), (1, true));
+        assert!(bed.git.fetches().is_empty());
+    }
+
+    #[test]
+    fn compares_against_the_prs_target_with_the_prs_tickets_and_commits() {
+        // Nothing is linked locally: the tickets are the pull request's own.
+        let git = GitOpts::default()
             .answer("rev-parse --verify --quiet refs/heads/feature/x", "abc")
             .answer("rev-parse --verify --quiet origin/main", "def")
             .answer("log --format=%H%x09%s origin/main..feature/x", &format!("{}\tFirst", "a".repeat(40)))
@@ -204,6 +245,8 @@ mod tests {
         let bed = Bed::new(Box::new(|r| {
             if r.path.ends_with("/pullrequests") {
                 ok(json!({ "value": [rest_pr(7, json!({}))] }))
+            } else if r.path.ends_with("/pullRequests/7/workitems") {
+                ok(json!({ "value": [{ "id": "11" }, { "id": "12" }] }))
             } else {
                 batch(vec![wi(11, json!({})), wi(12, json!({}))])(r)
             }

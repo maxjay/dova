@@ -233,23 +233,28 @@ pub fn pretty(data: &Value) -> String {
 /// A jq expression, compiled: give it data, get its results one per line, strings unquoted.
 fn jq(expression: &str) -> Result<impl Fn(Value) -> Result<String>> {
     use jaq_core::load::{Arena, File, Loader};
-    use jaq_core::{Compiler, Ctx, RcIter};
+    use jaq_core::{data, unwrap_valr, Compiler, Ctx, Vars};
+    use jaq_json::Val;
 
     let invalid = || Error::user(format!("Invalid --jq expression: {expression}"));
-    let loader = Loader::new(jaq_std::defs().chain(jaq_json::defs()));
+    let defs = jaq_core::defs().chain(jaq_std::defs()).chain(jaq_json::defs());
+    let funs = jaq_core::funs().chain(jaq_std::funs()).chain(jaq_json::funs());
     let arena = Arena::default();
-    let modules = loader.load(&arena, File { code: expression, path: () }).map_err(|_| invalid())?;
-    let funs = jaq_std::funs().chain(jaq_json::funs());
+    let modules = Loader::new(defs).load(&arena, File { code: expression, path: () }).map_err(|_| invalid())?;
     let filter = Compiler::default().with_funs(funs).compile(modules).map_err(|_| invalid())?;
 
     Ok(move |data: Value| {
-        let inputs = RcIter::new(core::iter::empty());
+        let failed = |err: String| Error::user(format!("--jq failed: {err}"));
+        let input: Val = serde_json::from_value(data).map_err(|err| failed(err.to_string()))?;
+        let ctx = Ctx::<data::JustLut<Val>>::new(&filter.lut, Vars::new([]));
         let mut results = Vec::new();
-        for result in filter.run((Ctx::new([], &inputs), jaq_json::Val::from(data))) {
-            let value = Value::from(result.map_err(|err| Error::user(format!("--jq failed: {err}")))?);
-            results.push(match value {
-                Value::String(text) => text,
-                other => pretty(&other),
+        for result in filter.id.run((ctx, input)).map(unwrap_valr) {
+            // A jq value prints as JSON; a string is shown bare, everything else laid out like `--json`.
+            let json = result.map_err(|err| failed(err.to_string()))?.to_string();
+            results.push(match serde_json::from_str(&json) {
+                Ok(Value::String(text)) => text,
+                Ok(other) => pretty(&other),
+                Err(_) => json,
             });
         }
         Ok(results.join("\n"))
@@ -284,7 +289,8 @@ pub fn flags_of(command: &clap::Command) -> impl Iterator<Item = &clap::Arg> {
     command.get_arguments().filter(|arg| !arg.is_positional() && !arg.is_global_set() && arg.get_long().is_some())
 }
 
-/// What can come next after `words`: a subcommand, or with a `-` prefix, a flag.
+/// What can come next after `words`: a subcommand, with a `-` prefix a flag,
+/// or after a flag that takes one of a few values, those values.
 pub fn complete(words: &[String]) -> Vec<String> {
     let root = tree();
     let (current, before) = words.split_last().map_or(("", words), |(last, before)| (last.as_str(), before));
@@ -296,7 +302,15 @@ pub fn complete(words: &[String]) -> Vec<String> {
             _ => past_commands = true,
         }
     }
-    let candidates: Vec<String> = if current.starts_with('-') {
+    let previous = before.last().and_then(|word| word.strip_prefix("--"));
+    let choices = previous
+        .and_then(|long| node.get_arguments().find(|arg| arg.get_long() == Some(long)))
+        .filter(|arg| arg.get_action().takes_values())
+        .map(|arg| arg.get_possible_values().iter().map(|value| value.get_name().to_string()).collect::<Vec<_>>())
+        .filter(|choices| !choices.is_empty());
+    let candidates: Vec<String> = if let Some(choices) = choices {
+        choices
+    } else if current.starts_with('-') {
         let global = root.get_arguments().filter(|arg| arg.is_global_set());
         flags_of(node)
             .chain(global)
@@ -338,9 +352,11 @@ mod tests {
             cli(bed.app(), &["status", "--jq", "{branch, runs: (.runs | length)}"]).json(),
             json!({ "branch": "feature/x", "runs": 0 })
         );
+        // As in jq, a field of something missing is null, not an error.
+        assert_eq!(cli(bed.app(), &["status", "--jq", ".pr.title"]).stdout, "null\n");
         let bad = cli(bed.app(), &["status", "--jq", ".["]);
         assert_eq!((bad.code, bad.stderr.contains("Invalid --jq expression")), (1, true));
-        assert_eq!(bed.ado.requests().len(), 6, "the bad filter was caught before anything was asked");
+        assert_eq!(bed.ado.requests().len(), 8, "the bad filter was caught before anything was asked");
     }
 
     #[test]
@@ -361,6 +377,11 @@ mod tests {
         assert_eq!(cli(bed.app(), &["__complete", "--", "pr", "create", "--dr"]).stdout, "--draft\n");
         assert_eq!(cli(bed.app(), &["__complete", "--", "pr", "reply", "7", "3", "--res"]).stdout, "--resolve\n");
         assert_eq!(cli(bed.app(), &["__complete", "--", "status", "--j"]).stdout, "--json\n--jq\n");
+        assert_eq!(
+            cli(bed.app(), &["__complete", "--", "pr", "list", "--state", "a"]).stdout,
+            "active\nabandoned\nall\n"
+        );
+        assert_eq!(cli(bed.app(), &["__complete", "--", "pr", "create", "--title", "a"]).stdout, "");
         assert_eq!(cli(bed.app(), &["__complete", "--", "__"]).stdout, "");
     }
 }

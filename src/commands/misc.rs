@@ -34,15 +34,23 @@ pub struct Api {
 
 impl Api {
     pub fn run(&self, app: &App) -> Result<Output> {
-        let scope = app.scope()?;
-        let ado = app.ado(&scope.org_url);
         let method =
             Method::parse(&self.method).ok_or_else(|| Error::user(format!("Unknown method {}.", self.method)))?;
-        let url = match self.path.as_str() {
-            full if full.starts_with("https://") => full.to_string(),
+        // Only a project-relative path needs a project; a full URL needs nothing.
+        let (ado, url) = match self.path.as_str() {
+            full if full.starts_with("https://") => (app.ado(""), full.to_string()),
             path => match path.strip_prefix('/') {
-                Some(org_relative) => ado.url(org_relative, &[])?,
-                None => ado.url(&format!("{}/{path}", enc(&scope.project)), &[])?,
+                Some(org_relative) => {
+                    let ado = app.ado(&app.org_url()?);
+                    let url = ado.url(org_relative, &[])?;
+                    (ado, url)
+                }
+                None => {
+                    let scope = app.scope()?;
+                    let ado = app.ado(&scope.org_url);
+                    let url = ado.url(&format!("{}/{path}", enc(&scope.project)), &[])?;
+                    (ado, url)
+                }
             },
         };
         let body = match self.body.as_deref() {
@@ -335,7 +343,19 @@ mod tests {
 
     use super::*;
     use crate::ado::Response;
-    use crate::testing::{cli, ok, Bed, Recorded};
+    use crate::app::ScopeHint;
+    use crate::testing::{cli, ok, Bed, GitOpts, Recorded};
+
+    #[test]
+    fn an_org_relative_api_path_needs_only_an_organization() {
+        let bed = Bed::new(Box::new(|_| ok(json!({ "count": 2 })))).git(GitOpts::outside_a_repo());
+        let app = || App { flags: ScopeHint { org: Some("contoso".into()), ..Default::default() }, ..bed.app() };
+        assert_eq!(cli(app(), &["api", "/_apis/projects", "--jq", ".count"]).stdout, "2\n");
+        assert_eq!(bed.ado.requests()[0].path, "/_apis/projects");
+
+        let res = cli(app(), &["api", "_apis/git/repositories"]);
+        assert_eq!((res.code, res.stderr.contains("--project")), (1, true), "{}", res.stderr);
+    }
 
     #[test]
     fn api_paths_are_project_relative_unless_they_start_with_a_slash() {

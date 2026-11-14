@@ -182,25 +182,22 @@ pub fn serve(paths: Paths, session: Session, echo: bool) -> Result<Daemon> {
 
 fn bind(paths: &Paths) -> Result<Listener> {
     let listen = || ListenerOptions::new().name(socket_name(&paths.socket)?).create_sync();
-    listen()
-        .or_else(|err| {
-            if reachable(&paths.socket) {
-                return Err(Error::prereq("Another dova daemon is already running."));
-            }
-            // A dead daemon's leftover socket file.
-            if cfg!(unix) && std::fs::remove_file(&paths.socket).is_ok() {
-                return listen().map_err(|err| Error::prereq(format!("Could not listen on {}: {err}", paths.socket)));
-            }
-            Err(Error::prereq(format!("Could not listen on {}: {err}", paths.socket)))
-        })
-        .and_then(|listener| {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&paths.socket, std::fs::Permissions::from_mode(0o600))?;
-            }
-            Ok(listener)
-        })
+    let listener = listen().or_else(|err| {
+        if reachable(&paths.socket) {
+            return Err(Error::prereq("Another dova daemon is already running."));
+        }
+        // A dead daemon's leftover socket file.
+        if cfg!(unix) && std::fs::remove_file(&paths.socket).is_ok() {
+            return listen().map_err(|err| Error::prereq(format!("Could not listen on {}: {err}", paths.socket)));
+        }
+        Err(Error::prereq(format!("Could not listen on {}: {err}", paths.socket)))
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&paths.socket, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(listener)
 }
 
 /// The daemon's directories exist, are this user's, and are closed to everyone else.
@@ -290,6 +287,7 @@ impl Server {
                 Ok(json!(sent?))
             }
             "auth.status" => Ok(json!(self.session.status())),
+            "auth.token" => Ok(json!(self.session.token_for(params["org"].as_str().unwrap_or(""))?)),
             "daemon.status" => Ok(json!(self.status())),
             "daemon.stop" => Ok(Value::Null),
             other => Err(Error::user(format!("Unknown method {other}"))),
@@ -510,6 +508,10 @@ impl Transport for InProcess {
         self.login.run(|| self.session.send(req))
     }
 
+    fn token(&self, org: &str) -> Result<String> {
+        self.login.run(|| self.session.token_for(org))
+    }
+
     fn auth_status(&self) -> Result<AuthStatus> {
         Ok(self.session.status())
     }
@@ -541,6 +543,10 @@ impl Transport for ViaDaemon {
 
     fn send(&self, req: &Request) -> Result<Response> {
         self.login.run(|| self.client()?.call("ado.request", json!(req)))
+    }
+
+    fn token(&self, org: &str) -> Result<String> {
+        self.login.run(|| self.client()?.call("auth.token", json!({ "org": org })))
     }
 
     fn auth_status(&self) -> Result<AuthStatus> {

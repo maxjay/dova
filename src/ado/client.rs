@@ -14,6 +14,8 @@ use crate::urls::{enc, unique};
 
 /// The most ids the work items batch endpoint takes.
 const BATCH: usize = 200;
+/// The most pull requests one list asks for.
+pub const MOST: usize = 100;
 const JSON: &str = "application/json";
 
 fn head_ref(branch: &str) -> String {
@@ -35,6 +37,7 @@ pub struct NewWorkItem {
     pub title: String,
     pub area_path: Option<String>,
     pub iteration_path: Option<String>,
+    /// HTML, as the field stores it.
     pub description: Option<String>,
     pub assigned_to: Option<String>,
     pub parent_id: Option<u64>,
@@ -94,11 +97,14 @@ impl<'a> AdoClient<'a> {
     }
 
     pub fn create_work_item(&self, item: &NewWorkItem) -> Result<WorkItem> {
+        // A Bug's form shows Repro Steps where every other type shows a Description.
+        let is_bug = item.kind.eq_ignore_ascii_case("bug");
+        let body = if is_bug { "Microsoft.VSTS.TCM.ReproSteps" } else { "System.Description" };
         let fields = [
             ("System.Title", Some(&item.title)),
             ("System.AreaPath", item.area_path.as_ref()),
             ("System.IterationPath", item.iteration_path.as_ref()),
-            ("System.Description", item.description.as_ref()),
+            (body, item.description.as_ref()),
             ("System.AssignedTo", item.assigned_to.as_ref()),
         ];
         let mut patch: Vec<Value> = fields
@@ -161,6 +167,17 @@ impl<'a> AdoClient<'a> {
         Ok(list(&res["value"]).first().map(|raw| to_pull_request(raw, &self.org_url, project, repo)))
     }
 
+    /// The pull requests the signed-in user opened in a project, newest first, [`MOST`] at most.
+    /// `status` is active, completed, abandoned or all.
+    pub fn my_pull_requests(&self, project: &str, status: &str) -> Result<Vec<PullRequest>> {
+        let me = self.authenticated_user()?;
+        let me = me["id"].as_str().ok_or_else(|| Error::external("Azure DevOps didn't say who is signed in."))?;
+        let most = MOST.to_string();
+        let query = [("searchCriteria.creatorId", me), ("searchCriteria.status", status), ("$top", most.as_str())];
+        let res = self.get(&format!("{}/_apis/git/pullrequests", enc(project)), &query)?;
+        Ok(list(&res["value"]).iter().map(|raw| to_pull_request(raw, &self.org_url, project, "")).collect())
+    }
+
     pub fn create_pull_request(&self, pr: &NewPullRequest) -> Result<PullRequest> {
         let mut body = json!({
             "sourceRefName": head_ref(&pr.source_branch),
@@ -179,6 +196,51 @@ impl<'a> AdoClient<'a> {
         Ok(to_pull_request(&raw, &self.org_url, &pr.project, &pr.repo))
     }
 
+    /// Changes a pull request's title, its description, or both.
+    pub fn update_pull_request(
+        &self,
+        pr: &PullRequest,
+        title: Option<&str>,
+        description: Option<&str>,
+    ) -> Result<PullRequest> {
+        let mut body = json!({});
+        if let Some(title) = title {
+            body["title"] = json!(title);
+        }
+        if let Some(description) = description {
+            body["description"] = json!(description);
+        }
+        let path = format!("{}/_apis/git/repositories/{}/pullrequests/{}", enc(&pr.project), enc(&pr.repo), pr.id);
+        let raw = self.call(Method::Patch, &path, &[], Some((&body, JSON)))?;
+        Ok(to_pull_request(&raw, &self.org_url, &pr.project, &pr.repo))
+    }
+
+    /// Uploads a file to a pull request, under a name the pull request holds
+    /// only once; the address its text can show it at.
+    pub fn attach(&self, pr: &PullRequest, name: &str, bytes: &[u8]) -> Result<String> {
+        use base64::Engine;
+        let preview = [("api-version", "7.1-preview.1")];
+        let req = Request {
+            method: Method::Post,
+            url: self.url(&pr_path(pr, &format!("attachments/{}", enc(name))), &preview)?,
+            body: Some(base64::engine::general_purpose::STANDARD.encode(bytes)),
+            content_type: Some("application/octet-stream".to_string()),
+            base64: true,
+            ..Request::get("")
+        };
+        let uploaded = match self.send(&req) {
+            Ok(res) => serde_json::from_str::<Value>(&res.body).unwrap_or(Value::Null),
+            // The same file was attached before: use that upload.
+            Err(err) if err.message.contains("already exists") => {
+                let all = self.get(&pr_path(pr, "attachments"), &preview)?;
+                list(&all["value"]).iter().find(|a| a["displayName"] == name).cloned().unwrap_or(Value::Null)
+            }
+            Err(err) => return Err(err),
+        };
+        let url = uploaded["url"].as_str().map(str::to_string);
+        url.ok_or_else(|| Error::external(format!("Azure DevOps didn't say where it put \"{name}\".")))
+    }
+
     pub fn pull_request_work_items(&self, pr: &PullRequest) -> Result<Vec<WorkItem>> {
         let res = self.get(&pr_path(pr, "workitems"), &[])?;
         let ids: Vec<u64> = list(&res["value"])
@@ -194,10 +256,12 @@ impl<'a> AdoClient<'a> {
     }
 
     pub fn thread(&self, pr: &PullRequest, id: u64) -> Result<Thread> {
-        let raw = self.get_or(&pr_path(pr, &format!("threads/{id}")), || {
-            format!("Thread #{id} was not found on PR #{}.", pr.id)
-        })?;
-        Ok(to_thread(&raw))
+        // Azure DevOps answers for a thread that isn't there with a 500, not a 404.
+        let missing = |err: Error| match err.kind == Kind::NotFound || err.message.contains("does not exist") {
+            true => Error::not_found(format!("Thread #{id} was not found on PR #{}.", pr.id)),
+            false => err,
+        };
+        Ok(to_thread(&self.get(&pr_path(pr, &format!("threads/{id}")), &[]).map_err(missing)?))
     }
 
     pub fn add_comment(&self, pr: &PullRequest, text: &str) -> Result<Thread> {
@@ -211,6 +275,19 @@ impl<'a> AdoClient<'a> {
         let body = json!({ "content": text, "commentType": "text", "parentCommentId": parent });
         self.call(Method::Post, &pr_path(pr, &format!("threads/{thread_id}/comments")), &[], Some((&body, JSON)))
             .map(drop)
+    }
+
+    /// Rewrites the signed-in user's last comment in a thread; its id.
+    pub fn amend_comment(&self, pr: &PullRequest, thread_id: u64, text: &str) -> Result<u64> {
+        let me = self.authenticated_user()?;
+        let thread = self.thread(pr, thread_id)?;
+        let mine =
+            thread.comments.iter().rev().find(|c| c.author_id.is_some() && c.author_id.as_deref() == me["id"].as_str());
+        let comment = mine
+            .ok_or_else(|| Error::not_found(format!("You have no comment in thread #{thread_id} on PR #{}.", pr.id)))?;
+        let path = pr_path(pr, &format!("threads/{thread_id}/comments/{}", comment.id));
+        self.call(Method::Patch, &path, &[], Some((&json!({ "content": text }), JSON)))?;
+        Ok(comment.id)
     }
 
     /// `status` is the API's name: active, fixed, wontFix, closed or pending.
@@ -227,14 +304,19 @@ impl<'a> AdoClient<'a> {
     /* pipelines */
 
     /// Most recent first, for a branch or a full ref (`refs/pull/12/merge`).
-    /// Re-filtered on each run's own branch (another ref's run shown as this
-    /// branch's CI is worse than none), so it over-fetches.
-    pub fn runs(&self, project: &str, reference: &str, top: usize) -> Result<Vec<Run>> {
+    /// Re-filtered on each run's own branch and, when one is given, its repo
+    /// (another ref's run, or the same branch name in another repo, shown as
+    /// this branch's CI is worse than none), so it over-fetches.
+    pub fn runs(&self, project: &str, repo: Option<&str>, reference: &str, top: usize) -> Result<Vec<Run>> {
         let wanted = head_ref(reference);
         let fetch = (top * 4).max(20).to_string();
         let query = [("branchName", wanted.as_str()), ("$top", fetch.as_str()), ("queryOrder", "queueTimeDescending")];
         let res = self.get(&format!("{}/_apis/build/builds", enc(project)), &query)?;
-        let ours = |b: &&Value| b["sourceBranch"].as_str().map_or(true, |branch| branch == wanted);
+        let same = |said: &Value, wanted: Option<&str>| match (said.as_str(), wanted) {
+            (Some(said), Some(wanted)) => said.eq_ignore_ascii_case(wanted),
+            _ => true,
+        };
+        let ours = |b: &&Value| same(&b["sourceBranch"], Some(&wanted)) && same(&b["repository"]["name"], repo);
         Ok(list(&res["value"]).iter().filter(ours).take(top).map(|b| to_run(b, &self.org_url, project)).collect())
     }
 
@@ -260,11 +342,15 @@ impl<'a> AdoClient<'a> {
 
     /// The signed-in user as `System.AssignedTo` accepts it.
     pub fn me(&self) -> Result<Option<String>> {
-        let user = &self.get("_apis/connectionData", &[("api-version", "7.1-preview")])?["authenticatedUser"];
+        let user = self.authenticated_user()?;
         Ok(user["properties"]["Account"]["$value"]
             .as_str()
             .or(user["providerDisplayName"].as_str())
             .map(str::to_string))
+    }
+
+    fn authenticated_user(&self) -> Result<Value> {
+        Ok(self.get("_apis/connectionData", &[("api-version", "7.1-preview")])?["authenticatedUser"].take())
     }
 
     /// `dova api`: any request; the body comes back as sent.
@@ -276,7 +362,7 @@ impl<'a> AdoClient<'a> {
         content_type: Option<String>,
     ) -> Result<Response> {
         let content_type = body.as_ref().map(|_| content_type.unwrap_or_else(|| JSON.to_string()));
-        self.send(&Request { method, url, body, content_type, text: false })
+        self.send(&Request { method, url, body, content_type, ..Request::get("") })
     }
 
     /* plumbing */
@@ -309,7 +395,7 @@ impl<'a> AdoClient<'a> {
             url: self.url(path, query)?,
             body: body.map(|(json, _)| json.to_string()),
             content_type: body.map(|(_, content_type)| content_type.to_string()),
-            text: false,
+            ..Request::get("")
         };
         let res = self.send(&req)?;
         if res.body.trim().is_empty() {
@@ -424,11 +510,32 @@ mod tests {
     }
 
     #[test]
-    fn keeps_only_runs_for_the_ref_asked_about_even_if_the_service_sends_others() {
-        let builds = json!({ "value": [{ "id": 1, "status": "completed", "sourceBranch": "refs/heads/other" }, { "id": 2, "status": "completed", "sourceBranch": "refs/heads/feature/x" }] });
+    fn a_bugs_body_is_its_repro_steps() {
+        let ado = fake_ado(Box::new(|_| Some(json_response(200, wi(10, json!({}))))));
+        let bug = |kind: &str| NewWorkItem {
+            kind: kind.into(),
+            title: "T".into(),
+            description: Some("Steps".into()),
+            ..Default::default()
+        };
+        AdoClient::new(&ado, ORG).create_work_item(&bug("Bug")).unwrap();
+        AdoClient::new(&ado, ORG).create_work_item(&bug("Task")).unwrap();
+        let field = |at: usize| ado.requests()[at].body[1]["path"].clone();
+        assert_eq!(
+            (field(0), field(1)),
+            (json!("/fields/Microsoft.VSTS.TCM.ReproSteps"), json!("/fields/System.Description"))
+        );
+    }
+
+    #[test]
+    fn keeps_only_runs_for_the_ref_and_repo_asked_about_even_if_the_service_sends_others() {
+        let run = |id: u64, branch: &str, repo: &str| json!({ "id": id, "status": "completed", "sourceBranch": branch, "repository": { "name": repo }, "queueTime": "2026-11-14T19:48:07.7530236Z" });
+        let builds = json!({ "value": [run(1, "refs/heads/other", "web"), run(3, "refs/heads/feature/x", "api"), run(2, "refs/heads/feature/x", "web")] });
         let ado = fake_ado(Box::new(move |_| Some(json_response(200, builds.clone()))));
-        let runs = AdoClient::new(&ado, ORG).runs("MyProject", "feature/x", 3).unwrap();
+        let runs = AdoClient::new(&ado, ORG).runs("MyProject", Some("web"), "feature/x", 3).unwrap();
         assert_eq!(runs.iter().map(|r| r.id).collect::<Vec<_>>(), [2]);
+        assert_eq!(runs[0].queued_at.as_deref(), Some("2026-11-14T19:48:07Z"));
+        assert_eq!(runs[0].url, "https://dev.azure.com/contoso/MyProject/_build/results?buildId=2");
         let request = &ado.requests()[0];
         assert_eq!(request.query("branchName").as_deref(), Some("refs/heads/feature/x"));
         assert_eq!(request.query("$top").as_deref(), Some("20"));

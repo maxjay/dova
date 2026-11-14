@@ -1,5 +1,5 @@
 //! `dova mcp`: dova as an MCP server (stdio). Not one tool per command —
-//! ten tools shaped around what an agent actually does, each mapped onto
+//! eleven tools shaped around what an agent actually does, each mapped onto
 //! the commands underneath. Free text travels as JSON, so the shell
 //! quoting rules the CLI instructions are full of don't exist here.
 
@@ -109,7 +109,7 @@ fn tools() -> Vec<Tool> {
             description: "Open a PR from the checked-out branch (push it first). Links the branch's work items; targets the repo's default branch. Completing the PR moves those work items on — don't change their state yourself.",
             properties: json!({
                 "title": text("title (default: the last commit's subject)"),
-                "body": text("description, markdown; any length"),
+                "body": text("description, markdown; any length. A markdown image of a local file, ![alt](shot.png), is uploaded and shown"),
                 "target": text("branch to merge into"),
                 "draft": flag("open as a draft"),
                 "workItems": ids("work item ids, instead of the linked ones"),
@@ -118,12 +118,24 @@ fn tools() -> Vec<Tool> {
             command: |a| Ok(("pr.create", same(a))),
         },
         Tool {
+            name: "update_pull_request",
+            description: "Change a PR's title, its description, or both. The description is replaced whole, so send all of it.",
+            properties: json!({
+                "pr": id("PR id or link (default: the checked-out branch's active PR)"),
+                "title": text("new title"),
+                "body": text("new description, markdown. A markdown image of a local file, ![alt](shot.png), is uploaded and shown"),
+            }),
+            required: &[],
+            command: |a| Ok(("pr.edit", json!({ "idOrUrl": a.get("pr"), "title": a.get("title"), "body": a.get("body") }))),
+        },
+        Tool {
             name: "review_thread",
-            description: "Act on PR review threads. thread + nothing else: read every comment in it. thread + text: reply (add status \"resolved\" to resolve it in the same step). thread + status: just set the status. text without thread: start a new thread.",
+            description: "Act on PR review threads. thread + nothing else: read every comment in it. thread + text: reply (add status \"resolved\" to resolve it in the same step), or with amend, rewrite your last comment there instead. thread + status: just set the status. text without thread: start a new thread. A markdown image of a local file in text, ![alt](shot.png), is uploaded and shown.",
             properties: json!({
                 "pr": id("PR id or link"),
                 "thread": id("thread id, as listed by status or view"),
                 "text": text("comment text, markdown"),
+                "amend": flag("rewrite your last comment in the thread with text, instead of replying"),
                 "status": { "type": "string", "enum": ["resolved", "active", "wontfix", "closed", "pending"], "description": "set the thread to this" },
             }),
             required: &["pr"],
@@ -133,6 +145,7 @@ fn tools() -> Vec<Tool> {
                 Ok(match (has("thread"), has("text"), has("status")) {
                     (false, false, _) => return Err(Error::user("Pass text to start a thread, or a thread to act on.")),
                     (false, true, _) => ("pr.comment", params),
+                    (true, true, _) if a.get("amend") == Some(&json!(true)) => ("pr.amend", params),
                     (true, true, _) => ("pr.reply", json!({ "pr": a.get("pr"), "thread": a.get("thread"), "text": a.get("text"), "resolve": a.get("status") })),
                     (true, false, true) => ("pr.resolve", json!({ "pr": a.get("pr"), "thread": a.get("thread"), "status": a.get("status") })),
                     (true, false, false) => ("pr.thread", params),
@@ -273,7 +286,7 @@ mod tests {
     }
 
     #[test]
-    fn handshakes_and_lists_ten_tools_with_schemas() {
+    fn handshakes_and_lists_eleven_tools_with_schemas() {
         let (replies, _) = mcp(
             &[
                 json!({ "id": 1, "method": "initialize", "params": { "protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": { "name": "t", "version": "1" } } }),
@@ -289,7 +302,7 @@ mod tests {
             (&json!("2025-03-26"), &json!({ "tools": {} }), &json!("dova"))
         );
         let tools = by_id(2)["tools"].as_array().unwrap().clone();
-        assert_eq!(tools.len(), 10);
+        assert_eq!(tools.len(), 11);
         let view = tools.iter().find(|t| t["name"] == "view").unwrap()["inputSchema"].clone();
         assert_eq!((&view["type"], &view["required"]), (&json!("object"), &json!(["id"])));
         assert!(view["properties"]["id"].is_object() && view["properties"]["cwd"].is_object());

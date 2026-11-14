@@ -13,11 +13,18 @@ pub struct GitOutput {
     pub ok: bool,
 }
 
-/// Runs one git command; the seam tests replace.
-pub type Runner = Box<dyn Fn(&[&str], &Path) -> Result<GitOutput> + Send + Sync>;
+/// Extra environment for one git command.
+pub type GitEnv = [(String, String)];
 
-pub fn exec(args: &[&str], cwd: &Path) -> Result<GitOutput> {
-    let out = Command::new("git").args(args).current_dir(cwd).output().map_err(|err| match err.kind() {
+/// Runs one git command; the seam tests replace.
+pub type Runner = Box<dyn Fn(&[&str], &Path, &GitEnv) -> Result<GitOutput> + Send + Sync>;
+
+pub fn exec(args: &[&str], cwd: &Path, env: &GitEnv) -> Result<GitOutput> {
+    // dova never has git ask for a sign-in: not in the terminal, not in a window.
+    let quiet = [("GIT_TERMINAL_PROMPT", "0"), ("GCM_INTERACTIVE", "never")];
+    let mut git = Command::new("git");
+    git.args(args).current_dir(cwd).envs(quiet).envs(env.iter().map(|(key, value)| (key, value)));
+    let out = git.output().map_err(|err| match err.kind() {
         std::io::ErrorKind::NotFound => Error::prereq("git is not installed or not on PATH."),
         _ => Error::external(format!("Could not run git: {err}")),
     })?;
@@ -26,6 +33,26 @@ pub fn exec(args: &[&str], cwd: &Path) -> Result<GitOutput> {
         stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
         ok: out.status.success(),
     })
+}
+
+/// The host of an Azure Repos remote reached over HTTPS, where a bearer token signs the request.
+fn azure_host(remote: &str) -> Option<String> {
+    let url = url::Url::parse(remote).ok()?;
+    let host = url.host_str()?.to_ascii_lowercase();
+    (url.scheme() == "https" && (host == "dev.azure.com" || host.ends_with(".visualstudio.com"))).then_some(host)
+}
+
+/// git configuration for one command: send the token to that host, and ask no credential helper.
+/// Through the environment, not `-c`: other processes can read a command line.
+fn signed(host: &str, token: &str) -> Vec<(String, String)> {
+    let pairs = [
+        ("GIT_CONFIG_COUNT", "2".to_string()),
+        ("GIT_CONFIG_KEY_0", "credential.helper".to_string()),
+        ("GIT_CONFIG_VALUE_0", String::new()),
+        ("GIT_CONFIG_KEY_1", format!("http.https://{host}/.extraheader")),
+        ("GIT_CONFIG_VALUE_1", format!("Authorization: Bearer {token}")),
+    ];
+    pairs.into_iter().map(|(key, value)| (key.to_string(), value)).collect()
 }
 
 pub struct Git {
@@ -38,9 +65,14 @@ impl Git {
         Git { runner, cwd }
     }
 
+    /// Where commands run, and what relative paths are relative to.
+    pub fn cwd(&self) -> &Path {
+        &self.cwd
+    }
+
     /// Trimmed stdout; an error on a non-zero exit.
     pub fn run(&self, args: &[&str]) -> Result<String> {
-        let out = (self.runner)(args, &self.cwd)?;
+        let out = (self.runner)(args, &self.cwd, &[])?;
         if !out.ok {
             return Err(Error::external(format!("git {} failed:\n{}", args.join(" "), out.stderr.trim())));
         }
@@ -49,7 +81,7 @@ impl Git {
 
     /// Trimmed stdout, or None on a non-zero exit or empty output.
     pub fn try_run(&self, args: &[&str]) -> Result<Option<String>> {
-        let out = (self.runner)(args, &self.cwd)?;
+        let out = (self.runner)(args, &self.cwd, &[])?;
         let stdout = out.stdout.trim_end();
         Ok((out.ok && !stdout.is_empty()).then(|| stdout.to_string()))
     }
@@ -79,14 +111,20 @@ impl Git {
 
     /// A ref to read `branch` from: local, already fetched, or fetched now
     /// into a remote-tracking ref. Never checks anything out, so it works for
-    /// someone else's PR without touching the working tree.
-    pub fn readable_ref(&self, branch: &str) -> Result<String> {
+    /// someone else's PR without touching the working tree. A fetch from
+    /// Azure Repos goes out signed with `token`, dova's own sign-in, so git
+    /// needs none of its own.
+    pub fn readable_ref(&self, branch: &str, token: impl FnOnce() -> Result<String>) -> Result<String> {
         if self.has_ref(&format!("refs/heads/{branch}"))? {
             return Ok(branch.to_string());
         }
         let tracking = format!("refs/remotes/origin/{branch}");
         if !self.has_ref(&tracking)? {
-            let fetched = (self.runner)(&["fetch", "origin", &format!("{branch}:{tracking}")], &self.cwd)?;
+            let env = match self.remote_url()?.as_deref().and_then(azure_host) {
+                Some(host) => signed(&host, &token()?),
+                None => Vec::new(),
+            };
+            let fetched = (self.runner)(&["fetch", "origin", &format!("{branch}:{tracking}")], &self.cwd, &env)?;
             if !fetched.ok {
                 let err = Error::not_found(format!("No branch named \"{branch}\" locally or on origin."));
                 return Err(match fetched.stderr.trim().lines().next() {

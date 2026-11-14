@@ -33,6 +33,11 @@ pub fn pull_request_url(org_url: &str, project: &str, repo: &str, id: u64) -> St
     format!("{org_url}/{}/_git/{}/pullrequest/{id}", enc(project), enc(repo))
 }
 
+/// The page listing the signed-in user's pull requests, across the organization.
+pub fn my_pull_requests_url(org_url: &str) -> String {
+    format!("{org_url}/_pulls")
+}
+
 pub fn run_url(org_url: &str, project: &str, id: u64) -> String {
     format!("{org_url}/{}/_build/results?buildId={id}", enc(project))
 }
