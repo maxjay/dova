@@ -114,4 +114,6 @@ cargo run -- status
 
 Pushing a tag like `v0.3.0` builds the `.msi` and `.deb` and publishes them as a release. Locally: `cargo deb`, or `./packaging/build-msi.ps1`.
 
+The page at [dova.maxjay.dev](https://dova.maxjay.dev) is `site/public/index.html`. A release publishes it with that release's installers beside it, as `dova.msi` and `dova.deb`.
+
 MIT licensed.

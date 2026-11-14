@@ -1,6 +1,6 @@
 # Every pull request, and every push to main: test on Linux and Windows,
 # and build both installers. A tag like v0.3.0: also publish them as a
-# GitHub release.
+# GitHub release, and on dova.maxjay.dev (site.yml).
 name: build
 
 on:
@@ -62,3 +62,9 @@ jobs:
       - run: gh release create "$GITHUB_REF_NAME" *.deb *.msi --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
         env:
           GH_TOKEN: ${{ github.token }}
+
+  # The release's installers go up on dova.maxjay.dev, with the page.
+  site:
+    needs: release
+    uses: ./.github/workflows/site.yml
+    secrets: inherit

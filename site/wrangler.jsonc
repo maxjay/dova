@@ -1,0 +1,9 @@
+// dova.maxjay.dev: Cloudflare serves the files in public/ as they are. There is no Worker code.
+// Published by .github/workflows/site.yml, which puts the installers in public/ first.
+{
+  "name": "dova",
+  "compatibility_date": "2026-11-01",
+  "assets": {
+    "directory": "./public"
+  }
+}
