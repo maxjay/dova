@@ -104,9 +104,13 @@ pub fn wi(id: u64, fields: Value) -> Value {
     item
 }
 
-/// Answers the work items batch endpoint from a list: null for the ids it doesn't have.
+/// Answers the work items batch endpoint from a list: null for the ids it
+/// doesn't have. Nobody has commented on any of them.
 pub fn batch(items: Vec<Value>) -> Route {
     Box::new(move |req| {
+        if req.path.ends_with("/comments") {
+            return ok(json!({ "comments": [] }));
+        }
         let found = |id: &Value| items.iter().find(|item| item["id"] == *id).cloned().unwrap_or(Value::Null);
         ok(json!({ "value": req.body["ids"].as_array()?.iter().map(found).collect::<Vec<_>>() }))
     })

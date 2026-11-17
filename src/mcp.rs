@@ -1,5 +1,5 @@
 //! `dova mcp`: dova as an MCP server (stdio). Not one tool per command —
-//! eleven tools shaped around what an agent actually does, each mapped onto
+//! twelve tools shaped around what an agent actually does, each mapped onto
 //! the commands underneath. Free text travels as JSON, so the shell
 //! quoting rules the CLI instructions are full of don't exist here.
 
@@ -55,7 +55,7 @@ fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "view",
-            description: "A work item (with parent, children and its full description / acceptance criteria / repro steps) or a pull request (with work items and review threads), by id or link. A bare id is tried as a work item first.",
+            description: "A work item (with parent, children, its full description / acceptance criteria / repro steps, and its discussion) or a pull request (with work items and review threads), by id or link. A bare id is tried as a work item first.",
             properties: json!({ "id": id("work item or PR id, or a link to either") }),
             required: &["id"],
             command: |a| Ok(("view", json!({ "idOrUrl": a.get("id") }))),
@@ -119,14 +119,42 @@ fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "update_pull_request",
-            description: "Change a PR's title, its description, or both. The description is replaced whole, so send all of it.",
+            description: "Change a PR's title or description, or move it in or out of draft. The description is replaced whole, so send all of it.",
             properties: json!({
                 "pr": id("PR id or link (default: the checked-out branch's active PR)"),
                 "title": text("new title"),
                 "body": text("new description, markdown. A markdown image of a local file, ![alt](shot.png), is uploaded and shown"),
+                "draft": flag("true: back into draft. false: ready for review"),
             }),
             required: &[],
-            command: |a| Ok(("pr.edit", json!({ "idOrUrl": a.get("pr"), "title": a.get("title"), "body": a.get("body") }))),
+            command: |a| {
+                let draft = a.get("draft").and_then(Value::as_bool);
+                Ok(("pr.edit", json!({ "idOrUrl": a.get("pr"), "title": a.get("title"), "body": a.get("body"), "draft": draft == Some(true), "ready": draft == Some(false) })))
+            },
+        },
+        Tool {
+            name: "update_work_item",
+            description: "Change a work item: its title, description, type, estimate, assignee, iteration, area or state, and optionally add a comment to its discussion. Only what you pass changes. Leave state alone unless the user asks for it: completing the PR moves linked work items on by itself.",
+            properties: json!({
+                "id": id("work item id or link"),
+                "title": text("new title"),
+                "body": text("new description (repro steps, for a Bug); replaces the old one"),
+                "type": text("turn it into this type, e.g. Bug, Feature, User Story"),
+                "points": { "type": "number", "description": "story points (effort or size, where the type calls it that)" },
+                "assignee": text("who it goes to: a name or email, \"me\", or \"none\" for nobody"),
+                "iteration": text("iteration path, or \"current\" for the team's current sprint"),
+                "area": text("area path"),
+                "state": text("move it to this state, e.g. Active or Closed; a wrong one is answered with the type's states"),
+                "team": text("the team whose current sprint \"current\" means, when the project has several"),
+                "comment": text("say this in the work item's discussion"),
+            }),
+            required: &["id"],
+            command: |a| {
+                let mut params = a.clone();
+                params.insert("idOrUrl".to_string(), a.get("id").cloned().unwrap_or(Value::Null));
+                params.remove("id");
+                Ok(("wi.edit", Value::Object(params)))
+            },
         },
         Tool {
             name: "review_thread",
@@ -286,7 +314,7 @@ mod tests {
     }
 
     #[test]
-    fn handshakes_and_lists_eleven_tools_with_schemas() {
+    fn handshakes_and_lists_twelve_tools_with_schemas() {
         let (replies, _) = mcp(
             &[
                 json!({ "id": 1, "method": "initialize", "params": { "protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": { "name": "t", "version": "1" } } }),
@@ -302,7 +330,7 @@ mod tests {
             (&json!("2025-03-26"), &json!({ "tools": {} }), &json!("dova"))
         );
         let tools = by_id(2)["tools"].as_array().unwrap().clone();
-        assert_eq!(tools.len(), 11);
+        assert_eq!(tools.len(), 12);
         let view = tools.iter().find(|t| t["name"] == "view").unwrap()["inputSchema"].clone();
         assert_eq!((&view["type"], &view["required"]), (&json!("object"), &json!(["id"])));
         assert!(view["properties"]["id"].is_object() && view["properties"]["cwd"].is_object());

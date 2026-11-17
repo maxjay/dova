@@ -10,19 +10,22 @@ For Azure DevOps work items, pull requests and pipelines, use `dova` — never `
 | Find work items | `dova wi search <words> [--state … --type … --assignee me]` |
 | Start work on a ticket | `git checkout -b <branch>` then `dova link <id>` |
 | File a bug / work item | `dova bug '<title>'`, `dova wi create '<title>' --type Task [--parent <id>]` |
+| Change a work item (text, type, points, assignee, sprint, state) | `dova wi edit <id> [--title … --type Bug --points 3 --assignee me --iteration --state Active]` (`--iteration` alone means the current sprint) |
+| Comment on a work item | `dova wi comment <id> - <<'EOF'` … `EOF` |
 | Open the PR | `dova pr create --title '<title>' --body - <<'EOF'` … `EOF` |
 | The user's own pull requests, with checks and open threads | `dova pr list [--state active\|completed\|abandoned\|all]` |
 | Answer review threads | `dova pr reply <pr> <thread> - --resolve <<'EOF'` … `EOF` |
 | Read one whole thread | `dova pr thread <pr> <thread>` |
 | Fix a comment you posted | `dova pr amend <pr> <thread> - <<'EOF'` … `EOF` (rewrites your last comment there) |
 | Change a PR's title or description | `dova pr edit [pr] --title '<title>' --body - <<'EOF'` … `EOF` |
+| Move a PR in or out of draft | `dova pr edit [pr] --draft`, `dova pr edit [pr] --ready` |
 | Show a picture in a PR description or comment | write `![what it shows](path/to/file.png)` in the text; dova uploads the file |
 | Why CI failed | `dova pipeline log` |
 
 Rules:
 
 - **Run `dova link <id>` before `dova pr create`**, or the PR opens with no ticket attached. `dova link` records exactly the ids you give it.
-- **Never change a work item's state or assignee** with other tools: completing the PR moves its linked work items on.
+- **Leave a linked work item's state alone unless the user asks**: completing the PR moves it on by itself. When they do ask, it's `dova wi edit <id> --state <state>`, like every other change to a work item.
 - **Pipe free text through stdin** (`-` plus a quoted heredoc, `<<'EOF'`): the shell rewrites `$x` and runs `` `cmd` `` in arguments. Single-quote short titles. Length is never a problem; don't shorten bodies.
 - **Decide on `--json` before running**, not after: `dova status --json`, or `--jq <expr>` for just the part you need. Human output is not a stable format.
 - **Prefer one command that returns everything** (`status`, `summarize`, `pr view`) over several narrow ones.

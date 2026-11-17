@@ -118,7 +118,7 @@ impl Create {
         };
         // A picture can only be uploaded to a pull request that exists, so the description is finished afterwards.
         match description.filter(Illustrated::has_images) {
-            Some(body) => ado.update_pull_request(&pr, None, Some(&body.upload(&ado, &pr)?)),
+            Some(body) => ado.update_pull_request(&pr, None, Some(&body.upload(&ado, &pr)?), None),
             None => Ok(pr),
         }
     }
@@ -338,12 +338,21 @@ pub struct Edit {
     /// New description ('-' reads stdin; `![alt](shot.png)` uploads that file)
     #[arg(long, value_name = "TEXT")]
     pub body: Option<String>,
+    /// Put it back into draft
+    #[arg(long, conflicts_with = "ready")]
+    pub draft: bool,
+    /// Take it out of draft: ready for review
+    #[arg(long)]
+    pub ready: bool,
 }
 
 impl Edit {
     pub fn run(&self, app: &App) -> Result<Output> {
+        let draft = if self.draft { Some(true) } else { self.ready.then_some(false) };
         match (self.title.as_deref(), self.body.as_deref()) {
-            (None, None) => return Err(Error::user("Nothing to change.").hint("Pass --title, --body, or both.")),
+            (None, None) if draft.is_none() => {
+                return Err(Error::user("Nothing to change.").hint("Pass --title, --body, --draft or --ready."))
+            }
             (Some("-"), Some("-")) => return Err(Error::user("Only one of --title and --body can read stdin.")),
             _ => {}
         }
@@ -353,12 +362,13 @@ impl Edit {
             Some(body) => Some(illustrated(app, &ado, &pr, app.text(Some(body), "body")?)?),
             None => None,
         };
-        let pr = ado.update_pull_request(&pr, title.as_deref(), body.as_deref())?;
+        let pr = ado.update_pull_request(&pr, title.as_deref(), body.as_deref(), draft)?;
         let s = app.style;
         let text = format!(
-            "{} PR {} — {}\n{}",
+            "{} PR {}{} — {}\n{}",
             s.green("Updated"),
             s.bold(&format!("#{}", pr.id)),
+            if pr.is_draft { " [draft]" } else { "" },
             pr.title,
             s.dim(&format!("  {}", pr.url))
         );
@@ -458,7 +468,7 @@ pub enum Pr {
     List(List),
     /// A PR with its work items and review threads (default: the current branch's)
     View(View),
-    /// Change a PR's title or description (default: the current branch's)
+    /// Change a PR's title or description, or move it in or out of draft (default: the current branch's)
     Edit(Edit),
     /// Start a review thread
     Comment(Comment),
@@ -730,8 +740,15 @@ mod tests {
             ("PATCH", "/MyProject/_apis/git/repositories/web/pullrequests/7", &json!({ "title": "Better" }))
         );
 
+        // In and out of draft.
+        assert_eq!(cli(bed.app(), &["pr", "edit", "7", "--draft"]).code, 0);
+        assert_eq!(bed.ado.requests().pop().unwrap().body, json!({ "isDraft": true }));
+        assert_eq!(cli(bed.app(), &["pr", "edit", "7", "--ready", "--title", "Done"]).code, 0);
+        assert_eq!(bed.ado.requests().pop().unwrap().body, json!({ "isDraft": false, "title": "Done" }));
+
         let bed = Bed::new(route());
         assert_eq!(cli(bed.app(), &["pr", "edit", "7"]).code, 1);
+        assert_eq!(cli(bed.app(), &["pr", "edit", "7", "--draft", "--ready"]).code, 1);
         assert!(bed.ado.requests().is_empty());
     }
 

@@ -80,7 +80,7 @@ Needs git and the [Azure CLI](https://learn.microsoft.com/cli/azure/install-azur
 | `dova view <id\|link>` | a work item or a PR |
 | `dova summarize [branch\|pr]` | catch up: tickets, commits, diff |
 | `dova link <ids…>` · `unlink` · `list` | which work items a branch is for |
-| `dova wi view\|search\|create` · `dova bug <title>` | work items |
+| `dova wi view\|search\|create\|edit\|comment` · `dova bug <title>` | work items |
 | `dova pr create\|view\|edit` | pull requests |
 | `dova pr list` | the pull requests you opened, with their checks and open threads |
 | `dova pr comment\|thread\|reply\|amend\|resolve` | review threads |
@@ -103,7 +103,7 @@ Needs git and the [Azure CLI](https://learn.microsoft.com/cli/azure/install-azur
 
 | | |
 |---|---|
-| `dova mcp` | an MCP server: eleven tools for AI agents |
+| `dova mcp` | an MCP server: twelve tools for AI agents |
 | `dova rpc` | every command as JSON-RPC over stdio (`rpc.methods` lists them) |
 | `dova instructions` | teaches Copilot, Windsurf, Cursor and Codex to use dova |
 

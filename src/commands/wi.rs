@@ -1,4 +1,4 @@
-//! Work items: reading them, finding them, filing them.
+//! Work items: reading them, finding them, filing them, changing them.
 
 use clap::{Args, Subcommand};
 use serde::Serialize;
@@ -9,7 +9,8 @@ use super::link::link;
 use super::pr::{find_pull_request, pull_request_detail, render_pull_request};
 use super::work_item_table;
 use crate::ado::client::{AdoClient, NewWorkItem};
-use crate::ado::types::{WorkItem, WorkItemRef};
+use crate::ado::map::body_field;
+use crate::ado::types::{Comment, WorkItem, WorkItemRef};
 use crate::app::{App, ScopeHint};
 use crate::cli::Output;
 use crate::error::{Error, Kind, Result};
@@ -25,27 +26,47 @@ pub struct Detail {
     pub item: WorkItem,
     pub parent: Option<WorkItemRef>,
     pub children: Vec<WorkItemRef>,
+    /// Its discussion, oldest first.
+    pub comments: Vec<Comment>,
 }
 
-pub fn work_item_detail(app: &App, id_or_url: &str) -> Result<Detail> {
+/// A work item's id, from an id or a link, and the client for its organization.
+fn locate<'a>(app: &'a App, id_or_url: &str) -> Result<(u64, AdoClient<'a>)> {
     let link = parse_work_item_link(id_or_url);
     let id = link.as_ref().map(|l| l.id).or_else(|| parse_id(id_or_url));
     let id = id.ok_or_else(|| Error::user(format!("\"{id_or_url}\" isn't a work item id or link.")))?;
     // A link names its own organization; a bare id is in the one you're in.
     let hint = link.map(|l| ScopeHint { org: Some(l.org), project: Some(l.project), repo: None });
-    let ado = app.ado(&app.scope_for(&hint.unwrap_or_default())?.org_url);
+    Ok((id, app.ado(&app.scope_for(&hint.unwrap_or_default())?.org_url)))
+}
 
+pub fn work_item_detail(app: &App, id_or_url: &str) -> Result<Detail> {
+    let (id, ado) = locate(app, id_or_url)?;
     let item = ado.work_item(id)?;
-    let (parent, children) = par::join(
+    let (parent, children, comments) = par::join3(
         || item.parent_id.map_or(Ok(Vec::new()), |parent| ado.work_items(&[parent])),
         || ado.query(&format!("SELECT [System.Id] FROM WorkItems WHERE [System.Parent] = {id}")),
+        || item.project.as_deref().map_or(Ok(Vec::new()), |project| ado.work_item_comments(project, id)),
     );
     Ok(Detail {
         parent: parent?.first().map(WorkItem::to_ref),
         children: children?.iter().map(WorkItem::to_ref).collect(),
+        comments: comments?,
         item,
     })
 }
+
+/// 5 for 5.0, 2.5 for 2.5.
+fn points(value: f64) -> String {
+    if value.fract() == 0.0 {
+        format!("{value:.0}")
+    } else {
+        value.to_string()
+    }
+}
+
+/// How many comments a work item shows before `--full`.
+const LATEST: usize = 5;
 
 fn render_work_item(d: &Detail, s: Style, full: bool) -> String {
     let text = |value: &Option<String>| value.clone().unwrap_or_else(|| "?".into());
@@ -57,6 +78,7 @@ fn render_work_item(d: &Detail, s: Style, full: bool) -> String {
         format!("Area:      {}", text(&d.item.area_path)),
         format!("Iteration: {}", text(&d.item.iteration_path)),
     ];
+    out.extend(d.item.points.map(|value| format!("Points:    {}", points(value))));
     if let Some(parent) = &d.parent {
         out.push(format!(
             "Parent:    #{} {} {}",
@@ -76,6 +98,23 @@ fn render_work_item(d: &Detail, s: Style, full: bool) -> String {
     if !d.children.is_empty() {
         out.extend([String::new(), s.bold(&format!("Children ({})", d.children.len())), work_item_table(&d.children)]);
     }
+    if !d.comments.is_empty() {
+        let earlier = if full { 0 } else { d.comments.len().saturating_sub(LATEST) };
+        out.extend([String::new(), s.bold(&format!("Comments ({})", d.comments.len()))]);
+        if earlier > 0 {
+            out.push(s.dim(&format!("  … {earlier} earlier — --full for all")));
+        }
+        for comment in &d.comments[earlier..] {
+            let by = [comment.author.as_deref().or(Some("unknown")), comment.published_at.as_deref()];
+            let (shown, cut) = if full { (comment.text.clone(), false) } else { truncate(&comment.text, 600) };
+            out.push(String::new());
+            out.push(s.bold(&by.into_iter().flatten().collect::<Vec<_>>().join(" · ")));
+            out.extend(shown.lines().map(|line| format!("  {line}")));
+            if cut {
+                out.push(s.dim("  … truncated — --full for the rest"));
+            }
+        }
+    }
     out.join("\n")
 }
 
@@ -83,7 +122,7 @@ fn render_work_item(d: &Detail, s: Style, full: bool) -> String {
 pub struct View {
     /// Work item id or link
     pub id_or_url: String,
-    /// Show the description in full
+    /// Show the description and every comment in full
     #[arg(long)]
     pub full: bool,
     /// Open it in the browser
@@ -252,7 +291,7 @@ pub fn resolve_place(app: &App, ado: &AdoClient, project: &str, flags: &PlaceArg
 
     let team = match &flags.team {
         Some(team) => team.clone(),
-        None => repo_team(app, ado, project)?,
+        None => project_team(app, ado, project, true)?,
     };
     let (areas, sprint) = par::join(
         || if flags.area.is_none() { ado.team_areas(project, &team).map(Some) } else { Ok(None) },
@@ -278,11 +317,12 @@ pub fn resolve_place(app: &App, ado: &AdoClient, project: &str, flags: &PlaceArg
     Ok(Place { area, iteration, team: Some(team), warnings })
 }
 
-/// The team this repo's work items go to: remembered in git config
-/// (`dova.team`), or the project's only team, or the one you pick — which
-/// is then remembered.
-fn repo_team(app: &App, ado: &AdoClient, project: &str) -> Result<String> {
-    if let Some(team) = app.git.config_get("dova.team")? {
+/// The team work items in a project go to: for the repo's own project
+/// (`ours`), the one remembered in git config (`dova.team`); otherwise the
+/// project's only team, or the one you pick — which, for the repo's own
+/// project, is then remembered.
+fn project_team(app: &App, ado: &AdoClient, project: &str, ours: bool) -> Result<String> {
+    if let Some(team) = app.git.config_get("dova.team")?.filter(|_| ours) {
         return Ok(team);
     }
     let mut teams = ado.teams(project)?;
@@ -291,7 +331,9 @@ fn repo_team(app: &App, ado: &AdoClient, project: &str) -> Result<String> {
         1 => Ok(teams.remove(0)),
         _ => {
             let team = (app.choose)(&format!("Which team in \"{project}\"?"), &teams, "Pass --team <name>.")?;
-            app.git.config_set("dova.team", &team)?;
+            if ours {
+                app.git.config_set("dova.team", &team)?;
+            }
             Ok(team)
         }
     }
@@ -431,14 +473,161 @@ impl Bug {
     }
 }
 
+/* ---------------- edit and comment ---------------- */
+
+#[derive(Args, Default)]
+pub struct Edit {
+    /// Work item id or link
+    pub id_or_url: String,
+    /// New title
+    #[arg(long)]
+    pub title: Option<String>,
+    /// New description ('-' reads stdin)
+    #[arg(long, value_name = "TEXT")]
+    pub body: Option<String>,
+    /// Turn it into this type (Bug, Feature, User Story, …)
+    #[arg(long = "type", value_name = "TYPE")]
+    pub kind: Option<String>,
+    /// Story points (effort or size, where the type calls it that)
+    #[arg(long, value_name = "N")]
+    pub points: Option<f64>,
+    /// Assign it ("me" for yourself, "none" for nobody)
+    #[arg(long, value_name = "USER")]
+    pub assignee: Option<String>,
+    /// Move it to this iteration; with no path, to the team's current sprint
+    #[arg(long, value_name = "PATH", num_args = 0..=1, default_missing_value = "current")]
+    pub iteration: Option<String>,
+    /// Move it to this area
+    #[arg(long, value_name = "PATH")]
+    pub area: Option<String>,
+    /// Move it to this state (New, Active, Closed, … as the type names them)
+    #[arg(long)]
+    pub state: Option<String>,
+    /// The team whose current sprint that is (default: remembered for this repo)
+    #[arg(long)]
+    pub team: Option<String>,
+    /// Also say this in its discussion ('-' reads stdin)
+    #[arg(long, value_name = "TEXT")]
+    pub comment: Option<String>,
+}
+
+impl Edit {
+    pub fn run(&self, app: &App) -> Result<Output> {
+        let fields_given =
+            [&self.title, &self.body, &self.kind, &self.assignee, &self.iteration, &self.area, &self.state];
+        if fields_given.iter().all(|given| given.is_none()) && self.points.is_none() && self.comment.is_none() {
+            return Err(Error::user("Nothing to change.").hint(
+                "Pass any of --title, --body, --type, --points, --assignee, --iteration, --area, --state, --comment.",
+            ));
+        }
+        if self.body.as_deref() == Some("-") && self.comment.as_deref() == Some("-") {
+            return Err(Error::user("Only one of --body and --comment can read stdin."));
+        }
+        let (id, ado) = locate(app, &self.id_or_url)?;
+        let item = ado.work_item(id)?;
+        let project = item.project.clone().unwrap_or_default();
+        // What it is once this is done: that decides which fields the rest goes to.
+        let was = item.kind.clone().unwrap_or_default();
+        let kind = self.kind.clone().unwrap_or_else(|| was.clone());
+        let ((body, shown_as), (old_body, _)) = (body_field(&kind), body_field(&was));
+
+        let mut fields: Vec<(&str, Value)> = Vec::new();
+        fields.extend(self.kind.as_ref().map(|kind| ("System.WorkItemType", json!(kind))));
+        fields.extend(self.title.as_ref().map(|title| ("System.Title", json!(title))));
+        match &self.body {
+            Some(text) => fields.push((body, json!(to_html(&app.text(Some(text), "body")?)))),
+            // Its text would otherwise stay behind in a field the new type's form doesn't show.
+            None if body != old_body && !item.body.iter().any(|section| section.label == shown_as) => {
+                fields.extend(ado.work_item_field(id, old_body)?.map(|html| (body, json!(html))));
+            }
+            None => {}
+        }
+        if let Some(value) = self.points {
+            let field = ado.points_field(&project, &kind)?;
+            fields.push((field.ok_or_else(|| Error::user(format!("A {kind} has no story points.")))?, json!(value)));
+        }
+        match self.assignee.as_deref() {
+            Some(user) if is_me(user) => fields.extend(ado.me()?.map(|me| ("System.AssignedTo", json!(me)))),
+            Some(user) if user.eq_ignore_ascii_case("none") => fields.push(("System.AssignedTo", json!(""))),
+            Some(user) => fields.push(("System.AssignedTo", json!(user))),
+            None => {}
+        }
+        fields.extend(self.area.as_ref().map(|area| ("System.AreaPath", json!(area))));
+        if let Some(wanted) = &self.state {
+            // Each type has its own states, so a wrong one is answered with the right ones.
+            let states = ado.work_item_states(&project, &kind)?;
+            let state = states.iter().find(|state| state.eq_ignore_ascii_case(wanted)).ok_or_else(|| {
+                Error::user(format!("A {kind} has no state \"{wanted}\"."))
+                    .hint(format!("Use one of: {}", states.join(", ")))
+            })?;
+            fields.push(("System.State", json!(state)));
+        }
+        match self.iteration.as_deref() {
+            Some("current") => {
+                let ours = app.scope().is_ok_and(|scope| scope.project.eq_ignore_ascii_case(&project));
+                let team = match &self.team {
+                    Some(team) => team.clone(),
+                    None => project_team(app, &ado, &project, ours)?,
+                };
+                let sprint = ado.current_iteration(&project, &team)?.ok_or_else(|| {
+                    Error::not_found(format!("Team \"{team}\" has no current sprint.")).hint("Pass --iteration <path>.")
+                })?;
+                fields.push(("System.IterationPath", json!(sprint)));
+            }
+            Some(path) => fields.push(("System.IterationPath", json!(path))),
+            None => {}
+        }
+        let comment = self.comment.as_deref().map(|text| app.text(Some(text), "comment")).transpose()?;
+
+        let item = if fields.is_empty() { item } else { ado.update_work_item(id, &fields)? };
+        if let Some(comment) = &comment {
+            ado.add_work_item_comment(&project, id, &to_html(comment))?;
+        }
+        let s = app.style;
+        let text = |value: &Option<String>| value.clone().unwrap_or_else(|| "?".into());
+        let who = item.assigned_to.as_ref().map_or("unassigned".to_string(), |who| format!("assigned to {who}"));
+        let estimate = item.points.map_or(String::new(), |value| format!(" · {} points", points(value)));
+        let mut out = vec![
+            format!(
+                "{} {} {} {}",
+                s.green(if fields.is_empty() { "Commented on" } else { "Updated" }),
+                text(&item.kind),
+                s.bold(&format!("#{id}")),
+                text(&item.title)
+            ),
+            s.dim(&format!("  {}", item.url)),
+            format!(
+                "  {} · {} · {} · {who}{estimate}",
+                text(&item.state),
+                text(&item.area_path),
+                text(&item.iteration_path)
+            ),
+        ];
+        out.extend(comment.filter(|_| !fields.is_empty()).map(|_| "  Commented.".to_string()));
+        Ok(Output::new(&item, out.join("\n")))
+    }
+}
+
+#[derive(Args)]
+pub struct CommentOn {
+    /// Work item id or link
+    pub id_or_url: String,
+    /// What to say ('-' or nothing reads stdin)
+    pub text: Option<String>,
+}
+
 #[derive(Subcommand)]
 pub enum Wi {
-    /// A work item with its parent and children
+    /// A work item with its parent, children and discussion
     View(View),
     /// Work items in this project by title, state, type, assignee or tag
     Search(Search),
     /// File a work item
     Create(Create),
+    /// Change a work item: its text, type, points, iteration, area or assignee
+    Edit(Edit),
+    /// Add to a work item's discussion
+    Comment(CommentOn),
 }
 
 impl Wi {
@@ -447,6 +636,11 @@ impl Wi {
             Wi::View(c) => c.run(app),
             Wi::Search(c) => c.run(app),
             Wi::Create(c) => create(app, &c.kind, &c.args),
+            Wi::Edit(c) => c.run(app),
+            Wi::Comment(c) => {
+                let text = app.text(c.text.as_deref(), "comment")?;
+                Edit { id_or_url: c.id_or_url.clone(), comment: Some(text), ..Default::default() }.run(app)
+            }
         }
     }
 }
@@ -615,19 +809,164 @@ mod tests {
     }
 
     #[test]
-    fn view_shows_a_work_item_with_its_parent_and_children() {
+    fn view_shows_a_work_item_with_its_parent_children_points_and_discussion() {
         let bed = Bed::new(Box::new(|r: &Recorded| {
             if r.path.ends_with("/wiql") {
                 return ok(json!({ "workItems": [{ "id": 6 }] }));
             }
-            let item = wi(5, json!({ "System.Parent": 2, "System.Description": "<div>Why</div>" }));
+            if r.path.ends_with("/workItems/5/comments") {
+                let said = |id: u64, text: &str| json!({ "id": id, "text": text, "createdBy": { "displayName": "Ann" }, "createdDate": "2026-11-17T13:59:44.59Z" });
+                let all: Vec<Value> = (1..=7).map(|n| said(n, &format!("<div>Comment {n}<br>more</div>"))).collect();
+                return ok(json!({ "comments": all }));
+            }
+            // A Feature keeps the story points it had as a User Story; its own estimate is its effort.
+            let estimates =
+                json!({ "Microsoft.VSTS.Scheduling.StoryPoints": 5.0, "Microsoft.VSTS.Scheduling.Effort": 8.0 });
+            let fields =
+                json!({ "System.Parent": 2, "System.Description": "<div>Why</div>", "System.WorkItemType": "Feature" });
+            let mut item = wi(5, fields);
+            item["fields"].as_object_mut().unwrap().extend(estimates.as_object().unwrap().clone());
             batch(vec![item, wi(2, json!({ "System.WorkItemType": "Feature" })), wi(6, json!({}))])(r)
         }));
         let link = "https://dev.azure.com/contoso/MyProject/_workitems/edit/5";
         let res = cli(bed.app(), &["wi", "view", link, "--json"]).json();
         assert_eq!((&res["id"], &res["parent"]["id"], &res["children"][0]["id"]), (&json!(5), &json!(2), &json!(6)));
+        assert_eq!((&res["points"], res["comments"].as_array().unwrap().len()), (&json!(8.0), 7));
+        assert_eq!(
+            res["comments"][0],
+            json!({ "id": 1, "author": "Ann", "publishedAt": "2026-11-17T13:59:44Z", "text": "Comment 1\nmore", "kind": "text" })
+        );
         let text = cli(bed.app(), &["view", "5"]).stdout;
-        assert!(text.contains("Parent:    #2 Item 2 [Feature]"), "{text}");
+        assert!(text.contains("Parent:    #2 Item 2 [Feature]") && text.contains("Points:    8\n"), "{text}");
         assert!(text.contains("Description\nWhy") && text.contains("Children (1)"), "{text}");
+        // The latest five, the rest behind --full.
+        assert!(
+            text.contains(
+                "Comments (7)\n  … 2 earlier — --full for all\n\nAnn · 2026-11-17T13:59:44Z\n  Comment 3\n  more"
+            ),
+            "{text}"
+        );
+        assert!(cli(bed.app(), &["view", "5", "--full"]).stdout.contains("  Comment 1\n"));
+    }
+
+    /// Item 5, a User Story in MyProject with a description; every change answers with the item as asked for.
+    fn editable() -> Route {
+        Box::new(|r: &Recorded| match (r.method.as_str(), r.path.as_str()) {
+            ("PATCH", _) => ok(wi(5, json!({}))),
+            ("POST", p) if p.ends_with("/comments") => ok(json!({ "id": 9 })),
+            ("GET", p) if p.ends_with("/connectionData") => {
+                ok(json!({ "authenticatedUser": { "properties": { "Account": { "$value": "jane@contoso.com" } } } }))
+            }
+            ("GET", p) if p.ends_with("/workitemtypes/Feature/fields") => {
+                ok(json!({ "value": [{ "referenceName": "Microsoft.VSTS.Scheduling.Effort" }] }))
+            }
+            ("GET", p) if p.ends_with("/fields") => ok(json!({ "value": [{ "referenceName": "System.Title" }] })),
+            ("GET", p) if p.ends_with("/states") => {
+                ok(json!({ "value": [{ "name": "New" }, { "name": "Active" }, { "name": "Closed" }] }))
+            }
+            ("GET", p) if p.ends_with("/workitems/5") => {
+                ok(json!({ "fields": { "System.Description": "<div>Why</div>" } }))
+            }
+            ("GET", p) if p.ends_with("/teams") => ok(json!({ "value": [{ "name": "Web" }] })),
+            ("GET", p) if p.ends_with("/teamsettings/iterations") => {
+                ok(json!({ "value": [{ "path": "MyProject\\Sprint 9" }] }))
+            }
+            _ => {
+                let fields = json!({ "System.WorkItemType": "User Story", "System.Description": "<div>Why</div>" });
+                batch(vec![wi(5, fields)])(r)
+            }
+        })
+    }
+
+    fn patched(bed: &Bed) -> Value {
+        bed.ado.requests().into_iter().rev().find(|r| r.method == "PATCH").expect("something was changed").body
+    }
+
+    fn set(field: &str, value: Value) -> Value {
+        json!({ "op": "add", "path": format!("/fields/{field}"), "value": value })
+    }
+
+    #[test]
+    fn edit_sets_just_what_it_is_given_in_the_fields_the_type_uses() {
+        let bed = Bed::new(editable());
+        let args = ["wi", "edit", "5", "--type", "Feature", "--points", "8", "--assignee", "me", "--iteration"];
+        assert_eq!(cli(bed.app(), &args).code, 0);
+        assert_eq!(
+            patched(&bed),
+            json!([
+                set("System.WorkItemType", json!("Feature")),
+                set("Microsoft.VSTS.Scheduling.Effort", json!(8.0)),
+                set("System.AssignedTo", json!("jane@contoso.com")),
+                set("System.IterationPath", json!("MyProject\\Sprint 9")),
+            ])
+        );
+        let patch = bed.ado.requests().into_iter().find(|r| r.method == "PATCH").unwrap();
+        assert_eq!(
+            (patch.path.as_str(), patch.raw.content_type.as_deref()),
+            ("/_apis/wit/workitems/5", Some("application/json-patch+json"))
+        );
+
+        let bed = Bed::new(editable());
+        let args =
+            ["wi", "edit", "5", "--body", "Use Vec<u8>\nhere", "--assignee", "none", "--iteration", "MyProject\\Later"];
+        assert_eq!(cli(bed.app(), &args).code, 0);
+        assert_eq!(
+            patched(&bed),
+            json!([
+                set("System.Description", json!("Use Vec&lt;u8&gt;<br>here")),
+                set("System.AssignedTo", json!("")),
+                set("System.IterationPath", json!("MyProject\\Later")),
+            ])
+        );
+    }
+
+    #[test]
+    fn edit_moves_it_to_a_state_the_type_has_and_names_them_otherwise() {
+        let bed = Bed::new(editable());
+        assert_eq!(cli(bed.app(), &["wi", "edit", "5", "--state", "active"]).code, 0);
+        assert_eq!(patched(&bed), json!([set("System.State", json!("Active"))]));
+        assert!(bed.ado.requests().iter().any(|r| r.path == "/MyProject/_apis/wit/workitemtypes/User Story/states"));
+
+        let bed = Bed::new(editable());
+        let wrong = cli(bed.app(), &["wi", "edit", "5", "--state", "Done"]);
+        assert_eq!(wrong.code, 1);
+        assert!(wrong.stderr.contains("A User Story has no state \"Done\"."), "{}", wrong.stderr);
+        assert!(wrong.stderr.contains("Use one of: New, Active, Closed"), "{}", wrong.stderr);
+        assert!(!bed.ado.requests().iter().any(|r| r.method == "PATCH"));
+    }
+
+    #[test]
+    fn turning_a_story_into_a_bug_takes_its_description_along() {
+        let bed = Bed::new(editable());
+        assert_eq!(cli(bed.app(), &["wi", "edit", "5", "--type", "Bug"]).code, 0);
+        let moved = set("Microsoft.VSTS.TCM.ReproSteps", json!("<div>Why</div>"));
+        assert_eq!(patched(&bed), json!([set("System.WorkItemType", json!("Bug")), moved]));
+    }
+
+    #[test]
+    fn edit_refuses_what_it_cannot_do_before_changing_anything() {
+        let bed = Bed::new(editable());
+        let no_points = cli(bed.app(), &["wi", "edit", "5", "--points", "3"]);
+        assert_eq!((no_points.code, no_points.stderr.contains("A User Story has no story points.")), (1, true));
+        assert_eq!(cli(bed.app(), &["wi", "edit", "5"]).code, 1);
+        assert_eq!(cli(bed.app(), &["wi", "edit", "5", "--body", "-", "--comment", "-"]).code, 1);
+        assert!(!bed.ado.requests().iter().any(|r| r.method != "GET" && !r.path.ends_with("/workitemsbatch")));
+    }
+
+    #[test]
+    fn comment_adds_to_the_discussion_and_changes_nothing_else() {
+        let bed = Bed::new(editable());
+        let res = cli(bed.app(), &["wi", "comment", "5", "Sized: 3 <points>\nwith the team"]);
+        assert!(res.stdout.starts_with("Commented on User Story #5"), "{}{}", res.stdout, res.stderr);
+        let requests = bed.ado.requests();
+        let post = requests.iter().find(|r| r.method == "POST" && r.path.ends_with("/comments")).unwrap();
+        assert_eq!(post.path, "/MyProject/_apis/wit/workItems/5/comments");
+        assert_eq!(post.body, json!({ "text": "Sized: 3 &lt;points&gt;<br>with the team" }));
+        assert!(!requests.iter().any(|r| r.method == "PATCH"));
+
+        let bed = Bed::new(editable());
+        assert_eq!(cli(bed.app(), &["wi", "edit", "5", "--title", "New", "--comment", "Renamed"]).code, 0);
+        assert_eq!(patched(&bed), json!([set("System.Title", json!("New"))]));
+        assert!(bed.ado.requests().iter().any(|r| r.method == "POST" && r.body == json!({ "text": "Renamed" })));
     }
 }

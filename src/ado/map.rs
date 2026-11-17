@@ -6,7 +6,7 @@ use super::types::{BodySection, Comment, PullRequest, Run, Thread, ThreadLocatio
 use crate::text::strip_html;
 use crate::urls;
 
-pub const WORK_ITEM_FIELDS: [&str; 11] = [
+pub const WORK_ITEM_FIELDS: [&str; 14] = [
     "System.Title",
     "System.WorkItemType",
     "System.State",
@@ -18,7 +18,20 @@ pub const WORK_ITEM_FIELDS: [&str; 11] = [
     "System.Description",
     "Microsoft.VSTS.Common.AcceptanceCriteria",
     "Microsoft.VSTS.TCM.ReproSteps",
+    "Microsoft.VSTS.Scheduling.StoryPoints",
+    "Microsoft.VSTS.Scheduling.Effort",
+    "Microsoft.VSTS.Scheduling.Size",
 ];
+
+/// The estimate, under the name each process gives it: a type has at most one of these.
+pub const POINTS: [&str; 3] =
+    ["Microsoft.VSTS.Scheduling.StoryPoints", "Microsoft.VSTS.Scheduling.Effort", "Microsoft.VSTS.Scheduling.Size"];
+
+/// The field a type's main text lives in, and what its form calls it. A
+/// Bug's form shows Repro Steps where every other type shows a Description.
+pub fn body_field(kind: &str) -> (&'static str, &'static str) {
+    BODY[if kind.eq_ignore_ascii_case("bug") { 2 } else { 0 }]
+}
 
 /// A Bug's substance is in its repro steps, a Story's in its acceptance
 /// criteria: each one present becomes a section.
@@ -44,6 +57,22 @@ fn branch(reference: &Value) -> String {
     name.strip_prefix("refs/heads/").unwrap_or(name).to_string()
 }
 
+/// A work item's estimate. After a change of type it can still carry the
+/// old type's, so the standard types are read from their own field only;
+/// a Bug, or a type of your own making, from whichever it has.
+fn points(fields: &Value) -> Option<f64> {
+    let own = match fields["System.WorkItemType"].as_str().unwrap_or("").to_ascii_lowercase().as_str() {
+        "user story" => Some(POINTS[0]),
+        "feature" | "epic" | "product backlog item" | "issue" => Some(POINTS[1]),
+        "requirement" => Some(POINTS[2]),
+        _ => None,
+    };
+    match own {
+        Some(field) => fields[field].as_f64(),
+        None => POINTS.iter().find_map(|field| fields[*field].as_f64()),
+    }
+}
+
 pub fn to_work_item(raw: &Value, org_url: &str) -> WorkItem {
     let fields = &raw["fields"];
     let id = raw["id"].as_u64().unwrap_or(0);
@@ -60,6 +89,7 @@ pub fn to_work_item(raw: &Value, org_url: &str) -> WorkItem {
         assigned_to: text(&fields["System.AssignedTo"]),
         area_path: text(&fields["System.AreaPath"]),
         iteration_path: text(&fields["System.IterationPath"]),
+        points: points(fields),
         parent_id: fields["System.Parent"].as_u64(),
         body: BODY.iter().filter_map(section).collect(),
         url: urls::work_item_url(org_url, project.as_deref().unwrap_or(""), id),
@@ -118,6 +148,18 @@ pub fn to_thread(raw: &Value) -> Thread {
                 kind: c["commentType"].as_str().unwrap_or("text").to_string(),
             })
             .collect(),
+    }
+}
+
+/// A comment in a work item's discussion.
+pub fn to_work_item_comment(raw: &Value) -> Comment {
+    Comment {
+        id: raw["id"].as_u64().unwrap_or(0),
+        author: raw["createdBy"]["displayName"].as_str().map(str::to_string),
+        author_id: raw["createdBy"]["id"].as_str().map(str::to_string),
+        published_at: raw["createdDate"].as_str().map(to_the_second),
+        text: strip_html(raw["text"].as_str().unwrap_or("")),
+        kind: "text".to_string(),
     }
 }
 
