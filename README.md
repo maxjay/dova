@@ -83,6 +83,7 @@ Needs git and the [Azure CLI](https://learn.microsoft.com/cli/azure/install-azur
 | `dova wi view\|search\|create\|edit\|comment` · `dova bug <title>` | work items |
 | `dova pr create\|view\|edit` | pull requests |
 | `dova pr list` | the pull requests you opened, with their checks and open threads |
+| `dova pr list --review` | the ones you or a team of yours were asked to review, with your vote |
 | `dova pr comment\|thread\|reply\|amend\|resolve` | review threads |
 | `dova pipeline list\|log\|watch` | pipeline runs |
 | `dova api <path>` | any REST call, signed in |

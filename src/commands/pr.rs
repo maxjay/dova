@@ -6,7 +6,7 @@ use serde_json::json;
 
 use super::work_item_table;
 use crate::ado::client::{AdoClient, NewPullRequest, MOST};
-use crate::ado::types::{PullRequest, Run, Thread, ThreadLocation, WorkItem, WorkItemRef};
+use crate::ado::types::{PullRequest, Review, Run, Thread, ThreadLocation, WorkItem, WorkItemRef};
 use crate::app::{App, ScopeHint};
 use crate::cli::Output;
 use crate::error::{Error, Result};
@@ -142,6 +142,9 @@ impl Create {
 
 #[derive(Args)]
 pub struct List {
+    /// The ones you or a team of yours were asked to review, instead of the ones you opened
+    #[arg(long)]
+    pub review: bool,
     /// Which ones
     #[arg(long, default_value = "active", value_parser = ["active", "completed", "abandoned", "all"])]
     pub state: String,
@@ -159,6 +162,9 @@ pub struct ListedPullRequest {
     /// Its latest validation run, or without one, its branch's latest run.
     pub check: Option<Run>,
     pub open_threads: usize,
+    /// Where you stand on it, in a list of the ones you were asked to review.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub review: Option<Review>,
 }
 
 /// How many pull requests are looked into at the same time. That bounds the
@@ -166,7 +172,7 @@ pub struct ListedPullRequest {
 const AT_ONCE: usize = 8;
 
 /// Each pull request's check and open threads, a few pull requests at a time.
-fn listed(ado: &AdoClient, prs: Vec<PullRequest>) -> Result<Vec<ListedPullRequest>> {
+fn listed(ado: &AdoClient, prs: Vec<(PullRequest, Option<Review>)>) -> Result<Vec<ListedPullRequest>> {
     let look = |pr: &PullRequest| -> Result<(Option<Run>, usize)> {
         let merge_ref = format!("refs/pull/{}/merge", pr.id);
         let (validation, branch, threads) = par::join3(
@@ -177,12 +183,23 @@ fn listed(ado: &AdoClient, prs: Vec<PullRequest>) -> Result<Vec<ListedPullReques
         let check = validation?.pop().or(branch?.pop());
         Ok((check, threads?.iter().filter(|t| t.unresolved).count()))
     };
-    let looked: Vec<_> = prs.chunks(AT_ONCE).flat_map(|some| par::map(some, look)).collect::<Result<_>>()?;
+    let looked: Vec<_> =
+        prs.chunks(AT_ONCE).flat_map(|some| par::map(some, |(pr, _)| look(pr))).collect::<Result<_>>()?;
     Ok(prs
         .into_iter()
         .zip(looked)
-        .map(|(pr, (check, open_threads))| ListedPullRequest { pr, check, open_threads })
+        .map(|((pr, review), (check, open_threads))| ListedPullRequest { pr, check, open_threads, review })
         .collect())
+}
+
+/// A reviewer's vote, colored by which way it went.
+fn voted(s: Style, vote: &str) -> String {
+    match vote {
+        "none" => s.dim(vote),
+        "approved" | "approved with suggestions" => s.green(vote),
+        "rejected" => s.red(vote),
+        _ => s.yellow(vote),
+    }
 }
 
 impl List {
@@ -192,28 +209,49 @@ impl List {
             return Ok(Output::none().web(true, &my_pull_requests_url(&scope.org_url)));
         }
         let ado = app.ado(&scope.org_url);
-        let prs = listed(&ado, ado.my_pull_requests(&scope.project, &self.state)?)?;
+        let found = if self.review {
+            let asked = ado.pull_requests_to_review(&scope.project, &self.state)?;
+            asked.into_iter().map(|(pr, review)| (pr, Some(review))).collect()
+        } else {
+            ado.my_pull_requests(&scope.project, &self.state)?.into_iter().map(|pr| (pr, None)).collect()
+        };
+        let prs = listed(&ado, found)?;
         let s = app.style;
         let text = if prs.is_empty() {
             let which = if self.state == "all" { String::new() } else { format!("{} ", self.state) };
-            s.dim(&format!("You have no {which}pull requests in {}.", scope.project))
+            s.dim(&if self.review {
+                format!("No {which}pull requests in {} ask you for a review.", scope.project)
+            } else {
+                format!("You have no {which}pull requests in {}.", scope.project)
+            })
         } else {
             let row = |l: &ListedPullRequest| {
                 let open = l.open_threads.to_string();
-                vec![
+                // Whose it is says more to a reviewer than its branch does; to its author, the other way round.
+                let (about, vote) = match &l.review {
+                    Some(review) => (l.pr.author.clone(), Some(voted(s, &review.vote))),
+                    None => (format!("{} -> {}", l.pr.source_branch, l.pr.target_branch), None),
+                };
+                let mut row = vec![
                     format!("#{}", l.pr.id),
                     l.pr.title.clone(),
                     l.pr.repo.clone(),
-                    format!("{} -> {}", l.pr.source_branch, l.pr.target_branch),
+                    about,
                     if l.pr.is_draft { s.dim("draft") } else { l.pr.status.clone() },
                     l.check.as_ref().map_or_else(|| s.dim("none"), |run| s.outcome(run.outcome())),
                     if l.open_threads == 0 { s.dim(&open) } else { s.yellow(&open) },
-                ]
+                ];
+                row.extend(vote);
+                row
             };
             let rows: Vec<Vec<String>> = prs.iter().map(row).collect();
             let more = (prs.len() == MOST).then(|| s.dim(&format!("\nThe newest {MOST}; there may be more.")));
-            table(&["ID", "Title", "Repo", "Branch", "State", "Check", "Open threads"], &rows)
-                + &more.unwrap_or_default()
+            let headers: &[&str] = if self.review {
+                &["ID", "Title", "Repo", "Author", "State", "Check", "Open threads", "Your vote"]
+            } else {
+                &["ID", "Title", "Repo", "Branch", "State", "Check", "Open threads"]
+            };
+            table(headers, &rows) + &more.unwrap_or_default()
         };
         Ok(Output::new(&prs, text))
     }
@@ -465,7 +503,7 @@ struct ThreadOnPr<'a> {
 pub enum Pr {
     /// Open a PR from the current branch, linking its work items
     Create(Create),
-    /// The pull requests you opened in this project, each with its check and open threads
+    /// The pull requests you opened in this project, or were asked to review, each with its check and open threads
     List(List),
     /// A PR with its work items and review threads (default: the current branch's)
     View(View),
@@ -695,6 +733,71 @@ mod tests {
         let bed = Bed::new(mine(json!([])));
         assert_eq!(cli(bed.app(), &["pr", "list", "--state", "open"]).code, 1);
         assert!(bed.ado.requests().is_empty());
+    }
+
+    /// Signed in as `me-1`, who is in the team Payments. Each reviewer is answered with their own pull requests.
+    fn asked(by_name: Value, through_the_team: Value) -> Route {
+        Box::new(move |r: &Recorded| {
+            if r.path.ends_with("/connectionData") {
+                ok(json!({ "authenticatedUser": { "id": "me-1" } }))
+            } else if r.path.ends_with("/_apis/teams") {
+                ok(json!({ "value": [{ "id": "team-1", "name": "Payments" }] }))
+            } else if r.path.ends_with("/pullrequests") {
+                match r.query("searchCriteria.reviewerId").as_deref() {
+                    Some("me-1") => ok(json!({ "value": by_name })),
+                    Some("team-1") => ok(json!({ "value": through_the_team })),
+                    _ => None,
+                }
+            } else {
+                ok(json!({ "value": [] }))
+            }
+        })
+    }
+
+    #[test]
+    fn lists_what_you_were_asked_to_review_by_name_or_through_a_team_but_not_your_own() {
+        let team = json!({ "id": "team-1", "vote": 0, "isContainer": true });
+        // Azure DevOps writes the same id in either case.
+        let approved = rest_pr(9, json!({ "reviewers": [team, { "id": "ME-1", "vote": 10 }] }));
+        let theirs = rest_pr(12, json!({ "createdBy": { "id": "jo-2", "displayName": "Jo" }, "reviewers": [team] }));
+        let own = rest_pr(11, json!({ "createdBy": { "id": "me-1", "displayName": "Me" }, "reviewers": [team] }));
+        let bed = Bed::new(asked(json!([approved]), json!([theirs, own, approved])));
+
+        let listed = cli(bed.app(), &["pr", "list", "--review", "--json"]).json();
+        let seen: Vec<_> = listed.as_array().unwrap().iter().map(|l| (&l["id"], &l["review"])).collect();
+        let stands = |vote: &str, team: Value| json!({ "vote": vote, "team": team });
+        // Newest first, each once, and the one you opened yourself left out.
+        assert_eq!(
+            seen,
+            [(&json!(12), &stands("none", json!("Payments"))), (&json!(9), &stands("approved", json!(null)))]
+        );
+
+        let lists: Vec<Recorded> =
+            bed.ado.requests().into_iter().filter(|r| r.path.ends_with("/pullrequests")).collect();
+        assert!(lists.iter().all(|r| r.path == "/MyProject/_apis/git/pullrequests"));
+        assert!(lists.iter().all(|r| r.query("searchCriteria.status").as_deref() == Some("active")));
+        assert!(lists.iter().all(|r| r.query("searchCriteria.creatorId").is_none()));
+        let teams = bed.ado.requests().into_iter().find(|r| r.path.ends_with("/_apis/teams")).unwrap();
+        assert_eq!((teams.path.as_str(), teams.query("$mine").as_deref()), ("/_apis/teams", Some("true")));
+
+        let screen = cli(bed.app(), &["pr", "list", "--review"]).stdout;
+        let row = |id: &str| screen.lines().find(|line| line.contains(id)).unwrap().to_string();
+        assert!(screen.contains("│ Author │ State  │ Check │ Open threads │ Your vote │"), "{screen}");
+        assert_eq!(row("#12"), "│ #12 │ PR 12 │ web  │ Jo     │ active │ none  │ 0            │ none      │");
+        assert_eq!(row("#9"), "│ #9  │ PR 9  │ web  │ Jane   │ active │ none  │ 0            │ approved  │");
+    }
+
+    #[test]
+    fn says_when_nothing_asks_you_for_a_review_and_leaves_the_plain_list_as_it_was() {
+        let bed = Bed::new(asked(json!([]), json!([])));
+        let res = cli(bed.app(), &["pr", "list", "--review", "--state", "all"]);
+        assert_eq!((res.code, res.stdout.as_str()), (0, "No pull requests in MyProject ask you for a review.\n"));
+        assert_eq!(cli(bed.app(), &["pr", "list", "--review", "--json"]).json(), json!([]));
+
+        // Without the flag nothing about a review is asked for or printed.
+        let bed = Bed::new(mine(json!([rest_pr(9, json!({}))])));
+        assert!(cli(bed.app(), &["pr", "list", "--json"]).json()[0].get("review").is_none());
+        assert!(bed.ado.requests().iter().all(|r| !r.path.ends_with("/_apis/teams")));
     }
 
     #[test]

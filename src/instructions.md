@@ -14,6 +14,7 @@ For Azure DevOps work items, pull requests and pipelines, use `dova` — never `
 | Comment on a work item | `dova wi comment <id> - <<'EOF'` … `EOF` |
 | Open the PR | `dova pr create --title '<title>' --body - <<'EOF'` … `EOF` |
 | The user's own pull requests, with checks and open threads | `dova pr list [--state active\|completed\|abandoned\|all]` |
+| The pull requests the user (or a team of theirs) was asked to review, with their vote | `dova pr list --review [--state …]` |
 | Answer review threads | `dova pr reply <pr> <thread> - --resolve <<'EOF'` … `EOF` |
 | Read one whole thread | `dova pr thread <pr> <thread>` |
 | Fix a comment you posted | `dova pr amend <pr> <thread> - <<'EOF'` … `EOF` (rewrites your last comment there) |

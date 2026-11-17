@@ -4,10 +4,10 @@ use serde_json::{json, Value};
 use url::Url;
 
 use super::map::{
-    body_field, is_discussion, to_pull_request, to_run, to_thread, to_timeline_record, to_work_item,
-    to_work_item_comment, POINTS, WORK_ITEM_FIELDS,
+    body_field, is_discussion, same_identity, to_pull_request, to_run, to_thread, to_timeline_record, to_work_item,
+    to_work_item_comment, vote_of, POINTS, WORK_ITEM_FIELDS,
 };
-use super::types::{Comment, PullRequest, Run, TeamAreas, Thread, TimelineRecord, WorkItem};
+use super::types::{Comment, PullRequest, Review, Run, TeamAreas, Thread, TimelineRecord, WorkItem};
 use super::{Method, Request, Response, Transport};
 use crate::error::{Error, Kind, Result};
 use crate::par;
@@ -17,6 +17,8 @@ use crate::urls::{enc, unique};
 const BATCH: usize = 200;
 /// The most pull requests one list asks for.
 pub const MOST: usize = 100;
+/// How many of a user's teams are asked about at the same time.
+const AT_ONCE: usize = 8;
 const JSON: &str = "application/json";
 /// Work item comments are still a preview API.
 const COMMENTS: &str = "7.1-preview.4";
@@ -214,12 +216,63 @@ impl<'a> AdoClient<'a> {
     /// The pull requests the signed-in user opened in a project, newest first, [`MOST`] at most.
     /// `status` is active, completed, abandoned or all.
     pub fn my_pull_requests(&self, project: &str, status: &str) -> Result<Vec<PullRequest>> {
-        let me = self.authenticated_user()?;
-        let me = me["id"].as_str().ok_or_else(|| Error::external("Azure DevOps didn't say who is signed in."))?;
+        let me = self.my_id()?;
         let most = MOST.to_string();
-        let query = [("searchCriteria.creatorId", me), ("searchCriteria.status", status), ("$top", most.as_str())];
+        let query =
+            [("searchCriteria.creatorId", me.as_str()), ("searchCriteria.status", status), ("$top", most.as_str())];
         let res = self.get(&format!("{}/_apis/git/pullrequests", enc(project)), &query)?;
         Ok(list(&res["value"]).iter().map(|raw| to_pull_request(raw, &self.org_url, project, "")).collect())
+    }
+
+    /// The pull requests in a project that ask the signed-in user for a
+    /// review, newest first, [`MOST`] at most: the ones that name them, and
+    /// the ones that name a team of theirs unless they opened it themselves.
+    /// `status` is active, completed, abandoned or all.
+    pub fn pull_requests_to_review(&self, project: &str, status: &str) -> Result<Vec<(PullRequest, Review)>> {
+        let (me, teams) = par::join(|| self.my_id(), || self.my_teams());
+        let (me, teams) = (me?, teams?);
+        // Azure DevOps matches a reviewer by that one id: asking for a person
+        // doesn't find what was given to their team, so each team is asked for too.
+        let mut reviewers: Vec<(&str, Option<&str>)> = vec![(&me, None)];
+        reviewers.extend(teams.iter().map(|(id, name)| (id.as_str(), Some(name.as_str()))));
+        let most = MOST.to_string();
+        let path = format!("{}/_apis/git/pullrequests", enc(project));
+        let given_to = |(reviewer, _): &(&str, Option<&str>)| {
+            self.get(
+                &path,
+                &[("searchCriteria.reviewerId", reviewer), ("searchCriteria.status", status), ("$top", most.as_str())],
+            )
+        };
+        let found: Vec<Value> =
+            reviewers.chunks(AT_ONCE).flat_map(|some| par::map(some, given_to)).collect::<Result<_>>()?;
+
+        let mut asked: Vec<(PullRequest, Review)> = Vec::new();
+        for ((_, team), res) in reviewers.iter().zip(&found) {
+            for raw in list(&res["value"]) {
+                let pr = to_pull_request(raw, &self.org_url, project, "");
+                let own = team.is_some() && same_identity(&raw["createdBy"]["id"], &me);
+                if !own && asked.iter().all(|(seen, _)| seen.id != pr.id) {
+                    asked.push((pr, Review { vote: vote_of(raw, &me), team: team.map(str::to_string) }));
+                }
+            }
+        }
+        asked.sort_by_key(|(pr, _)| std::cmp::Reverse(pr.id));
+        asked.truncate(MOST);
+        Ok(asked)
+    }
+
+    /// The id of whoever is signed in.
+    fn my_id(&self) -> Result<String> {
+        let me = self.authenticated_user()?;
+        let id = me["id"].as_str().ok_or_else(|| Error::external("Azure DevOps didn't say who is signed in."))?;
+        Ok(id.to_string())
+    }
+
+    /// The teams the signed-in user is in, in any project: id and name.
+    fn my_teams(&self) -> Result<Vec<(String, String)>> {
+        let res = self.get("_apis/teams", &[("$mine", "true"), ("$top", "500"), ("api-version", "7.1-preview.3")])?;
+        let team = |raw: &Value| Some((raw["id"].as_str()?.to_string(), raw["name"].as_str()?.to_string()));
+        Ok(list(&res["value"]).iter().filter_map(team).collect())
     }
 
     pub fn create_pull_request(&self, pr: &NewPullRequest) -> Result<PullRequest> {
