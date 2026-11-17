@@ -71,6 +71,16 @@ pub struct PullRequest {
     pub url: String,
 }
 
+/// Where the signed-in user stands on a pull request that asks them for a review.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Review {
+    /// none | approved | approved with suggestions | waiting for author | rejected
+    pub vote: String,
+    /// The team of theirs that was asked, when they were not asked by name.
+    pub team: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ThreadLocation {
     pub file: String,

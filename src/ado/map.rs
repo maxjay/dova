@@ -117,6 +117,24 @@ pub fn to_pull_request(raw: &Value, org_url: &str, project: &str, repo: &str) ->
     }
 }
 
+/// Azure DevOps writes one id in either case.
+pub fn same_identity(a: &Value, b: &str) -> bool {
+    a.as_str().is_some_and(|a| a.eq_ignore_ascii_case(b))
+}
+
+/// What `who` voted on a pull request, in the words Azure DevOps' own pages use.
+pub fn vote_of(raw: &Value, who: &str) -> String {
+    let theirs = items(&raw["reviewers"]).iter().find(|r| same_identity(&r["id"], who));
+    match theirs.and_then(|r| r["vote"].as_i64()).unwrap_or(0) {
+        10 => "approved",
+        5 => "approved with suggestions",
+        -5 => "waiting for author",
+        -10 => "rejected",
+        _ => "none",
+    }
+    .to_string()
+}
+
 fn items(list: &Value) -> &[Value] {
     list.as_array().map_or(&[], Vec::as_slice)
 }
