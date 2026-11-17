@@ -251,8 +251,10 @@ fn retried<T>(again: u32, pause: Duration, attempt: impl Fn() -> std::result::Re
 
 /// HTTPS with the system's certificates and proxy settings, over HTTP/2
 /// where the other end speaks it (Azure DevOps does): every request shares
-/// one connection, and the daemon keeps that connection open between
-/// commands for as long as it runs.
+/// one connection, and the daemon keeps it between commands for as long
+/// as the other end does. Azure DevOps closes one that has carried nothing
+/// for a few minutes (measured: open at two, gone by five); the next
+/// command then opens another, and nothing fails.
 pub fn https() -> Fetch {
     // rustls wants its cryptography named once per process; a second naming is ignored.
     let _ = rustls::crypto::ring::default_provider().install_default();
