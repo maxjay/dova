@@ -3,6 +3,7 @@
 {
   "name": "dova",
   "compatibility_date": "2026-11-01",
+  "routes": [{ "pattern": "dova.maxjay.dev", "custom_domain": true }],
   "assets": {
     "directory": "./public"
   }
