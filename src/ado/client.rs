@@ -4,9 +4,10 @@ use serde_json::{json, Value};
 use url::Url;
 
 use super::map::{
-    is_discussion, to_pull_request, to_run, to_thread, to_timeline_record, to_work_item, WORK_ITEM_FIELDS,
+    body_field, is_discussion, to_pull_request, to_run, to_thread, to_timeline_record, to_work_item,
+    to_work_item_comment, POINTS, WORK_ITEM_FIELDS,
 };
-use super::types::{PullRequest, Run, TeamAreas, Thread, TimelineRecord, WorkItem};
+use super::types::{Comment, PullRequest, Run, TeamAreas, Thread, TimelineRecord, WorkItem};
 use super::{Method, Request, Response, Transport};
 use crate::error::{Error, Kind, Result};
 use crate::par;
@@ -17,6 +18,8 @@ const BATCH: usize = 200;
 /// The most pull requests one list asks for.
 pub const MOST: usize = 100;
 const JSON: &str = "application/json";
+/// Work item comments are still a preview API.
+const COMMENTS: &str = "7.1-preview.4";
 
 fn head_ref(branch: &str) -> String {
     if branch.starts_with("refs/") {
@@ -97,9 +100,7 @@ impl<'a> AdoClient<'a> {
     }
 
     pub fn create_work_item(&self, item: &NewWorkItem) -> Result<WorkItem> {
-        // A Bug's form shows Repro Steps where every other type shows a Description.
-        let is_bug = item.kind.eq_ignore_ascii_case("bug");
-        let body = if is_bug { "Microsoft.VSTS.TCM.ReproSteps" } else { "System.Description" };
+        let (body, _) = body_field(&item.kind);
         let fields = [
             ("System.Title", Some(&item.title)),
             ("System.AreaPath", item.area_path.as_ref()),
@@ -120,6 +121,49 @@ impl<'a> AdoClient<'a> {
         let path = format!("{}/_apis/wit/workitems/${}", enc(&item.project), enc(&item.kind));
         let raw = self.call(Method::Post, &path, &[], Some((&Value::Array(patch), "application/json-patch+json")))?;
         Ok(to_work_item(&raw, &self.org_url))
+    }
+
+    /// Sets fields on a work item, each by its reference name (`System.Title`).
+    pub fn update_work_item(&self, id: u64, fields: &[(&str, Value)]) -> Result<WorkItem> {
+        let set =
+            |(field, value): &(&str, Value)| json!({ "op": "add", "path": format!("/fields/{field}"), "value": value });
+        let patch = Value::Array(fields.iter().map(set).collect());
+        let path = format!("_apis/wit/workitems/{id}");
+        let raw = self.call(Method::Patch, &path, &[], Some((&patch, "application/json-patch+json")))?;
+        Ok(to_work_item(&raw, &self.org_url))
+    }
+
+    /// One field of a work item exactly as stored (HTML, for the rich-text ones).
+    pub fn work_item_field(&self, id: u64, field: &str) -> Result<Option<String>> {
+        let raw = self.get(&format!("_apis/wit/workitems/{id}"), &[("fields", field)])?;
+        Ok(raw["fields"][field].as_str().map(str::to_string))
+    }
+
+    /// The states a work item type can be in, in the order its workflow lists them.
+    pub fn work_item_states(&self, project: &str, kind: &str) -> Result<Vec<String>> {
+        let res = self.get(&format!("{}/_apis/wit/workitemtypes/{}/states", enc(project), enc(kind)), &[])?;
+        Ok(list(&res["value"]).iter().filter_map(|state| state["name"].as_str().map(str::to_string)).collect())
+    }
+
+    /// The field a work item type keeps its estimate in: story points, effort or size. None for a type without one.
+    pub fn points_field(&self, project: &str, kind: &str) -> Result<Option<&'static str>> {
+        let res = self.get(&format!("{}/_apis/wit/workitemtypes/{}/fields", enc(project), enc(kind)), &[])?;
+        let has = |field: &&&str| list(&res["value"]).iter().any(|f| f["referenceName"] == **field);
+        Ok(POINTS.iter().find(has).copied())
+    }
+
+    /// A work item's discussion, oldest first.
+    pub fn work_item_comments(&self, project: &str, id: u64) -> Result<Vec<Comment>> {
+        let path = format!("{}/_apis/wit/workItems/{id}/comments", enc(project));
+        let res = self.get(&path, &[("api-version", COMMENTS), ("$top", "200"), ("order", "asc")])?;
+        Ok(list(&res["comments"]).iter().map(to_work_item_comment).collect())
+    }
+
+    /// Adds to a work item's discussion; `html` is shown as it is.
+    pub fn add_work_item_comment(&self, project: &str, id: u64, html: &str) -> Result<Comment> {
+        let path = format!("{}/_apis/wit/workItems/{id}/comments", enc(project));
+        let body = json!({ "text": html });
+        Ok(to_work_item_comment(&self.call(Method::Post, &path, &[("api-version", COMMENTS)], Some((&body, JSON)))?))
     }
 
     /* teams */
@@ -196,14 +240,18 @@ impl<'a> AdoClient<'a> {
         Ok(to_pull_request(&raw, &self.org_url, &pr.project, &pr.repo))
     }
 
-    /// Changes a pull request's title, its description, or both.
+    /// Changes a pull request's title, its description, or whether it is a draft: whichever are given.
     pub fn update_pull_request(
         &self,
         pr: &PullRequest,
         title: Option<&str>,
         description: Option<&str>,
+        draft: Option<bool>,
     ) -> Result<PullRequest> {
         let mut body = json!({});
+        if let Some(draft) = draft {
+            body["isDraft"] = json!(draft);
+        }
         if let Some(title) = title {
             body["title"] = json!(title);
         }

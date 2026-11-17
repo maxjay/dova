@@ -32,6 +32,8 @@ pub struct WorkItem {
     pub assigned_to: Option<String>,
     pub area_path: Option<String>,
     pub iteration_path: Option<String>,
+    /// Story points, effort or size: whichever of the three the type has.
+    pub points: Option<f64>,
     pub parent_id: Option<u64>,
     /// Plain text, HTML stripped, only the sections the item actually has.
     pub body: Vec<BodySection>,
