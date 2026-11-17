@@ -1,0 +1,37 @@
+# Publishes dova.maxjay.dev: the page in site/public, and beside it the latest
+# release's installers under names that never change (dova.msi, dova.deb).
+# Runs after every release, and by hand (Actions, site, Run workflow) to publish
+# a change to the page alone.
+#
+# Needs two repository secrets: CLOUDFLARE_API_TOKEN (a token that may edit
+# Workers) and CLOUDFLARE_ACCOUNT_ID.
+name: site
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Put the latest release's installers and its version on the page
+        run: |
+          tag=$(gh release view --json tagName --jq .tagName)
+          commit=$(gh api "repos/$GH_REPO/commits/$tag" --jq '.sha[0:7]')
+          gh release download "$tag" --pattern '*.msi' --pattern '*.deb' --dir installers
+          cp installers/*.msi site/public/dova.msi
+          cp installers/*.deb site/public/dova.deb
+          sed -i "s/__VERSION__/$tag/g; s/__COMMIT__/$commit/g" site/public/index.html
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+      - run: npx --yes wrangler@4 deploy
+        working-directory: site
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

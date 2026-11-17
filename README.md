@@ -64,9 +64,11 @@ dova pr create
 
 | | |
 |---|---|
-| **Windows** | run `dova-<version>-x64.msi` from [Releases](https://github.com/maxjay/dova/releases) (no admin needed) |
-| **Ubuntu, Debian, WSL** | `sudo apt install ./dova_<version>-1_amd64.deb` |
-| **From source** | `cargo install --path .` |
+| **Windows** | run [dova.maxjay.dev/dova.msi](https://dova.maxjay.dev/dova.msi) (no admin needed) |
+| **Ubuntu, Debian, WSL** | `curl -LO https://dova.maxjay.dev/dova.deb && sudo apt install ./dova.deb` |
+| **From source** | `cargo install --git https://github.com/maxjay/dova` |
+
+Both links are the latest release. Older versions are on [Releases](https://github.com/maxjay/dova/releases).
 
 Needs git and the [Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli). Sign in once with `az login`.
 
@@ -113,5 +115,7 @@ cargo run -- status
 ```
 
 Pushing a tag like `v0.3.0` builds the `.msi` and `.deb` and publishes them as a release. Locally: `cargo deb`, or `./packaging/build-msi.ps1`.
+
+The page at [dova.maxjay.dev](https://dova.maxjay.dev) is `site/public/index.html`. A release publishes it with that release's installers beside it, as `dova.msi` and `dova.deb`.
 
 MIT licensed.

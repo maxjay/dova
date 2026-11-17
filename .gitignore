@@ -1,1 +1,4 @@
 target/
+# Put beside the page by the publish step, never committed.
+site/public/dova.msi
+site/public/dova.deb
