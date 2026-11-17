@@ -161,7 +161,8 @@ pub struct ListedPullRequest {
     pub open_threads: usize,
 }
 
-/// How many pull requests are looked into at the same time.
+/// How many pull requests are looked into at the same time. That bounds the
+/// threads; how many requests are out at once is the transport's to limit.
 const AT_ONCE: usize = 8;
 
 /// Each pull request's check and open threads, a few pull requests at a time.

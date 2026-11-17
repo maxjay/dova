@@ -21,7 +21,8 @@ open = "5"
 percent-encoding = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
-ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier", "gzip"] }
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "http2", "rustls-no-provider", "gzip", "system-proxy"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 url = "2"
 
 [target.'cfg(unix)'.dependencies]

@@ -95,7 +95,7 @@ Needs git and the [Azure CLI](https://learn.microsoft.com/cli/azure/install-azur
 - **Never hangs.** Without a terminal it doesn't prompt: it fails and names the flag to pass.
 - **Safe with text.** Pass `-` and pipe the text in; the shell never touches it.
 - **Pictures.** `![the new screen](shot.png)` in a PR description or comment uploads the file and shows it.
-- **Fast.** A background process holds your sign-in and keeps connections open. `DOVA_NO_DAEMON=1` turns it off.
+- **Fast.** A background process holds your sign-in and one open connection (HTTP/2) that every command shares. `DOVA_NO_DAEMON=1` turns it off.
 - **Exit codes.** `1` bad input · `2` not found · `3` not signed in or no access · `4` a request failed.
 - **Tab completion.** Included in the `.deb`; elsewhere, `dova completion <shell>`.
 
