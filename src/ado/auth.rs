@@ -4,16 +4,17 @@
 //! it in its 401, and gets a token from there.
 
 use std::collections::{HashMap, HashSet};
+use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{Condvar, Mutex};
 use std::time::{Duration, SystemTime};
 
 use base64::Engine;
 use serde_json::Value;
 use url::Url;
 
-use super::{AuthStatus, Request, Response};
+use super::{AuthStatus, Method, Request, Response};
 use crate::error::{Error, Kind, Result};
 use crate::text::{iso8601, now_secs};
 
@@ -173,63 +174,184 @@ fn claims(jwt: &str) -> Value {
 /// Logs can be large; anything past this is not a response dova asked for.
 const MAX_BODY: u64 = 512 * 1024 * 1024;
 
-/// HTTPS with the system's certificates and proxy settings (`HTTPS_PROXY`,
-/// `NO_PROXY`). Connections are kept open, which the daemon turns into
-/// commands that skip the TLS handshake.
+/// How many requests are in flight at once over HTTP/1.1, where each needs
+/// a connection of its own: what a browser allows itself per host. A
+/// hundred new connections in a burst is what gets some of them reset.
+const AT_ONCE: usize = 6;
+/// Over HTTP/2 they all share one connection, which Azure DevOps lets carry
+/// a hundred at a time.
+const AT_ONCE_SHARED: usize = 64;
+
+/// How often a read is asked again after its connection drops…
+const RETRIES: u32 = 2;
+/// …and how long it waits first, and twice as long the second time.
+const PAUSE: Duration = Duration::from_millis(250);
+
+/// Lets a set number of callers through at a time.
+struct Gate {
+    /// Places free, and how many there are in all.
+    places: Mutex<(usize, usize)>,
+    freed: Condvar,
+}
+
+/// A place through the gate, given back when dropped.
+struct Pass<'a>(&'a Gate);
+
+impl Gate {
+    fn new(limit: usize) -> Gate {
+        Gate { places: Mutex::new((limit, limit)), freed: Condvar::new() }
+    }
+
+    fn pass(&self) -> Pass<'_> {
+        let mut places = self.places.lock().unwrap();
+        while places.0 == 0 {
+            places = self.freed.wait(places).unwrap();
+        }
+        places.0 -= 1;
+        Pass(self)
+    }
+
+    /// Lets more through from now on; never fewer.
+    fn widen(&self, limit: usize) {
+        let mut places = self.places.lock().unwrap();
+        if limit > places.1 {
+            *places = (places.0 + limit - places.1, limit);
+            self.freed.notify_all();
+        }
+    }
+}
+
+impl Drop for Pass<'_> {
+    fn drop(&mut self) {
+        self.0.places.lock().unwrap().0 += 1;
+        self.0.freed.notify_one();
+    }
+}
+
+/// Why one attempt at a request failed, and whether the same request might work if asked again.
+struct Dropped {
+    error: Error,
+    again: bool,
+}
+
+/// `attempt`, repeated while it fails in a way worth repeating: up to `again` more times, a `pause` longer each time.
+fn retried<T>(again: u32, pause: Duration, attempt: impl Fn() -> std::result::Result<T, Dropped>) -> Result<T> {
+    let mut tried = 0;
+    loop {
+        match attempt() {
+            Ok(done) => return Ok(done),
+            Err(dropped) if dropped.again && tried < again => {
+                tried += 1;
+                std::thread::sleep(pause * tried);
+            }
+            Err(dropped) => return Err(dropped.error),
+        }
+    }
+}
+
+/// HTTPS with the system's certificates and proxy settings, over HTTP/2
+/// where the other end speaks it (Azure DevOps does): every request shares
+/// one connection, and the daemon keeps it between commands for as long
+/// as the other end does. Azure DevOps closes one that has carried nothing
+/// for a few minutes (measured: open at two, gone by five); the next
+/// command then opens another, and nothing fails.
 pub fn https() -> Fetch {
-    let tls = ureq::tls::TlsConfig::builder().root_certs(ureq::tls::RootCerts::PlatformVerifier).build();
-    let config = ureq::Agent::config_builder()
-        .tls_config(tls)
+    // rustls wants its cryptography named once per process; a second naming is ignored.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let client = reqwest::blocking::Client::builder()
         .https_only(true)
-        .http_status_as_error(false)
-        .max_redirects(0)
-        .max_redirects_will_error(false)
-        .timeout_global(Some(Duration::from_secs(100)))
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(100))
+        // Kept until the other end closes it, and pinged so that a dead one is noticed before it is used.
+        .pool_idle_timeout(None)
+        .pool_max_idle_per_host(AT_ONCE)
+        .http2_keep_alive_interval(Duration::from_secs(30))
+        .http2_keep_alive_timeout(Duration::from_secs(10))
+        .http2_keep_alive_while_idle(true)
         .user_agent(format!("dova/{}", env!("CARGO_PKG_VERSION")))
         .build();
-    let agent = ureq::Agent::new_with_config(config);
+    let gate = Gate::new(AT_ONCE);
 
     Box::new(move |req, token| {
-        let mut builder = ureq::http::Request::builder()
-            .method(req.method.as_str())
-            .uri(req.url.as_str())
-            .header("Authorization", format!("Bearer {token}"))
-            .header("Accept", if req.text { "text/plain" } else { "application/json" })
-            // A 401 instead of a 203 sign-in page.
-            .header("X-TFS-FedAuthRedirect", "Suppress");
-        if let Some(content_type) = &req.content_type {
-            builder = builder.header("Content-Type", content_type);
+        let client = client.as_ref().map_err(|err| Error::external(format!("Could not set up HTTPS: {err}")))?;
+        let _pass = gate.pass();
+        // Only a read is safe to ask twice: a write may have landed before its connection went.
+        let again = if req.method == Method::Get { RETRIES } else { 0 };
+        let (answer, shared) = retried(again, PAUSE, || exchange(client, req, token))?;
+        if shared {
+            gate.widen(AT_ONCE_SHARED);
         }
-        let invalid = |_| Error::user(format!("\"{}\" isn't a request dova can send.", req.url));
-        let sent = match &req.body {
-            Some(body) if req.base64 => {
-                let bytes = base64::engine::general_purpose::STANDARD
-                    .decode(body)
-                    .map_err(|_| Error::user("That upload isn't base64."))?;
-                agent.run(builder.body(bytes).map_err(invalid)?)
-            }
-            Some(body) => agent.run(builder.body(body.as_str()).map_err(invalid)?),
-            None => agent.run(builder.body(()).map_err(invalid)?),
-        };
-        let mut res = sent.map_err(|err| Error::external(format!("Could not reach Azure DevOps: {err}")))?;
-        let header = |name: &str| res.headers().get(name).and_then(|v| v.to_str().ok()).map(str::to_string);
-        // All zeros means "no particular tenant".
-        let wanted = header("x-vss-resourcetenant")
-            .and_then(|v| v.split(',').next().map(|t| t.trim().to_string()))
-            .filter(|t| {
-                t.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.')
-                    && t.chars().any(|c| c != '0' && c != '-')
-            });
-        let content_type = header("content-type");
-        let body = res
-            .body_mut()
-            .with_config()
-            .limit(MAX_BODY)
-            .lossy_utf8(true)
-            .read_to_string()
-            .map_err(|err| Error::external(format!("Azure DevOps' answer was cut short: {err}")))?;
-        Ok((Response { status: res.status().as_u16(), content_type, body }, wanted))
+        Ok(answer)
     })
+}
+
+/// One request and its whole answer, and whether it came over a connection that requests share (HTTP/2).
+fn exchange(
+    client: &reqwest::blocking::Client,
+    req: &Request,
+    token: &str,
+) -> std::result::Result<((Response, Option<String>), bool), Dropped> {
+    let refused = |error: Error| Dropped { error, again: false };
+    let invalid = || refused(Error::user(format!("\"{}\" isn't a request dova can send.", req.url)));
+    let method = reqwest::Method::from_bytes(req.method.as_str().as_bytes()).map_err(|_| invalid())?;
+    let mut builder = client
+        .request(method, req.url.as_str())
+        .bearer_auth(token)
+        .header("Accept", if req.text { "text/plain" } else { "application/json" })
+        // A 401 instead of a 203 sign-in page.
+        .header("X-TFS-FedAuthRedirect", "Suppress");
+    if let Some(content_type) = &req.content_type {
+        builder = builder.header("Content-Type", content_type);
+    }
+    builder = match &req.body {
+        Some(body) if req.base64 => builder.body(
+            base64::engine::general_purpose::STANDARD
+                .decode(body)
+                .map_err(|_| refused(Error::user("That upload isn't base64.")))?,
+        ),
+        Some(body) => builder.body(body.clone()),
+        None => builder,
+    };
+    let res = builder.send().map_err(|err| Dropped {
+        // A connection that was reset or never made says nothing about the request itself.
+        again: err.is_connect() || (err.is_request() && !err.is_timeout()),
+        error: if err.is_builder() {
+            invalid().error
+        } else {
+            Error::external(format!("Could not reach Azure DevOps: {}", cause(&err)))
+        },
+    })?;
+
+    let header = |name: &str| res.headers().get(name).and_then(|v| v.to_str().ok()).map(str::to_string);
+    // All zeros means "no particular tenant".
+    let wanted =
+        header("x-vss-resourcetenant").and_then(|v| v.split(',').next().map(|t| t.trim().to_string())).filter(|t| {
+            t.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.')
+                && t.chars().any(|c| c != '0' && c != '-')
+        });
+    let (status, content_type) = (res.status().as_u16(), header("content-type"));
+    let shared = res.version() == reqwest::Version::HTTP_2;
+    let mut bytes = Vec::new();
+    res.take(MAX_BODY + 1).read_to_end(&mut bytes).map_err(|err| Dropped {
+        again: true,
+        error: Error::external(format!("Azure DevOps' answer was cut short: {err}")),
+    })?;
+    if bytes.len() as u64 > MAX_BODY {
+        return Err(refused(Error::external("Azure DevOps' answer is larger than anything dova asks for.")));
+    }
+    let body = String::from_utf8_lossy(&bytes).into_owned();
+    Ok(((Response { status, content_type, body }, wanted), shared))
+}
+
+/// What is at the bottom of an error: reqwest's own text stops at "error
+/// sending request", and the reason (refused, no such host, a bad
+/// certificate) is the last thing under it.
+fn cause(err: &dyn std::error::Error) -> String {
+    let mut deepest = err;
+    while let Some(under) = deepest.source() {
+        deepest = under;
+    }
+    deepest.to_string()
 }
 
 /* ---------------- az ---------------- */
@@ -429,6 +551,82 @@ mod tests {
         let (ado, seen) = fake_ado(|t| (if t["n"] == 1 { 401 } else { 200 }, None));
         assert_eq!(Session::new(az, ado, None).send(&get()).unwrap().status, 200);
         assert_eq!(ns(&seen), [1, 2]);
+    }
+
+    #[test]
+    fn says_why_a_request_could_not_be_sent_not_just_that_it_could_not() {
+        #[derive(Debug)]
+        struct Layer(&'static str, Option<Box<Layer>>);
+        impl std::fmt::Display for Layer {
+            fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str(self.0)
+            }
+        }
+        impl std::error::Error for Layer {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                self.1.as_deref().map(|under| under as &(dyn std::error::Error + 'static))
+            }
+        }
+        let refused = Layer("connection refused", None);
+        let sending = Layer("error sending request", Some(Box::new(Layer("tunnel error", Some(Box::new(refused))))));
+        assert_eq!(cause(&sending), "connection refused");
+        assert_eq!(cause(&Layer("timed out", None)), "timed out");
+    }
+
+    #[test]
+    fn the_gate_never_lets_more_through_than_its_limit() {
+        let gate = Gate::new(3);
+        let (inside, most) = (AtomicUsize::new(0), AtomicUsize::new(0));
+        std::thread::scope(|s| {
+            for _ in 0..40 {
+                s.spawn(|| {
+                    let _pass = gate.pass();
+                    most.fetch_max(inside.fetch_add(1, Ordering::SeqCst) + 1, Ordering::SeqCst);
+                    std::thread::sleep(Duration::from_millis(2));
+                    inside.fetch_sub(1, Ordering::SeqCst);
+                });
+            }
+        });
+        assert_eq!(most.load(Ordering::SeqCst), 3);
+        assert_eq!(*gate.places.lock().unwrap(), (3, 3), "every pass was given back");
+
+        // Once requests share a connection, more may go at once; it never narrows again.
+        gate.widen(5);
+        gate.widen(4);
+        let held: Vec<_> = (0..5).map(|_| gate.pass()).collect();
+        assert_eq!(*gate.places.lock().unwrap(), (0, 5));
+        drop(held);
+        assert_eq!(*gate.places.lock().unwrap(), (5, 5));
+    }
+
+    #[test]
+    fn asks_again_only_when_asking_again_could_help_and_only_so_often() {
+        let dropped = |again: bool| Dropped { error: Error::external("reset by peer"), again };
+        let asked = AtomicUsize::new(0);
+        let third_time_lucky = || match asked.fetch_add(1, Ordering::SeqCst) {
+            0 | 1 => Err(dropped(true)),
+            n => Ok(n),
+        };
+        assert_eq!(retried(2, Duration::ZERO, third_time_lucky).unwrap(), 2);
+
+        // A write is never asked twice, and neither is anything that failed for a reason of its own.
+        let asked = AtomicUsize::new(0);
+        let count = |again: bool| {
+            asked.store(0, Ordering::SeqCst);
+            let failing = || -> std::result::Result<(), Dropped> {
+                asked.fetch_add(1, Ordering::SeqCst);
+                Err(dropped(again))
+            };
+            (retried(0, Duration::ZERO, failing).is_err(), asked.load(Ordering::SeqCst))
+        };
+        assert_eq!((count(true), count(false)), ((true, 1), (true, 1)));
+        let always = || -> std::result::Result<(), Dropped> {
+            asked.fetch_add(1, Ordering::SeqCst);
+            Err(dropped(true))
+        };
+        asked.store(0, Ordering::SeqCst);
+        assert_eq!(retried(2, Duration::ZERO, always).unwrap_err().message, "reset by peer");
+        assert_eq!(asked.load(Ordering::SeqCst), 3);
     }
 
     #[test]
