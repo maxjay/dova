@@ -64,9 +64,11 @@ dova pr create
 
 | | |
 |---|---|
-| **Windows** | run `dova-<version>-x64.msi` from [Releases](https://github.com/maxjay/dova/releases) (no admin needed) |
-| **Ubuntu, Debian, WSL** | `sudo apt install ./dova_<version>-1_amd64.deb` |
-| **From source** | `cargo install --path .` |
+| **Windows** | run [dova.maxjay.dev/dova.msi](https://dova.maxjay.dev/dova.msi) (no admin needed) |
+| **Ubuntu, Debian, WSL** | `curl -LO https://dova.maxjay.dev/dova.deb && sudo apt install ./dova.deb` |
+| **From source** | `cargo install --git https://github.com/maxjay/dova` |
+
+Both links are the latest release. Older versions are on [Releases](https://github.com/maxjay/dova/releases).
 
 Needs git and the [Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli). Sign in once with `az login`.
 
