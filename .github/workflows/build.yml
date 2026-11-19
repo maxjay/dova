@@ -1,12 +1,11 @@
-# Every pull request, and every push to main: test on Linux and Windows,
-# and build both installers. A tag like v0.3.0: also publish them as a
-# GitHub release, and on dova.maxjay.dev (site.yml).
+# Every pull request, and every push to main: check and test on Linux and
+# Windows. The installers are not built here: release.yml builds them when
+# they are wanted, which is a release, or a change to how they are made.
 name: build
 
 on:
   push:
     branches: [main]
-    tags: ["v*"]
   pull_request:
 
 permissions:
@@ -17,54 +16,51 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # Nothing here is built twice from one checkout, and what it would keep is most of what gets cached.
+  CARGO_INCREMENTAL: 0
+
 jobs:
   linux:
-    # The oldest Ubuntu on offer, so the .deb runs on that and everything newer (WSL included).
+    # The same Ubuntu the .deb is built on.
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v7
-      - run: rustup toolchain install stable --profile minimal --component rustfmt,clippy && rustup default stable
+      - id: rust
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy && rustup default stable
+          echo "version=$(rustc --version | cut -d' ' -f2)" >> "$GITHUB_OUTPUT"
+      # Everything dova is built from, already built: only dova itself is compiled.
+      # A new compiler or a changed Cargo.lock starts from the nearest older cache.
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: checks-${{ runner.os }}-${{ steps.rust.outputs.version }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: checks-${{ runner.os }}-${{ steps.rust.outputs.version }}-
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
-      - run: cargo install cargo-deb --locked
-      - run: cargo deb --locked
-      - uses: actions/upload-artifact@v7
-        with:
-          name: deb
-          path: target/debian/*.deb
-          if-no-files-found: error
 
   windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
-      - run: rustup toolchain install stable --profile minimal; rustup default stable
+      - id: rust
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal && rustup default stable
+          echo "version=$(rustc --version | cut -d' ' -f2)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: checks-${{ runner.os }}-${{ steps.rust.outputs.version }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: checks-${{ runner.os }}-${{ steps.rust.outputs.version }}-
       - run: cargo test --locked
-      - run: dotnet tool install --global wix --version 5.0.2
-      - run: ./packaging/build-msi.ps1
-      - uses: actions/upload-artifact@v7
-        with:
-          name: msi
-          path: target/*.msi
-          if-no-files-found: error
-
-  release:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: [linux, windows]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/download-artifact@v8
-        with:
-          merge-multiple: true
-      - run: gh release create "$GITHUB_REF_NAME" *.deb *.msi --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
-        env:
-          GH_TOKEN: ${{ github.token }}
-
-  # The release's installers go up on dova.maxjay.dev, with the page.
-  site:
-    needs: release
-    uses: ./.github/workflows/site.yml
-    secrets: inherit
