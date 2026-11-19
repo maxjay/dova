@@ -4,10 +4,12 @@ use serde_json::{json, Value};
 use url::Url;
 
 use super::map::{
-    body_field, is_discussion, same_identity, to_pull_request, to_run, to_thread, to_timeline_record, to_work_item,
-    to_work_item_comment, vote_of, POINTS, WORK_ITEM_FIELDS,
+    body_field, is_discussion, same_identity, to_change, to_pull_request, to_run, to_thread, to_timeline_record,
+    to_work_item, to_work_item_comment, vote_of, POINTS, WORK_ITEM_FIELDS,
 };
-use super::types::{Comment, PullRequest, Review, Run, TeamAreas, Thread, TimelineRecord, WorkItem};
+use super::types::{
+    Anchor, Change, Comment, Iteration, PullRequest, Review, Run, TeamAreas, Thread, TimelineRecord, WorkItem,
+};
 use super::{Method, Request, Response, Transport};
 use crate::error::{Error, Kind, Result};
 use crate::par;
@@ -17,6 +19,8 @@ use crate::urls::{enc, unique};
 const BATCH: usize = 200;
 /// The most pull requests one list asks for.
 pub const MOST: usize = 100;
+/// How many changed files one request for a pull request's changes asks for.
+const PAGE: &str = "2000";
 /// How many of a user's teams are asked about at the same time.
 const AT_ONCE: usize = 8;
 const JSON: &str = "application/json";
@@ -351,23 +355,123 @@ impl<'a> AdoClient<'a> {
         self.work_items(&ids)
     }
 
+    /// A pull request's threads, each where it was written: enough to count
+    /// and read them. [`Self::placed_threads`] says where they are now.
     pub fn threads(&self, pr: &PullRequest) -> Result<Vec<Thread>> {
         let res = self.get(&pr_path(pr, "threads"), &[])?;
         Ok(list(&res["value"]).iter().filter(|t| is_discussion(t)).map(to_thread).collect())
     }
 
+    /// A pull request's threads, each on the lines it is on in the latest
+    /// push. Asked plainly, Azure DevOps gives the lines a thread was written
+    /// on, which later pushes move, remove, or stop changing the file of.
+    pub fn placed_threads(&self, pr: &PullRequest) -> Result<Vec<Thread>> {
+        let Some(latest) = self.latest_push(pr) else { return self.threads(pr) };
+        let (threads, changes) =
+            par::join(|| self.get(&pr_path(pr, "threads"), &tracked_to(&latest)), || self.changes(pr, latest.0));
+        let mut threads: Vec<Thread> =
+            list(&threads?["value"]).iter().filter(|t| is_discussion(t)).map(to_thread).collect();
+        if let Ok(changes) = changes {
+            threads.iter_mut().for_each(|thread| settle(thread, &changes));
+        }
+        Ok(threads)
+    }
+
+    /// One thread as it was written.
     pub fn thread(&self, pr: &PullRequest, id: u64) -> Result<Thread> {
+        self.thread_at(pr, id, &[])
+    }
+
+    /// One thread, on the lines it is on in the latest push.
+    pub fn placed_thread(&self, pr: &PullRequest, id: u64) -> Result<Thread> {
+        let Some(latest) = self.latest_push(pr) else { return self.thread(pr, id) };
+        let (thread, changes) =
+            par::join(|| self.thread_at(pr, id, &tracked_to(&latest)), || self.changes(pr, latest.0));
+        let mut thread = thread?;
+        if let Ok(changes) = changes {
+            settle(&mut thread, &changes);
+        }
+        Ok(thread)
+    }
+
+    fn thread_at(&self, pr: &PullRequest, id: u64, query: &[(&str, &str)]) -> Result<Thread> {
         // Azure DevOps answers for a thread that isn't there with a 500, not a 404.
         let missing = |err: Error| match err.kind == Kind::NotFound || err.message.contains("does not exist") {
             true => Error::not_found(format!("Thread #{id} was not found on PR #{}.", pr.id)),
             false => err,
         };
-        Ok(to_thread(&self.get(&pr_path(pr, &format!("threads/{id}")), &[]).map_err(missing)?))
+        Ok(to_thread(&self.get(&pr_path(pr, &format!("threads/{id}")), query).map_err(missing)?))
     }
 
-    pub fn add_comment(&self, pr: &PullRequest, text: &str) -> Result<Thread> {
-        let body = json!({ "comments": [{ "parentCommentId": 0, "content": text, "commentType": "text" }], "status": "active" });
+    /// The number of a pull request's latest push, as a number and as it goes
+    /// in a query. None when its pushes can't be listed: its threads can
+    /// still be read, where they were written.
+    fn latest_push(&self, pr: &PullRequest) -> Option<(u64, String)> {
+        let res = self.get(&pr_path(pr, "iterations"), &[]).ok()?;
+        let latest = list(&res["value"]).last()?["id"].as_u64()?;
+        Some((latest, latest.to_string()))
+    }
+
+    /// A new thread: about the whole pull request, or `at` some lines of a file it changes.
+    pub fn add_comment(&self, pr: &PullRequest, text: &str, at: Option<&Anchor>) -> Result<Thread> {
+        let mut body = json!({ "comments": [{ "parentCommentId": 0, "content": text, "commentType": "text" }], "status": "active" });
+        if let Some(at) = at {
+            let side = if at.old { "left" } else { "right" };
+            // Offsets count from 1, and the end is just past the last character: whole lines.
+            // Which push it was written against, Azure DevOps fills in itself: the latest.
+            body["threadContext"] = json!({
+                "filePath": at.file,
+                format!("{side}FileStart"): { "line": at.line, "offset": 1 },
+                format!("{side}FileEnd"): { "line": at.end_line, "offset": at.end_width + 1 },
+            });
+        }
         Ok(to_thread(&self.call(Method::Post, &pr_path(pr, "threads"), &[], Some((&body, JSON)))?))
+    }
+
+    /* what a pull request changes */
+
+    /// A pull request's latest push.
+    pub fn latest_iteration(&self, pr: &PullRequest) -> Result<Iteration> {
+        let res = self.get(&pr_path(pr, "iterations"), &[])?;
+        let latest = list(&res["value"]).last();
+        let latest = latest.ok_or_else(|| Error::external(format!("PR #{} has nothing pushed to it.", pr.id)))?;
+        let commit = |name: &str| latest[name]["commitId"].as_str().unwrap_or("").to_string();
+        Ok(Iteration {
+            id: latest["id"].as_u64().unwrap_or(1),
+            base: commit("commonRefCommit"),
+            head: commit("sourceRefCommit"),
+        })
+    }
+
+    /// Every file a push of a pull request changes, against where its branch left the target.
+    pub fn changes(&self, pr: &PullRequest, iteration: u64) -> Result<Vec<Change>> {
+        let path = pr_path(pr, &format!("iterations/{iteration}/changes"));
+        let (mut changes, mut skip) = (Vec::new(), 0);
+        loop {
+            let from = skip.to_string();
+            let res = self.get(&path, &[("$compareTo", "0"), ("$top", PAGE), ("$skip", &from)])?;
+            changes.extend(list(&res["changeEntries"]).iter().filter_map(to_change));
+            match res["nextSkip"].as_u64() {
+                Some(next) if next > skip => skip = next,
+                _ => return Ok(changes),
+            }
+        }
+    }
+
+    /// A file's contents by their id, byte for byte. None when the repo holds
+    /// no such thing: the id is a submodule's commit, which lives in another repo.
+    pub fn blob(&self, pr: &PullRequest, id: &str) -> Result<Option<Vec<u8>>> {
+        use base64::Engine;
+        let path = format!("{}/_apis/git/repositories/{}/blobs/{id}", enc(&pr.project), enc(&pr.repo));
+        let url = self.url(&path, &[("$format", "octetstream")])?;
+        match self.send(&Request { binary: true, ..Request::get(url) }) {
+            Ok(res) => base64::engine::general_purpose::STANDARD
+                .decode(res.body)
+                .map(Some)
+                .map_err(|_| Error::external("Azure DevOps' answer isn't the file that was asked for.")),
+            Err(err) if err.message.contains("TF401035") => Ok(None),
+            Err(err) => Err(err),
+        }
     }
 
     /// Nested under the thread's last comment, so it lands in the actual conversation.
@@ -511,6 +615,21 @@ impl<'a> AdoClient<'a> {
         let res = self.http.send(req)?;
         check_status(&res, req)?;
         Ok(res)
+    }
+}
+
+/// The query that has Azure DevOps move threads to where they are in a push, compared with the target.
+fn tracked_to(push: &(u64, String)) -> [(&str, &str); 2] {
+    [("$iteration", push.1.as_str()), ("$baseIteration", "0")]
+}
+
+/// A thread on a file the pull request doesn't change, as it is now, is on
+/// no line of it: the file was deleted again, or put back as it was. Azure
+/// DevOps keeps such a thread where it was written, and leaves it out of its
+/// own list of changed files.
+fn settle(thread: &mut Thread, changes: &[Change]) {
+    if let Some(at) = thread.location.as_mut().filter(|at| !changes.iter().any(|c| c.at() == at.file)) {
+        (at.line, at.end_line, at.outdated) = (None, None, true);
     }
 }
 

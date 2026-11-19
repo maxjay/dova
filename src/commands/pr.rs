@@ -4,6 +4,7 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 use serde_json::json;
 
+use super::diff::{anchor, Diff};
 use super::work_item_table;
 use crate::ado::client::{AdoClient, NewPullRequest, MOST};
 use crate::ado::types::{PullRequest, Review, Run, Thread, ThreadLocation, WorkItem, WorkItemRef};
@@ -294,7 +295,7 @@ pub fn render_threads(s: Style, pr_id: u64, threads: &[ThreadSummary], full: boo
     let open = threads.iter().filter(|t| t.unresolved).count();
     let mut out = vec![s.bold("Threads") + &s.dim(&format!(" ({open} open, {} resolved)", threads.len() - open))];
     for t in threads {
-        let location = t.location.as_ref().map_or_else(|| s.dim("(general)"), |l| format!("{}:{}", l.file, l.line));
+        let location = t.location.as_ref().map_or_else(|| s.dim("(general)"), ThreadLocation::place);
         let state = if t.unresolved { s.yellow("open") } else { s.dim("resolved") };
         let author = t.last_author.as_deref().unwrap_or("?").to_string();
         out.push(String::new());
@@ -322,7 +323,7 @@ pub struct PullRequestDetail {
 }
 
 pub fn pull_request_detail(pr: PullRequest, ado: &AdoClient) -> Result<PullRequestDetail> {
-    let (work_items, threads) = par::join(|| ado.pull_request_work_items(&pr), || ado.threads(&pr));
+    let (work_items, threads) = par::join(|| ado.pull_request_work_items(&pr), || ado.placed_threads(&pr));
     let work_items = work_items?.iter().map(WorkItem::to_ref).collect();
     Ok(PullRequestDetail { work_items, threads: summarize_threads(threads?), pr })
 }
@@ -447,6 +448,12 @@ pub struct Comment {
     pub pr: String,
     /// The comment ('-' or nothing reads stdin)
     pub text: Option<String>,
+    /// On lines of a file the PR changes: path:line, or path:first-last
+    #[arg(long, value_name = "PLACE")]
+    pub at: Option<String>,
+    /// With --at: the lines are the old file's, as it was before the PR
+    #[arg(long, requires = "at")]
+    pub old: bool,
 }
 
 #[derive(Args)]
@@ -509,7 +516,9 @@ pub enum Pr {
     View(View),
     /// Change a PR's title or description, or move it in or out of draft (default: the current branch's)
     Edit(Edit),
-    /// Start a review thread
+    /// What a PR changes, file by file, without a clone (default: the current branch's)
+    Diff(Diff),
+    /// Start a review thread: about the whole PR, or on lines of a file it changes
     Comment(Comment),
     /// Every comment in one review thread
     Thread(ThreadArgs),
@@ -529,16 +538,24 @@ impl Pr {
             Pr::List(c) => c.run(app),
             Pr::View(c) => c.run(app),
             Pr::Edit(c) => c.run(app),
+            Pr::Diff(c) => c.run(app),
             Pr::Comment(c) => {
                 let (pr, ado) = find_pull_request(app, Some(&c.pr))?;
+                // A place that isn't in the pull request is found out before anything is read or posted.
+                let at = c.at.as_deref().map(|at| anchor(&ado, &pr, at, c.old)).transpose()?;
                 let comment = illustrated(app, &ado, &pr, app.text(c.text.as_deref(), "comment")?)?;
-                let thread = ado.add_comment(&pr, &comment)?;
-                let text = format!("{} thread #{} on PR #{}.", s.green("Posted"), thread.id, pr.id);
-                Ok(Output::new(&json!({ "prId": pr.id, "threadId": thread.id }), text))
+                let thread = ado.add_comment(&pr, &comment, at.as_ref())?;
+                let place = thread.location.as_ref().map_or(String::new(), |l| format!(", at {}", l.place()));
+                let text = format!("{} thread #{} on PR #{}{place}.", s.green("Posted"), thread.id, pr.id);
+                let mut posted = json!({ "prId": pr.id, "threadId": thread.id });
+                if let Some(location) = &thread.location {
+                    posted["location"] = json!(location);
+                }
+                Ok(Output::new(&posted, text))
             }
             Pr::Thread(c) => {
                 let (pr, ado) = find_pull_request(app, Some(&c.pr))?;
-                let thread = ado.thread(&pr, thread_id(&c.thread)?)?;
+                let thread = ado.placed_thread(&pr, thread_id(&c.thread)?)?;
                 Ok(Output::new(&ThreadOnPr { pr_id: pr.id, thread: &thread }, render_thread(&thread, pr.id, s)))
             }
             Pr::Reply(c) => {
@@ -577,7 +594,7 @@ fn render_thread(t: &Thread, pr_id: u64, s: Style) -> String {
     let status = if t.unresolved { s.yellow(&t.status) } else { s.dim(&t.status) };
     let mut out = vec![
         format!("{} on PR #{pr_id} · {status}", s.bold(&format!("Thread #{}", t.id))),
-        t.location.as_ref().map_or_else(|| s.dim("(general comment)"), |l| format!("{}:{}", l.file, l.line)),
+        t.location.as_ref().map_or_else(|| s.dim("(general comment)"), ThreadLocation::place),
     ];
     for comment in &t.comments {
         let by = [comment.author.as_deref().or(Some("unknown")), comment.published_at.as_deref()];
@@ -798,6 +815,76 @@ mod tests {
         let bed = Bed::new(mine(json!([rest_pr(9, json!({}))])));
         assert!(cli(bed.app(), &["pr", "list", "--json"]).json()[0].get("review").is_none());
         assert!(bed.ado.requests().iter().all(|r| !r.path.ends_with("/_apis/teams")));
+    }
+
+    /// PR 9, pushed to twice. Thread 4 was written on lines 16-17 of the first push, which the second moved
+    /// down by two; thread 5 is on a line of the old file. Without `pushes`, the pushes can't be listed.
+    fn commented(pushes: bool) -> Route {
+        Box::new(move |r: &Recorded| {
+            let on = |side: &str, first: u64, last: u64| json!({ "filePath": "/src/a.ts", format!("{side}FileStart"): { "line": first, "offset": 1 }, format!("{side}FileEnd"): { "line": last, "offset": 4 } });
+            let thread = |id: u64, at: Value| json!({ "id": id, "status": "active", "threadContext": at, "comments": [{ "id": 1, "content": "why" }] });
+            let moved = if r.query("$iteration").as_deref() == Some("2") { 2 } else { 0 };
+            let written_first = thread(4, on("right", 16 + moved, 17 + moved));
+            if r.path.ends_with("/iterations") {
+                pushes.then(|| crate::testing::json_response(200, json!({ "value": [{ "id": 1 }, { "id": 2 }] })))
+            } else if r.path.ends_with("/threads/4") {
+                ok(written_first)
+            } else if r.path.ends_with("/threads") {
+                // Thread 6's lines are gone, which Azure DevOps says as line 0; thread 7 is about a whole file.
+                let gone = thread(6, on("right", 0, 0));
+                let whole = thread(7, json!({ "filePath": "/src/a.ts" }));
+                // Thread 8 is on a file the second push deleted again, which Azure DevOps leaves where it was.
+                let mut left = thread(8, on("right", 2, 2));
+                left["threadContext"]["filePath"] = json!("/src/dropped.ts");
+                ok(json!({ "value": [written_first, thread(5, on("left", 3, 3)), gone, whole, left] }))
+            } else if r.path.ends_with("/iterations/2/changes") {
+                ok(
+                    json!({ "changeEntries": [{ "changeType": "edit", "item": { "path": "/src/a.ts", "objectId": "b", "originalObjectId": "a" } }] }),
+                )
+            } else if r.path.ends_with("/workitems") {
+                ok(json!({ "value": [] }))
+            } else {
+                ok(rest_pr(9, json!({})))
+            }
+        })
+    }
+
+    #[test]
+    fn a_thread_is_placed_where_it_is_after_the_latest_push_on_the_side_it_is_on() {
+        let bed = Bed::new(commented(true));
+        let view = cli(bed.app(), &["pr", "view", "9", "--json"]).json();
+        let place = |line: u64, end: u64, side: &str| json!({ "file": "/src/a.ts", "line": line, "endLine": end, "side": side, "outdated": false });
+        assert_eq!(view["threads"][0]["location"], place(18, 19, "new"));
+        assert_eq!(view["threads"][1]["location"], place(3, 3, "old"));
+        let asked = bed.ado.requests().into_iter().find(|r| r.path.ends_with("/threads")).unwrap();
+        assert_eq!(
+            (asked.query("$iteration").as_deref(), asked.query("$baseIteration").as_deref()),
+            (Some("2"), Some("0"))
+        );
+
+        // On no line: because its lines went, or because it never was on one.
+        let nowhere = |side: Value, outdated: bool| json!({ "file": "/src/a.ts", "line": null, "endLine": null, "side": side, "outdated": outdated });
+        assert_eq!(view["threads"][2]["location"], nowhere(json!("new"), true));
+        assert_eq!(view["threads"][3]["location"], nowhere(json!(null), false));
+        let dropped =
+            json!({ "file": "/src/dropped.ts", "line": null, "endLine": null, "side": "new", "outdated": true });
+        assert_eq!(view["threads"][4]["location"], dropped);
+
+        let screen = cli(bed.app(), &["pr", "view", "9"]).stdout;
+        assert!(screen.contains("/src/a.ts:18-19 ") && screen.contains("/src/a.ts:3 (old) "), "{screen}");
+        assert!(
+            screen.contains("#6  open  /src/a.ts (its lines have since gone) ")
+                && screen.contains("#7  open  /src/a.ts  "),
+            "{screen}"
+        );
+        assert_eq!(cli(bed.app(), &["pr", "thread", "9", "4", "--json"]).json()["location"], place(18, 19, "new"));
+
+        // Where the pushes can't be listed, a thread is still read: where it was written.
+        let bed = Bed::new(commented(false));
+        assert_eq!(
+            cli(bed.app(), &["pr", "view", "9", "--json"]).json()["threads"][0]["location"],
+            place(16, 17, "new")
+        );
     }
 
     #[test]

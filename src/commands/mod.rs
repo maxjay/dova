@@ -2,6 +2,7 @@
 //! `run`; the logic it shares with other commands is a plain function
 //! beside it.
 
+pub mod diff;
 pub mod link;
 pub mod misc;
 pub mod pipeline;

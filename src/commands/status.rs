@@ -47,7 +47,7 @@ pub fn branch_status(app: &App) -> Result<BranchStatus> {
     let merge_ref = format!("refs/pull/{}/merge", pr.id);
     let (items, threads, pr_runs) = par::join3(
         || ado.pull_request_work_items(&pr),
-        || ado.threads(&pr),
+        || ado.placed_threads(&pr),
         || ado.runs(project, Some(repo), &merge_ref, 3),
     );
     let mut runs: Vec<Run> = Vec::new();

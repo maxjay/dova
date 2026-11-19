@@ -158,12 +158,14 @@ fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "review_thread",
-            description: "Act on PR review threads. thread + nothing else: read every comment in it. thread + text: reply (add status \"resolved\" to resolve it in the same step), or with amend, rewrite your last comment there instead. thread + status: just set the status. text without thread: start a new thread. A markdown image of a local file in text, ![alt](shot.png), is uploaded and shown.",
+            description: "Act on PR review threads. thread + nothing else: read every comment in it. thread + text: reply (add status \"resolved\" to resolve it in the same step), or with amend, rewrite your last comment there instead. thread + status: just set the status. text without thread: start a new thread, about the whole PR or, with at, on lines of a file it changes. A markdown image of a local file in text, ![alt](shot.png), is uploaded and shown.",
             properties: json!({
                 "pr": id("PR id or link"),
                 "thread": id("thread id, as listed by status or view"),
                 "text": text("comment text, markdown"),
                 "amend": flag("rewrite your last comment in the thread with text, instead of replying"),
+                "at": text("for a new thread: the lines it is on, as path:line or path:first-last, in the PR's version of the file"),
+                "old": flag("with at: the lines are the old file's, as it was before the PR"),
                 "status": { "type": "string", "enum": ["resolved", "active", "wontfix", "closed", "pending"], "description": "set the thread to this" },
             }),
             required: &["pr"],
@@ -172,7 +174,7 @@ fn tools() -> Vec<Tool> {
                 let params = json!({ "pr": a.get("pr"), "thread": a.get("thread"), "text": a.get("text") });
                 Ok(match (has("thread"), has("text"), has("status")) {
                     (false, false, _) => return Err(Error::user("Pass text to start a thread, or a thread to act on.")),
-                    (false, true, _) => ("pr.comment", params),
+                    (false, true, _) => ("pr.comment", json!({ "pr": a.get("pr"), "text": a.get("text"), "at": a.get("at"), "old": a.get("old") })),
                     (true, true, _) if a.get("amend") == Some(&json!(true)) => ("pr.amend", params),
                     (true, true, _) => ("pr.reply", json!({ "pr": a.get("pr"), "thread": a.get("thread"), "text": a.get("text"), "resolve": a.get("status") })),
                     (true, false, true) => ("pr.resolve", json!({ "pr": a.get("pr"), "thread": a.get("thread"), "status": a.get("status") })),

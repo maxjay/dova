@@ -2,7 +2,7 @@
 
 use serde_json::Value;
 
-use super::types::{BodySection, Comment, PullRequest, Run, Thread, ThreadLocation, TimelineRecord, WorkItem};
+use super::types::{BodySection, Change, Comment, PullRequest, Run, Thread, ThreadLocation, TimelineRecord, WorkItem};
 use crate::text::strip_html;
 use crate::urls;
 
@@ -145,16 +145,47 @@ pub fn is_discussion(raw: &Value) -> bool {
     raw["isDeleted"] != true && items(&raw["comments"]).iter().any(written)
 }
 
+/// One file of a pull request's changes; None for anything that isn't a file.
+pub fn to_change(raw: &Value) -> Option<Change> {
+    let item = &raw["item"];
+    if item["isFolder"] == true || item["gitObjectType"] == "tree" {
+        return None;
+    }
+    let text = |value: &Value| value.as_str().map(str::to_string);
+    let kinds = raw["changeType"].as_str().unwrap_or("");
+    let (path, blob) = (text(&item["path"]), text(&item["objectId"]));
+    // Only a file that moved, or went, has its old path spelled out.
+    let moved = text(&raw["originalPath"]);
+    Some(if kinds.contains("delete") {
+        let old_path = moved.or(path);
+        Change { kind: "deleted", path: None, old_path, blob: None, old_blob: text(&item["originalObjectId"]).or(blob) }
+    } else if kinds.contains("add") {
+        Change { kind: "added", path, old_path: None, blob, old_blob: None }
+    } else {
+        let kind = if kinds.contains("rename") { "renamed" } else { "edited" };
+        Change { kind, old_path: moved.or_else(|| path.clone()), path, blob, old_blob: text(&item["originalObjectId"]) }
+    })
+}
+
 pub fn to_thread(raw: &Value) -> Thread {
     let context = &raw["threadContext"];
-    let line = context["rightFileStart"]["line"].as_u64().or_else(|| context["leftFileStart"]["line"].as_u64());
+    // On the pull request's side of the file when it is on both; on neither when it is about the whole file.
+    let side = ["right", "left"].into_iter().find(|side| context[format!("{side}FileStart")]["line"].is_u64());
+    // Line 0 is where Azure DevOps puts a thread whose lines a later push removed.
+    let line = |end: &str| context[format!("{}File{end}", side?)]["line"].as_u64().filter(|line| *line > 0);
+    let first = line("Start");
     let status = raw["status"].as_str().unwrap_or("unknown").to_string();
     Thread {
         id: raw["id"].as_u64().unwrap_or(0),
         unresolved: status == "active" || status == "pending",
         status,
-        location: line
-            .map(|line| ThreadLocation { file: context["filePath"].as_str().unwrap_or("").to_string(), line }),
+        location: context["filePath"].as_str().map(|file| ThreadLocation {
+            file: file.to_string(),
+            line: first,
+            end_line: first.map(|first| line("End").filter(|last| *last >= first).unwrap_or(first)),
+            side: side.map(|side| if side == "right" { "new" } else { "old" }),
+            outdated: side.is_some() && first.is_none(),
+        }),
         comments: items(&raw["comments"])
             .iter()
             .map(|c| Comment {

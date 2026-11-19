@@ -52,6 +52,42 @@ pub fn to_html(text: &str) -> String {
 }
 
 /// Cuts text at `max` characters, saying whether it did so callers can offer `--full`.
+/// What Windows-1252 has where Latin-1 has control characters, from 0x80 to 0x9F.
+const WINDOWS_1252: [char; 32] = [
+    '\u{20AC}', '\u{81}', '\u{201A}', '\u{192}', '\u{201E}', '\u{2026}', '\u{2020}', '\u{2021}', '\u{2C6}', '\u{2030}',
+    '\u{160}', '\u{2039}', '\u{152}', '\u{8D}', '\u{17D}', '\u{8F}', '\u{90}', '\u{2018}', '\u{2019}', '\u{201C}',
+    '\u{201D}', '\u{2022}', '\u{2013}', '\u{2014}', '\u{2DC}', '\u{2122}', '\u{161}', '\u{203A}', '\u{153}', '\u{9D}',
+    '\u{17E}', '\u{178}',
+];
+
+/// A file's bytes as text, or None for a file that isn't text. Read the way
+/// Azure DevOps' own pages read one: by its byte-order mark if it has one,
+/// as UTF-8 if it is that, and otherwise as Windows-1252. The mark itself
+/// is not part of the text. As git has it, a file with a NUL in it is binary,
+/// which UTF-16 without a mark therefore is.
+pub fn decode(bytes: &[u8]) -> Option<String> {
+    let utf16 = |rest: &[u8], unit: fn([u8; 2]) -> u16| {
+        let units = rest.chunks(2).map(|pair| unit([pair[0], *pair.get(1).unwrap_or(&0)]));
+        Some(char::decode_utf16(units).map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER)).collect())
+    };
+    match bytes {
+        [0xEF, 0xBB, 0xBF, rest @ ..] => Some(String::from_utf8_lossy(rest).into_owned()),
+        [0xFF, 0xFE, rest @ ..] => utf16(rest, u16::from_le_bytes),
+        [0xFE, 0xFF, rest @ ..] => utf16(rest, u16::from_be_bytes),
+        _ if bytes.contains(&0) => None,
+        _ => Some(match std::str::from_utf8(bytes) {
+            Ok(text) => text.to_string(),
+            Err(_) => bytes
+                .iter()
+                .map(|byte| match byte {
+                    0x80..=0x9F => WINDOWS_1252[usize::from(byte - 0x80)],
+                    _ => char::from(*byte),
+                })
+                .collect(),
+        }),
+    }
+}
+
 pub fn truncate(text: &str, max: usize) -> (String, bool) {
     match text.char_indices().nth(max) {
         None => (text.to_string(), false),
@@ -177,6 +213,24 @@ mod tests {
         assert_eq!(strip_html("<ul><li>a</li><li class=\"x\">b &amp; c</li></ul>"), "- a\n- b & c");
         assert_eq!(strip_html("a<br><br><br><br>b"), "a\n\nb");
         assert_eq!(strip_html("1 < 2 and &lt;b&gt;"), "1 < 2 and <b>");
+    }
+
+    #[test]
+    fn reads_a_files_bytes_as_the_text_they_are_whatever_they_are_written_in() {
+        assert_eq!(decode("caf\u{e9} \u{1F642}\n".as_bytes()).as_deref(), Some("caf\u{e9} \u{1F642}\n"));
+        assert_eq!(decode(b"").as_deref(), Some(""));
+        // A byte-order mark says how to read the rest, and is not text itself.
+        assert_eq!(decode(b"\xEF\xBB\xBFone\n").as_deref(), Some("one\n"));
+        assert_eq!(decode(b"\xFF\xFEh\x00\xE9\x00\r\x00\n\x00").as_deref(), Some("h\u{e9}\r\n"));
+        assert_eq!(decode(b"\xFE\xFF\x00h\x00\xE9\x00\n").as_deref(), Some("h\u{e9}\n"));
+        assert_eq!(decode(b"\xFF\xFE=\xD8B\xDE").as_deref(), Some("\u{1F642}"));
+        // Half a character at the end is not a reason to give up on the file.
+        assert_eq!(decode(b"\xFF\xFEh\x00i").as_deref(), Some("hi"));
+        // Not UTF-8: Windows-1252, as Azure DevOps reads it.
+        assert_eq!(decode(b"caf\xE9 \x80 \x93x\x94\n").as_deref(), Some("caf\u{e9} \u{20AC} \u{201C}x\u{201D}\n"));
+        // A NUL means it isn't text, which is what UTF-16 with no mark looks like too.
+        assert_eq!(decode(b"PNG\x00\x01"), None);
+        assert_eq!(decode(b"h\x00i\x00"), None);
     }
 
     #[test]

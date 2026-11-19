@@ -55,11 +55,22 @@ pub struct Request {
     /// The body is base64, to be sent as the bytes it stands for (an image).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub base64: bool,
+    /// The answer may not be text (a file's contents): hand it back as base64 of its bytes.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub binary: bool,
 }
 
 impl Request {
     pub fn get(url: impl Into<String>) -> Request {
-        Request { method: Method::Get, url: url.into(), body: None, content_type: None, text: false, base64: false }
+        Request {
+            method: Method::Get,
+            url: url.into(),
+            body: None,
+            content_type: None,
+            text: false,
+            base64: false,
+            binary: false,
+        }
     }
 }
 
