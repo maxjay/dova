@@ -15,8 +15,10 @@ For Azure DevOps work items, pull requests and pipelines, use `dova` — never `
 | Open the PR | `dova pr create --title '<title>' --body - <<'EOF'` … `EOF` |
 | The user's own pull requests, with checks and open threads | `dova pr list [--state active\|completed\|abandoned\|all]` |
 | The pull requests the user (or a team of theirs) was asked to review, with their vote | `dova pr list --review [--state …]` |
+| What a PR changes, without checking it out | `dova pr diff [pr]` (`--names` for just the files, `--files <paths>` for some of them) |
 | Answer review threads | `dova pr reply <pr> <thread> - --resolve <<'EOF'` … `EOF` |
 | Read one whole thread | `dova pr thread <pr> <thread>` |
+| Comment on lines of a file a PR changes | `dova pr comment <pr> - --at <path>:<line>[-<last>] <<'EOF'` … `EOF` (`--old` for lines the PR removes) |
 | Fix a comment you posted | `dova pr amend <pr> <thread> - <<'EOF'` … `EOF` (rewrites your last comment there) |
 | Change a PR's title or description | `dova pr edit [pr] --title '<title>' --body - <<'EOF'` … `EOF` |
 | Move a PR in or out of draft | `dova pr edit [pr] --draft`, `dova pr edit [pr] --ready` |

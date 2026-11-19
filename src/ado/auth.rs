@@ -294,10 +294,15 @@ fn exchange(
     let refused = |error: Error| Dropped { error, again: false };
     let invalid = || refused(Error::user(format!("\"{}\" isn't a request dova can send.", req.url)));
     let method = reqwest::Method::from_bytes(req.method.as_str().as_bytes()).map_err(|_| invalid())?;
+    let accept = match (req.binary, req.text) {
+        (true, _) => "application/octet-stream",
+        (false, true) => "text/plain",
+        (false, false) => "application/json",
+    };
     let mut builder = client
         .request(method, req.url.as_str())
         .bearer_auth(token)
-        .header("Accept", if req.text { "text/plain" } else { "application/json" })
+        .header("Accept", accept)
         // A 401 instead of a 203 sign-in page.
         .header("X-TFS-FedAuthRedirect", "Suppress");
     if let Some(content_type) = &req.content_type {
@@ -339,7 +344,11 @@ fn exchange(
     if bytes.len() as u64 > MAX_BODY {
         return Err(refused(Error::external("Azure DevOps' answer is larger than anything dova asks for.")));
     }
-    let body = String::from_utf8_lossy(&bytes).into_owned();
+    // An error is always text, whatever was asked for.
+    let body = match req.binary && (200..300).contains(&status) {
+        true => base64::engine::general_purpose::STANDARD.encode(&bytes),
+        false => String::from_utf8_lossy(&bytes).into_owned(),
+    };
     Ok(((Response { status, content_type, body }, wanted), shared))
 }
 

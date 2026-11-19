@@ -91,6 +91,13 @@ pub fn json_response(status: u16, body: Value) -> Response {
     Response { status, content_type: Some("application/json".into()), body: body.to_string() }
 }
 
+/// A file's contents, as the transport hands back an answer asked for as bytes.
+pub fn bytes_response(body: &[u8]) -> Response {
+    use base64::Engine;
+    let body = base64::engine::general_purpose::STANDARD.encode(body);
+    Response { status: 200, content_type: Some("application/octet-stream".into()), body }
+}
+
 pub fn ok(body: Value) -> Option<Response> {
     Some(json_response(200, body))
 }

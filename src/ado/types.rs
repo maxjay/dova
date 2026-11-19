@@ -82,10 +82,78 @@ pub struct Review {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ThreadLocation {
+    /// As Azure DevOps writes a path in a repo: from its root, with a leading
+    /// slash. For a renamed file this is its new path, on either side.
     pub file: String,
-    /// 1-based; the PR's version of the file when it has the line, else the base's.
+    /// 1-based, the first line it is on, in the version of the file `side`
+    /// names. None when it is on no line: it is about the whole file, or it
+    /// is `outdated`.
+    pub line: Option<u64>,
+    /// The last line it is on: `line` again when it is on one.
+    pub end_line: Option<u64>,
+    /// new: the pull request's version of the file. old: what it is compared
+    /// with. None for a thread about the whole file.
+    pub side: Option<&'static str>,
+    /// It is on no line any more: a later push removed every line it was on,
+    /// or the pull request no longer changes the file.
+    pub outdated: bool,
+}
+
+impl ThreadLocation {
+    /// `/src/a.ts:3`, or `/src/a.ts:3-5`; marked when the lines are the old file's, or are gone.
+    pub fn place(&self) -> String {
+        let old = if self.side == Some("old") { " (old)" } else { "" };
+        match (self.line, self.end_line) {
+            (Some(line), Some(end)) if end > line => format!("{}:{line}-{end}{old}", self.file),
+            (Some(line), _) => format!("{}:{line}{old}", self.file),
+            (None, _) if self.outdated => format!("{} (its lines have since gone)", self.file),
+            (None, _) => self.file.clone(),
+        }
+    }
+}
+
+/// Where a new review thread goes: whole lines of one side of a file.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Anchor {
+    pub file: String,
     pub line: u64,
+    pub end_line: u64,
+    /// How long the last line is, in the UTF-16 units Azure DevOps counts a line in.
+    pub end_width: u64,
+    /// The side the pull request is compared with, not its own.
+    pub old: bool,
+}
+
+/// One push to a pull request, and the two commits a diff of it is between.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Iteration {
+    /// Counted from 1.
+    pub id: u64,
+    /// Where the pull request's branch left its target.
+    pub base: String,
+    pub head: String,
+}
+
+/// One file a pull request changes. Paths and contents are None on the side
+/// where the file doesn't exist: before an addition, after a deletion.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Change {
+    /// added | edited | deleted | renamed
+    pub kind: &'static str,
+    pub path: Option<String>,
+    pub old_path: Option<String>,
+    /// The id of the file's contents, to ask Azure DevOps for them by.
+    pub blob: Option<String>,
+    pub old_blob: Option<String>,
+}
+
+impl Change {
+    /// Where the file is now, or where it was if it is gone.
+    pub fn at(&self) -> &str {
+        self.path.as_deref().or(self.old_path.as_deref()).unwrap_or("")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
