@@ -94,6 +94,7 @@ Needs git and the [Azure CLI](https://learn.microsoft.com/cli/azure/install-azur
 ## Good to know
 
 - **Scriptable.** `--json` on every command, `--jq <expr>` for just the part you want.
+- **Pictures that load.** An image in a description or comment is a link that only works signed in. `--inline-images` puts the image itself in the JSON (a `data:` URL), for a tool that shows it; over rpc, `inlineImages: true` on any method.
 - **Never hangs.** Without a terminal it doesn't prompt: it fails and names the flag to pass.
 - **Safe with text.** Pass `-` and pipe the text in; the shell never touches it.
 - **Pictures.** `![the new screen](shot.png)` in a PR description or comment uploads the file and shows it.

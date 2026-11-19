@@ -49,6 +49,9 @@ pub struct Global {
     /// Print the result as JSON, filtered through a jq expression
     #[arg(long, global = true, value_name = "EXPRESSION")]
     pub jq: Option<String>,
+    /// In JSON, put each Azure DevOps image where its link is (as a data: URL): it shows without signing in
+    #[arg(long, global = true)]
+    pub inline_images: bool,
     /// No colors (also $NO_COLOR)
     #[arg(long, global = true)]
     pub no_color: bool,
@@ -211,7 +214,10 @@ fn execute(cli: Cli, app: impl FnOnce(&Global) -> App) -> Result<(i32, String)> 
     // Before the command runs: a typo in the filter shouldn't surface after a PR was created.
     let filter = global.jq.as_deref().map(jq).transpose()?;
     let app = app(&global);
-    let output = cli.command.run(&app)?;
+    let mut output = cli.command.run(&app)?;
+    if let Some(data) = output.data.as_mut().filter(|_| global.inline_images) {
+        crate::images::inline(&app, data);
+    }
 
     if let Some(url) = &output.open {
         (app.open_url)(url)?;
