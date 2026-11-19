@@ -178,7 +178,12 @@ impl Invoker {
         let cli = Cli::try_parse_from(line).map_err(|err| Error::user(err.render().to_string().trim().to_string()))?;
         let app = (self.app)(params);
         let Output { data, .. } = cli.command.run(&app)?;
-        Ok(data.unwrap_or(Value::Null))
+        let mut data = data.unwrap_or(Value::Null);
+        // A flag of every command, so a param of every method.
+        if cli.global.inline_images || params.get("inlineImages") == Some(&Value::Bool(true)) {
+            crate::images::inline(&app, &mut data);
+        }
+        Ok(data)
     }
 }
 
@@ -281,6 +286,33 @@ mod tests {
         assert_eq!(
             (result["id"].as_u64(), result["title"].as_str(), &result["children"]),
             (Some(4821), Some("Item 4821"), &json!([]))
+        );
+    }
+
+    #[test]
+    fn any_method_puts_pictures_in_place_of_their_links_when_asked() {
+        let shot = "https://dev.azure.com/contoso/_apis/wit/attachments/1b?fileName=a.png";
+        let route = || -> Route {
+            Box::new(move |r: &Recorded| {
+                if r.path.contains("/attachments/") {
+                    Some(crate::testing::bytes_response(b"GIF89a.."))
+                } else if r.path.ends_with("/wiql") {
+                    ok(json!({ "workItems": [] }))
+                } else {
+                    let html = format!("<div>Like so: <img src=\"{shot}\" alt=Image></div>");
+                    batch(vec![wi(4821, json!({ "System.Description": html }))])(r)
+                }
+            })
+        };
+        let view = |params: Value| {
+            rpc(&[json!({ "id": 1, "method": "wi.view", "params": params })], route())[0]["result"]["body"][0]["text"]
+                .clone()
+        };
+        // A picture in a work item is HTML there; here it is where a picture is, and on request the picture.
+        assert_eq!(view(json!({ "idOrUrl": "4821" })), json!(format!("Like so: ![Image]({shot})")));
+        assert_eq!(
+            view(json!({ "idOrUrl": "4821", "inlineImages": true })),
+            json!("Like so: ![Image](data:image/gif;base64,R0lGODlhLi4=)")
         );
     }
 

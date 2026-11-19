@@ -1,14 +1,21 @@
 //! Pictures in pull request text. Write a markdown image that points at a
 //! file on disk — `![the new screen](shot.png)` — and dova uploads the file
 //! to the pull request and points the image at the upload.
+//!
+//! And the other way: a picture's link in text read from Azure DevOps only
+//! loads for someone signed in, so on request each link is replaced by the
+//! picture itself, as a `data:` URL, which loads anywhere.
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::ops::Range;
 use std::path::Path;
 
+use serde_json::Value;
+
 use crate::ado::client::AdoClient;
 use crate::ado::types::PullRequest;
+use crate::app::App;
 use crate::error::{Error, Result};
 
 /// Text with the local images it shows already read, so a missing file is
@@ -55,17 +62,124 @@ impl Illustrated {
 /// Where the path of each `![alt](path)` sits, for the paths that aren't
 /// already addresses. Code — fenced or in backticks — is left alone.
 fn local_images(markdown: &str) -> Vec<Range<usize>> {
+    markdown_images(markdown, |path| {
+        !["http://", "https://", "data:", "//"].iter().any(|scheme| path.starts_with(scheme))
+    })
+}
+
+/// Where the target of each `![alt](target)` that `wanted` picks sits. Code — fenced or in backticks — is left alone.
+fn markdown_images(markdown: &str, wanted: impl Fn(&str) -> bool) -> Vec<Range<usize>> {
     let mut found = Vec::new();
     let (mut fenced, mut start) = (false, 0);
     for line in markdown.split_inclusive('\n') {
         let fence = line.trim_start().starts_with("```") || line.trim_start().starts_with("~~~");
         fenced ^= fence;
         if !fenced && !fence {
-            found.extend(images_in_line(line).into_iter().map(|span| start + span.start..start + span.end));
+            let targets = images_in_line(line).into_iter().filter(|span| wanted(&line[span.clone()]));
+            found.extend(targets.map(|span| start + span.start..start + span.end));
         }
         start += line.len();
     }
     found
+}
+
+/* ---------------- reading: a link that loads without signing in ---------------- */
+
+/// The most a picture may weigh to take its link's place: past this, the link stays.
+const HEAVIEST: usize = 8 * 1024 * 1024;
+/// How many pictures are fetched at the same time.
+const AT_ONCE: usize = 8;
+
+/// Whether an address is on Azure DevOps, where dova's sign-in is what loads it.
+/// Anything else loads without dova, or is not dova's to ask for.
+fn on_azure_devops(address: &str) -> bool {
+    let Ok(url) = url::Url::parse(address) else { return false };
+    let host = url.host_str().unwrap_or("");
+    url.scheme() == "https" && (host == "dev.azure.com" || host.ends_with(".visualstudio.com"))
+}
+
+/// Where the address of each picture on Azure DevOps sits in text a person
+/// wrote: markdown's `![alt](address)` and HTML's `<img src="address">`.
+fn pictures(text: &str) -> Vec<Range<usize>> {
+    let mut found = markdown_images(text, on_azure_devops);
+    let mut from = 0;
+    while let Some(tag) = text[from..].find("<img").map(|at| from + at) {
+        let end = text[tag..].find('>').map_or(text.len(), |at| tag + at);
+        let src = crate::text::attribute(&text[tag + 1..end], "src").filter(|src| on_azure_devops(src));
+        // The value is a slice of the text: where it starts in it is where it is.
+        found.extend(src.map(|src| {
+            let start = src.as_ptr() as usize - text.as_ptr() as usize;
+            start..start + src.len()
+        }));
+        from = end;
+    }
+    found.sort_by_key(|span| span.start);
+    found.dedup();
+    found
+}
+
+/// What a file is, from how it starts: Azure DevOps hands a work item's picture over as "some bytes".
+fn kind(start: &[u8], said: Option<&str>) -> Option<String> {
+    let known = match start {
+        [0x89, b'P', b'N', b'G', ..] => Some("image/png"),
+        [0xFF, 0xD8, 0xFF, ..] => Some("image/jpeg"),
+        [b'G', b'I', b'F', b'8', ..] => Some("image/gif"),
+        [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'E', b'B', b'P', ..] => Some("image/webp"),
+        [b'B', b'M', ..] => Some("image/bmp"),
+        _ => None,
+    };
+    let said = said.map(|said| said.split(';').next().unwrap_or("").trim()).filter(|said| said.starts_with("image/"));
+    known.or(said).map(str::to_string)
+}
+
+/// A picture as a `data:` URL. None for anything that isn't one, is too heavy, or can't be had:
+/// its link then stays as it was, which is no worse than before.
+fn data_url(ado: &AdoClient, address: &str) -> Option<String> {
+    use base64::Engine;
+    let (said, base64) = ado.fetch(address).ok()?;
+    if base64.len() / 4 * 3 > HEAVIEST {
+        return None;
+    }
+    let start = base64::engine::general_purpose::STANDARD.decode(base64.get(..16).unwrap_or(&base64)).ok()?;
+    Some(format!("data:{};base64,{base64}", kind(&start, said.as_deref())?))
+}
+
+fn each_text<'a>(data: &'a mut Value, texts: &mut Vec<&'a mut String>) {
+    match data {
+        Value::String(text) => texts.push(text),
+        Value::Array(items) => items.iter_mut().for_each(|item| each_text(item, texts)),
+        Value::Object(fields) => fields.values_mut().for_each(|field| each_text(field, texts)),
+        _ => {}
+    }
+}
+
+/// Every picture on Azure DevOps that a command's result shows, put where
+/// its link is. Each is fetched once however often it is shown.
+pub fn inline(app: &App, data: &mut Value) {
+    let mut texts = Vec::new();
+    each_text(data, &mut texts);
+    let shown: Vec<(usize, Range<usize>)> = texts
+        .iter()
+        .enumerate()
+        .flat_map(|(at, text)| pictures(text).into_iter().map(move |span| (at, span)))
+        .collect();
+    let mut addresses: Vec<String> = shown.iter().map(|(at, span)| texts[*at][span.clone()].to_string()).collect();
+    addresses.sort();
+    addresses.dedup();
+    if addresses.is_empty() {
+        return;
+    }
+    // Each address is whole, so the client needs no organization of its own.
+    let ado = app.ado("");
+    let fetched: Vec<Option<String>> =
+        addresses.chunks(AT_ONCE).flat_map(|some| crate::par::map(some, |address| data_url(&ado, address))).collect();
+    // Last first, so the earlier spans of a text still point at the right place.
+    for (at, span) in shown.into_iter().rev() {
+        let found = addresses.binary_search(&texts[at][span.clone()].to_string()).ok();
+        if let Some(picture) = found.and_then(|found| fetched[found].as_ref()) {
+            texts[at].replace_range(span, picture);
+        }
+    }
 }
 
 fn images_in_line(line: &str) -> Vec<Range<usize>> {
@@ -84,9 +198,7 @@ fn images_in_line(line: &str) -> Vec<Range<usize>> {
             None => Some(open..open + target.find(char::is_whitespace).unwrap_or(target.len())),
         };
         let Some(path) = path.filter(|path| !path.is_empty()) else { continue };
-        let is_address =
-            ["http://", "https://", "data:", "//"].iter().any(|scheme| line[path.clone()].starts_with(scheme));
-        if !in_code && !is_address {
+        if !in_code {
             found.push(path);
         }
     }
@@ -123,6 +235,91 @@ mod tests {
                     ```\n![fenced](d.png)\n```\n![last](C:\\shots\\e.png \"t\") [a link](f.png)\n";
         assert_eq!(paths(text), ["a.png", "my shots/b c.png", "C:\\shots\\e.png"]);
         assert_eq!(paths("no images, just ![ and ]( apart"), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn finds_the_pictures_that_only_load_signed_in_however_they_are_written() {
+        let shot = "https://dev.azure.com/contoso/p/_apis/git/repositories/r/pullRequests/9/attachments/shot.png";
+        let old = "https://contoso.visualstudio.com/_apis/wit/attachments/1b?fileName=a.png";
+        let text = format!(
+            "![one]({shot}) and <img alt=\"two\" src=\"{old}\" width=3> and <img src='{shot}'/>\n\
+             ![elsewhere](https://example.com/x.png) <img src=\"https://example.com/y.png\"> ![local](a.png)\n\
+             `![code]({shot})` ![not https](http://dev.azure.com/contoso/x.png) [a link]({shot})\n"
+        );
+        let found: Vec<&str> = pictures(&text).into_iter().map(|span| &text[span]).collect();
+        assert_eq!(found, [shot, old, shot]);
+        assert!(!on_azure_devops("https://dev.azure.com.evil.example/x.png"));
+    }
+
+    #[test]
+    fn tells_what_a_picture_is_from_how_it_starts_or_else_from_what_it_is_said_to_be() {
+        assert_eq!(kind(b"\x89PNG\r\n\x1a\n....", Some("application/octet-stream")).as_deref(), Some("image/png"));
+        assert_eq!(kind(b"\xFF\xD8\xFF\xE0", None).as_deref(), Some("image/jpeg"));
+        assert_eq!(kind(b"GIF89a", None).as_deref(), Some("image/gif"));
+        assert_eq!(kind(b"RIFF\x10\x00\x00\x00WEBPVP8 ", None).as_deref(), Some("image/webp"));
+        assert_eq!(kind(b"<svg xmlns=", Some("image/svg+xml; charset=utf-8")).as_deref(), Some("image/svg+xml"));
+        // A sign-in page, or anything else that isn't a picture, is not shown as one.
+        assert_eq!(kind(b"<!DOCTYPE html>", Some("text/html")), None);
+        assert_eq!(kind(b"hello", Some("application/octet-stream")), None);
+    }
+
+    #[test]
+    fn on_request_a_picture_takes_its_links_place_and_everything_else_stays() {
+        use serde_json::json;
+
+        use crate::testing::{bytes_response, cli, ok, rest_pr, Bed, Recorded, Route};
+
+        let at = |name: &str| {
+            format!(
+                "https://dev.azure.com/contoso/MyProject/_apis/git/repositories/web/pullRequests/9/attachments/{name}"
+            )
+        };
+        let description = format!(
+            "![shot]({}) twice ![again]({}) then ![gone]({}) ![notes]({}) ![elsewhere](https://example.com/x.png)",
+            at("shot.png"),
+            at("shot.png"),
+            at("gone.png"),
+            at("notes.txt")
+        );
+        let route = |description: String| -> Route {
+            Box::new(move |r: &Recorded| {
+                if r.path.ends_with("/attachments/shot.png") {
+                    Some(bytes_response(b"\x89PNG\r\n\x1a\nthe picture"))
+                } else if r.path.ends_with("/attachments/notes.txt") {
+                    Some(bytes_response(b"not a picture"))
+                } else if r.path.contains("/attachments/") {
+                    None
+                } else if r.path.ends_with("/threads")
+                    || r.path.ends_with("/workitems")
+                    || r.path.ends_with("/iterations")
+                {
+                    ok(json!({ "value": [] }))
+                } else {
+                    ok(rest_pr(9, json!({ "description": description })))
+                }
+            })
+        };
+
+        let bed = Bed::new(route(description.clone()));
+        let shown = cli(bed.app(), &["pr", "view", "9", "--inline-images", "--jq", ".description"]).stdout;
+        let picture = "data:image/png;base64,iVBORw0KGgp0aGUgcGljdHVyZQ==";
+        // What can't be had, and what isn't a picture, keep their links: no worse than without the flag.
+        let expected = format!(
+            "![shot]({picture}) twice ![again]({picture}) then ![gone]({}) ![notes]({}) ![elsewhere](https://example.com/x.png)\n",
+            at("gone.png"),
+            at("notes.txt")
+        );
+        assert_eq!(shown, expected);
+        let fetched: Vec<Recorded> =
+            bed.ado.requests().into_iter().filter(|r| r.path.contains("/attachments/")).collect();
+        // Each once, as bytes, and nothing that isn't on Azure DevOps.
+        assert_eq!(fetched.len(), 3, "{:?}", fetched.iter().map(|r| &r.path).collect::<Vec<_>>());
+        assert!(fetched.iter().all(|r| r.raw.binary));
+
+        // Unasked, nothing is fetched and nothing changes.
+        let bed = Bed::new(route(description.clone()));
+        assert_eq!(cli(bed.app(), &["pr", "view", "9", "--jq", ".description"]).stdout, description.clone() + "\n");
+        assert!(bed.ado.requests().iter().all(|r| !r.path.contains("/attachments/")));
     }
 
     #[test]

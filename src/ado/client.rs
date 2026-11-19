@@ -558,6 +558,12 @@ impl<'a> AdoClient<'a> {
         Ok(self.get("_apis/connectionData", &[("api-version", "7.1-preview")])?["authenticatedUser"].take())
     }
 
+    /// What is at an address on Azure DevOps, byte for byte: what it says it is, and its bytes as base64.
+    pub fn fetch(&self, url: &str) -> Result<(Option<String>, String)> {
+        let res = self.send(&Request { binary: true, ..Request::get(url) })?;
+        Ok((res.content_type, res.body))
+    }
+
     /// `dova api`: any request; the body comes back as sent.
     pub fn raw(
         &self,
