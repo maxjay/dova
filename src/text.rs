@@ -16,11 +16,18 @@ pub fn strip_html(html: &str) -> String {
             continue;
         };
         text.push_str(&rest[..open]);
-        let tag = rest[open + 1..open + len].trim_end_matches('/').trim().to_ascii_lowercase();
+        let written = rest[open + 1..open + len].trim_end_matches('/').trim();
+        let tag = written.to_ascii_lowercase();
         let name = tag.split_whitespace().next().unwrap_or("");
         match name {
             "br" | "/p" | "/div" | "/li" => text.push('\n'),
             "li" => text.push_str("- "),
+            // A picture can't be shown here, but that there is one, and where, can: as markdown has it.
+            "img" => {
+                if let Some(src) = attribute(written, "src").filter(|src| !src.is_empty()) {
+                    text.push_str(&format!("![{}]({src})", attribute(written, "alt").unwrap_or("")));
+                }
+            }
             _ => {}
         }
         rest = &rest[open + len + 1..];
@@ -43,6 +50,26 @@ pub fn strip_html(html: &str) -> String {
         }
     }
     out
+}
+
+/// The value of one attribute of an HTML tag, given without its angle
+/// brackets: quoted either way, or bare. Entities are left as written.
+pub fn attribute<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
+    let lower = tag.to_ascii_lowercase();
+    let mut from = 0;
+    loop {
+        let at = from + lower[from..].find(&format!("{name}="))?;
+        from = at + name.len() + 1;
+        // `data-src=` is not `src=`.
+        if !lower[..at].ends_with(|c: char| c.is_whitespace()) {
+            continue;
+        }
+        let value = &tag[from..];
+        return Some(match value.chars().next() {
+            Some(quote @ ('"' | '\'')) => &value[1..1 + value[1..].find(quote).unwrap_or(value.len() - 1)],
+            _ => &value[..value.find(char::is_whitespace).unwrap_or(value.len())],
+        });
+    }
 }
 
 /// The other way: plain text as the HTML a rich-text field shows exactly as typed.
@@ -213,6 +240,15 @@ mod tests {
         assert_eq!(strip_html("<ul><li>a</li><li class=\"x\">b &amp; c</li></ul>"), "- a\n- b & c");
         assert_eq!(strip_html("a<br><br><br><br>b"), "a\n\nb");
         assert_eq!(strip_html("1 < 2 and &lt;b&gt;"), "1 < 2 and <b>");
+        // A picture stays as a mark of where it is, however its tag is written.
+        let shot = "https://dev.azure.com/contoso/_apis/wit/attachments/1b?fileName=a.png";
+        assert_eq!(
+            strip_html(&format!(
+                "<div>See <img data-src=\"no\" SRC=\"{shot}&amp;x=1\" alt=Image width=3></div><img src='b.png'/>"
+            )),
+            format!("See ![Image]({shot}&x=1)\n![](b.png)")
+        );
+        assert_eq!(strip_html("<img alt=\"nothing to show\">text"), "text");
     }
 
     #[test]
