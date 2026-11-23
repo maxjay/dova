@@ -237,13 +237,6 @@ impl<'a> AdoClient<'a> {
         Ok(id.to_string())
     }
 
-    /// The teams the signed-in user is in, in any project: id and name.
-    fn my_teams(&self) -> Result<Vec<(String, String)>> {
-        let res = self.get("_apis/teams", &[("$mine", "true"), ("$top", "500"), ("api-version", "7.1-preview.3")])?;
-        let team = |raw: &Value| Some((raw["id"].as_str()?.to_string(), raw["name"].as_str()?.to_string()));
-        Ok(list(&res["value"]).iter().filter_map(team).collect())
-    }
-
     pub fn create_pull_request(&self, pr: &NewPullRequest) -> Result<PullRequest> {
         let mut body = json!({
             "sourceRefName": head_ref(&pr.source_branch),

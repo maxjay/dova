@@ -640,9 +640,9 @@ mod tests {
                        "queueTime":format!("2026-01-01T00:00:{id:02}Z")}})
     }
 
-    fn list_page(req: &Recorded, runs: Value, next: Option<&str>) -> Value {
+    fn list_page(req: &Recorded, runs: Value) -> Value {
         let props = &req.body["dataProviderContext"]["properties"];
-        let mut providers = json!({"ms.vss-build-web.runs-data-provider":{"runs":runs, "continuationToken":next}});
+        let mut providers = json!({"ms.vss-build-web.runs-data-provider":{"runs":runs}});
         if let Some(artifacts) = props["artifactIds"].as_array() {
             let counts: Vec<_> = artifacts
                 .iter()
@@ -666,16 +666,7 @@ mod tests {
             } else if r.path.ends_with("/pullrequests") {
                 ok(json!({ "value": prs }))
             } else if r.path.ends_with("/HierarchyQuery/project/p") {
-                let props = &r.body["dataProviderContext"]["properties"];
-                let runs = if props["keywordFilter"] == "refs/heads/feature/x" {
-                    json!([
-                        run_on(1, "api-id", "refs/heads/feature/x", 2),
-                        run_on(3, "other", "refs/heads/feature/x", 8)
-                    ])
-                } else {
-                    json!([run_on(2, "r", "refs/pull/9/merge", 8)])
-                };
-                ok(list_page(r, runs, None))
+                ok(list_page(r, json!([run_on(2, "r", "refs/pull/9/merge", 8)])))
             } else {
                 None
             }
@@ -694,10 +685,9 @@ mod tests {
         );
         let bed = Bed::new(mine(json!([rest_pr(9, json!({})), draft])));
         let listed = cli(bed.app(), &["pr", "list", "--json"]).json();
-        // A validation run wins; without one, the branch's own run is the check.
         let seen = |at: usize| (&listed[at]["id"], &listed[at]["check"]["result"], &listed[at]["openThreads"]);
         assert_eq!(seen(0), (&json!(9), &json!("failed"), &json!(1)));
-        assert_eq!(seen(1), (&json!(8), &json!("succeeded"), &json!(0)));
+        assert_eq!(seen(1), (&json!(8), &Value::Null, &json!(0)));
 
         let asked = asked_for_the_list(&bed);
         assert_eq!(asked.path, "/MyProject/_apis/git/pullrequests");
@@ -706,12 +696,12 @@ mod tests {
 
         let screen = cli(bed.app(), &["pr", "list"]).stdout;
         let row = |id: &str| screen.lines().find(|line| line.contains(id)).unwrap().to_string();
-        assert_eq!(row("#9"), "│ #9 │ PR 9  │ web  │ feature/x -> main │ active │ failed    │ 1            │");
-        assert_eq!(row("#8"), "│ #8 │ PR 8  │ api  │ feature/x -> main │ draft  │ succeeded │ 0            │");
+        assert_eq!(row("#9"), "│ #9 │ PR 9  │ web  │ feature/x -> main │ active │ failed │ 1            │");
+        assert_eq!(row("#8"), "│ #8 │ PR 8  │ api  │ feature/x -> main │ draft  │ none   │ 0            │");
     }
 
     #[test]
-    fn pages_validation_runs_without_refetching_counts_or_using_another_repos_run() {
+    fn uses_the_first_validation_run_for_each_requested_ref() {
         let search =
             mine(json!([rest_pr(9, json!({"supportsIterations":true, "codeReviewId":45})), rest_pr(8, json!({}))]));
         let bed = Bed::new(Box::new(move |r| {
@@ -720,28 +710,22 @@ mod tests {
             }
             let props = &r.body["dataProviderContext"]["properties"];
             assert_eq!(props["keywordFilter"], "refs/pull/9/merge,refs/pull/8/merge");
-            if props["continuationToken"].is_null() {
-                assert_eq!(props["artifactIds"][0]["discussionArtifactId"], "vstfs:///CodeReview/ReviewId/p%2F45");
-                assert_eq!(props["artifactIds"][1]["discussionArtifactId"], "vstfs:///CodeReview/CodeReviewId/p%2F8");
-                ok(list_page(r, json!([run_on(2, "r", "refs/pull/9/merge", 8)]), Some("next")))
-            } else {
-                assert_eq!(props["continuationToken"], "next");
-                assert_eq!(r.body["contributionIds"], json!(["ms.vss-build-web.runs-data-provider"]));
-                assert!(props.get("artifactIds").is_none());
-                ok(list_page(
-                    r,
-                    json!([
-                        run_on(5, "r", "refs/pull/8/merge", 2),
-                        run_on(7, "other", "refs/pull/8/merge", 8),
-                        run_on(1, "r", "refs/pull/9/merge", 2)
-                    ]),
-                    None,
-                ))
-            }
+            assert!(props["continuationToken"].is_null());
+            assert_eq!(props["artifactIds"][0]["discussionArtifactId"], "vstfs:///CodeReview/ReviewId/p%2F45");
+            assert_eq!(props["artifactIds"][1]["discussionArtifactId"], "vstfs:///CodeReview/CodeReviewId/p%2F8");
+            ok(list_page(
+                r,
+                json!([
+                    run_on(2, "r", "refs/pull/9/merge", 8),
+                    run_on(1, "r", "refs/pull/9/merge", 2),
+                    run_on(5, "r", "refs/pull/8/merge", 2),
+                    run_on(7, "other", "refs/pull/8/merge", 8)
+                ]),
+            ))
         }));
         let rows = cli(bed.app(), &["pr", "list", "--json"]).json();
         assert_eq!((&rows[0]["check"]["id"], &rows[1]["check"]["id"]), (&json!(2), &json!(5)));
-        assert_eq!(bed.ado.requests().len(), 4); // Identity, search and two pages.
+        assert_eq!(bed.ado.requests().len(), 3); // Identity, search and one enrichment request.
     }
 
     #[test]
@@ -764,7 +748,7 @@ mod tests {
         assert!(bed.ado.requests().is_empty());
     }
 
-    /// Signed in as `me-1`, who is in the team Payments. Each reviewer is answered with their own pull requests.
+    /// Signed in as `me-1`, who is in the team Payments.
     fn asked(by_name: Value, through_the_team: Value) -> Route {
         let other = mine(json!([]));
         Box::new(move |r: &Recorded| {
@@ -793,20 +777,6 @@ mod tests {
                     },
                     "ms.vss-dashboards-web.my-team-list-data-provider": [{"value":{"id":"TEAM-1","name":"Payments"}}]
                 }}))
-            } else if r.path.ends_with("/connectionData") {
-                ok(json!({ "authenticatedUser": { "id": "me-1" } }))
-            } else if r.path.ends_with("/_apis/teams") {
-                ok(json!({ "value": [{ "id": "team-1", "name": "Payments" }] }))
-            } else if r.path.ends_with("/pullrequests") {
-                match r.query("searchCriteria.reviewerId").as_deref() {
-                    Some("me-1") => ok(json!({ "value": by_name })),
-                    Some("team-1") => ok(json!({ "value": through_the_team })),
-                    None => {
-                        let prs: Vec<_> = by_name.as_array()?.iter().chain(through_the_team.as_array()?).collect();
-                        ok(json!({"value":prs}))
-                    }
-                    _ => None,
-                }
             } else {
                 other(r)
             }
@@ -835,10 +805,9 @@ mod tests {
         );
 
         let calls = bed.ado.requests();
-        assert_eq!(calls.len(), 3); // PR 12 also needs the source-branch fallback.
+        assert_eq!(calls.len(), 2);
         assert_eq!(calls[0].path, "/_apis/Contribution/HierarchyQuery/project/MyProject");
         assert_eq!(calls[1].body["contributionIds"].as_array().unwrap().len(), 2);
-        assert_eq!(calls[2].body["dataProviderContext"]["properties"]["keywordFilter"], "refs/heads/feature/x");
 
         let screen = cli(bed.app(), &["pr", "list", "--review"]).stdout;
         let row = |id: &str| screen.lines().find(|line| line.contains(id)).unwrap().to_string();
@@ -858,48 +827,13 @@ mod tests {
     }
 
     #[test]
-    fn a_custom_portal_section_does_not_hide_a_team_review() {
-        let team_pr = rest_pr(12, json!({"createdBy":{"id":"jo"}, "reviewers":[{"id":"team-1","isContainer":true}]}));
-        let route = asked(json!([]), json!([team_pr]));
-        let bed = Bed::new(Box::new(move |r| {
-            let mut response = route(r)?;
-            if r.path.ends_with("/HierarchyQuery/project/MyProject") {
-                let mut body: Value = serde_json::from_str(&response.body).unwrap();
-                let list = &mut body["dataProviders"]["ms.vss-code-web.prs-list-data-provider"];
-                list["queries"][1]["authorIds"] = json!(["someone-else"]);
-                list["queryResults"]["AssignedToMyTeams"]["ids"] = json!([]);
-                response.body = body.to_string();
-            }
-            Some(response)
-        }));
-        let rows = cli(bed.app(), &["pr", "list", "--review", "--json"]).json();
-        assert_eq!(rows[0]["review"]["team"], "Payments");
-        assert_eq!(rows[0]["id"], 12);
-    }
-
-    #[test]
-    fn large_review_histories_use_the_reviewer_index_to_find_an_older_assignment() {
-        let pr = rest_pr(9, json!({"status":"completed","reviewers":[{"id":"me-1","vote":10}]}));
-        let route = asked(json!([pr]), json!([]));
-        let bed = Bed::new(Box::new(move |r| {
-            if r.path.ends_with("/pullrequests") && r.query("searchCriteria.reviewerId").is_none() {
-                assert_eq!(r.query("$top").as_deref(), Some("100"));
-                let unrelated: Vec<_> = (100..200).map(|id| rest_pr(id, json!({"status":"completed"}))).collect();
-                return ok(json!({"value":unrelated}));
-            }
-            route(r)
-        }));
-        let rows = cli(bed.app(), &["pr", "list", "--review", "--state", "completed", "--json"]).json();
-        assert_eq!(rows.as_array().unwrap().len(), 1);
-        assert_eq!(rows[0]["id"], 9);
-    }
-
-    #[test]
     fn says_when_nothing_asks_you_for_a_review_and_leaves_the_plain_list_as_it_was() {
         let bed = Bed::new(asked(json!([]), json!([])));
-        let res = cli(bed.app(), &["pr", "list", "--review", "--state", "all"]);
-        assert_eq!((res.code, res.stdout.as_str()), (0, "No pull requests in MyProject ask you for a review.\n"));
-        assert_eq!(cli(bed.app(), &["pr", "list", "--review", "--json"]).json(), json!([]));
+        let res = cli(bed.app(), &["pr", "list", "--review"]);
+        assert_eq!(
+            (res.code, res.stdout.as_str()),
+            (0, "No active pull requests in MyProject ask you for a review.\n")
+        );
 
         // Without the flag nothing about a review is asked for or printed.
         let bed = Bed::new(mine(json!([rest_pr(9, json!({}))])));
