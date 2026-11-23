@@ -15,7 +15,6 @@ use crate::ado::types::{Anchor, Change, PullRequest};
 use crate::app::App;
 use crate::cli::Output;
 use crate::error::{Error, Result};
-use crate::par;
 use crate::text::{decode, Style};
 
 #[derive(Args)]
@@ -109,8 +108,6 @@ pub struct Line {
     pub no_newline: bool,
 }
 
-/// How many files are read at the same time.
-const AT_ONCE: usize = 8;
 /// The most lines one file's hunks hold when the whole pull request is asked
 /// for: a generated file with a hundred thousand new lines would otherwise
 /// be most of the answer. A file asked for by name comes whole whatever its size.
@@ -245,21 +242,18 @@ impl Diff {
         }
 
         let whole = !self.files.is_empty();
-        let mut contents = Vec::with_capacity(changes.len());
-        for group in changes.chunks(AT_ONCE) {
-            if self.names {
-                contents.extend(group.iter().map(|_| None));
-                continue;
-            }
-            let ids: BTreeSet<_> = group
+        let contents: Vec<Option<Content>> = if self.names {
+            changes.iter().map(|_| None).collect()
+        } else {
+            let ids: BTreeSet<_> = changes
                 .iter()
                 .filter(|c| !named_binary(c.at()) && (whole || c.blob != c.old_blob))
                 .flat_map(|c| [c.old_blob.as_deref(), c.blob.as_deref()])
                 .flatten()
                 .collect();
             let blobs = ado.review_blobs(&pr, &ids)?;
-            contents.extend(par::map(group, |c| Some(content(c, &blobs, self.context, whole))));
-        }
+            changes.iter().map(|c| Some(content(c, &blobs, self.context, whole))).collect()
+        };
         let files: Vec<FileDiff> = changes
             .iter()
             .zip(contents)
