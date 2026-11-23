@@ -72,6 +72,20 @@ Both links are the latest release. Older versions are on [Releases](https://gith
 
 Needs git and the [Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli). Sign in once with `az login`.
 
+To work across projects outside a checkout, run `dova config set org <name>` once.
+Dova looks up the organization's GUID and saves it with the name. Both the CLI and
+`dova rpc` use that default. An Azure link, an explicit org, `DOVA_ORG`, or an
+Azure Repos remote takes precedence, in that order. For example, `dova pr view 9`
+and `dova wi view 4` can then run by ID. Project-scoped commands accept `--project`.
+
+`dova config get org --json` shows the saved name and GUID offline. The file is
+`$XDG_CONFIG_HOME/dova/config.json` (normally `~/.config/dova/config.json`) on Linux
+and `%APPDATA%\dova\config.json` on Windows. Setting `DOVA_HOME` places `config.json`
+in that directory instead.
+
+Dova saves your Azure DevOps user ID in `user-id-<org>.json` beside `config.json`
+during organization setup or the first identity lookup. `pr list` reuses that ID.
+
 ## Commands
 
 | | |
@@ -109,6 +123,62 @@ Needs git and the [Azure CLI](https://learn.microsoft.com/cli/azure/install-azur
 | `dova mcp` | an MCP server: twelve tools for AI agents |
 | `dova rpc` | every command as JSON-RPC over stdio (`rpc.methods` lists them) |
 | `dova instructions` | teaches Copilot, Windsurf, Cursor and Codex to use dova |
+
+### Live PRs and work items over RPC
+
+Keep one `dova rpc` process open and read newline-delimited JSON from stdout.
+To open PR #9 in your default organization, send:
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"pr.open","params":{"id":9}}
+```
+
+The result contains a `subscription` string and a `snapshot` with eight sections:
+`details`, `reviewers`, `discussion`, `checks`, `statuses`, `labels`, `workItems`,
+and `files`. Each discussion thread includes its comments and current location.
+`files` includes the pinned iteration and all changed paths. Use `pr.diff` with
+`pr` and `files` to read file contents on demand.
+
+Dova subscribes to the Azure Repos PR detail hub before loading the snapshot.
+The open reply arrives before any notifications for that subscription. Route
+replies by request ID and notifications by subscription ID. For example:
+
+```json
+{"jsonrpc":"2.0","method":"pr.changed","params":{"subscription":"s1","sections":["discussion"]}}
+{"jsonrpc":"2.0","id":2,"method":"pr.read","params":{"subscription":"s1","sections":["discussion"]}}
+```
+
+The first line comes from Dova. The second is the app's request. Replace the named
+sections with the values in the result. A change signal can cover several edits.
+Keep at most one refresh in flight per view and merge any further signals until it
+finishes. Idle views use hub keepalives and issue no periodic data reads.
+
+On `pr.disconnected`, mark the view stale. Dova reconnects with backoff and sends
+`pr.resynced` with a fresh `params.snapshot`. Discard outstanding reads from before
+the disconnect. If the RPC process exits, start a new session and reopen the PR.
+Send `pr.close` with the subscription ID when finished, or close stdin to release
+all subscriptions. Each PR subscription watches one PR. Linked tickets are snapshots
+of their references at read time.
+
+Use the same lifecycle for a work item. For example, send
+`{"jsonrpc":"2.0","id":1,"method":"wi.open","params":{"id":3}}`.
+The snapshot contains `details` (including the revision and all Azure fields),
+`relations` (including attachment and artifact links), and `comments` in
+chronological order with reactions. Same-organization work item links carry
+`workItemId` and a `workItem` summary with ID, title, type, and state when
+accessible. Dova resolves up to 200 linked IDs per batch. Open a related
+ticket separately to watch its own changes.
+
+`wi.changed` names the sections to refresh through `wi.read`. A reaction
+invalidates comments, a link-only event invalidates details and relations,
+and a generic Azure revision can affect all three sections. On `wi.disconnected`
+mark the view stale. After reconnection,
+`wi.resynced` contains a new snapshot. Use `wi.close` to release the view.
+Saved organization IDs avoid the organization lookup on open.
+
+Live views use the Azure DevOps Services portal hub and PR detail provider.
+A failed initial subscription or snapshot returns an RPC error. Ordinary
+`pr.view` and `pr.diff` also support the REST read path.
 
 ## Development
 

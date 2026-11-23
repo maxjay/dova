@@ -9,9 +9,9 @@ use super::link::link;
 use super::pr::{find_pull_request, pull_request_detail, render_pull_request};
 use super::work_item_table;
 use crate::ado::client::{AdoClient, NewWorkItem};
-use crate::ado::map::body_field;
+use crate::ado::map::{body_field, to_work_item};
 use crate::ado::types::{Comment, WorkItem, WorkItemRef};
-use crate::app::{App, ScopeHint};
+use crate::app::App;
 use crate::cli::Output;
 use crate::error::{Error, Kind, Result};
 use crate::par;
@@ -36,24 +36,38 @@ fn locate<'a>(app: &'a App, id_or_url: &str) -> Result<(u64, AdoClient<'a>)> {
     let id = link.as_ref().map(|l| l.id).or_else(|| parse_id(id_or_url));
     let id = id.ok_or_else(|| Error::user(format!("\"{id_or_url}\" isn't a work item id or link.")))?;
     // A link names its own organization; a bare id is in the one you're in.
-    let hint = link.map(|l| ScopeHint { org: Some(l.org), project: Some(l.project), repo: None });
-    Ok((id, app.ado(&app.scope_for(&hint.unwrap_or_default())?.org_url)))
+    Ok((id, app.ado(&app.org_url(link.as_ref().map(|l| l.org.as_str()))?)))
 }
 
 pub fn work_item_detail(app: &App, id_or_url: &str) -> Result<Detail> {
     let (id, ado) = locate(app, id_or_url)?;
-    let item = ado.work_item(id)?;
-    let (parent, children, comments) = par::join3(
-        || item.parent_id.map_or(Ok(Vec::new()), |parent| ado.work_items(&[parent])),
-        || ado.query(&format!("SELECT [System.Id] FROM WorkItems WHERE [System.Parent] = {id}")),
-        || item.project.as_deref().map_or(Ok(Vec::new()), |project| ado.work_item_comments(project, id)),
+    let raw = ado.ticket(id, true)?;
+    let item = to_work_item(&raw, &ado.org_url);
+    let mut family: Vec<_> = item.parent_id.into_iter().collect();
+    for link in raw["relations"].as_array().into_iter().flatten() {
+        if link["rel"] == "System.LinkTypes.Hierarchy-Forward" {
+            family.extend(link["url"].as_str().and_then(|url| crate::urls::linked_work_item(&ado.org_url, url)));
+        }
+    }
+    let (family, comments) = par::join(
+        || ado.work_item_refs(&family),
+        || {
+            if raw["fields"]["System.CommentCount"] == 0 {
+                return Ok(Vec::new());
+            }
+            item.project.as_deref().map_or(Ok(Vec::new()), |project| ado.work_item_comments(project, id))
+        },
     );
-    Ok(Detail {
-        parent: parent?.first().map(WorkItem::to_ref),
-        children: children?.iter().map(WorkItem::to_ref).collect(),
-        comments: comments?,
-        item,
-    })
+    let mut parent = None;
+    let mut children = Vec::new();
+    for relative in family? {
+        if Some(relative.id) == item.parent_id {
+            parent = Some(relative);
+        } else {
+            children.push(relative);
+        }
+    }
+    Ok(Detail { parent, children, comments: comments?, item })
 }
 
 /// 5 for 5.0, 2.5 for 2.5.
@@ -233,7 +247,7 @@ impl Search {
             "SELECT [System.Id] FROM WorkItems WHERE {} ORDER BY [System.ChangedDate] DESC",
             filters.join(" AND ")
         );
-        let items: Vec<WorkItemRef> = app.ado(&scope.org_url).query(&wiql)?.iter().map(WorkItem::to_ref).collect();
+        let items = app.ado(&scope.org_url).query(&wiql)?;
 
         let text = if items.is_empty() { app.style.dim("Nothing matched.") } else { work_item_table(&items) };
         Ok(Output::new(&json!({ "items": items }), text))
@@ -811,9 +825,6 @@ mod tests {
     #[test]
     fn view_shows_a_work_item_with_its_parent_children_points_and_discussion() {
         let bed = Bed::new(Box::new(|r: &Recorded| {
-            if r.path.ends_with("/wiql") {
-                return ok(json!({ "workItems": [{ "id": 6 }] }));
-            }
             if r.path.ends_with("/workItems/5/comments") {
                 let said = |id: u64, text: &str| json!({ "id": id, "text": text, "createdBy": { "displayName": "Ann" }, "createdDate": "2026-11-17T13:59:44.59Z" });
                 let all: Vec<Value> = (1..=7).map(|n| said(n, &format!("<div>Comment {n}<br>more</div>"))).collect();
@@ -825,6 +836,7 @@ mod tests {
             let fields =
                 json!({ "System.Parent": 2, "System.Description": "<div>Why</div>", "System.WorkItemType": "Feature" });
             let mut item = wi(5, fields);
+            item["relations"] = json!([{"rel":"System.LinkTypes.Hierarchy-Forward","url":"https://dev.azure.com/contoso/_apis/wit/workitems/6"}]);
             item["fields"].as_object_mut().unwrap().extend(estimates.as_object().unwrap().clone());
             batch(vec![item, wi(2, json!({ "System.WorkItemType": "Feature" })), wi(6, json!({}))])(r)
         }));

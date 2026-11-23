@@ -13,6 +13,7 @@ base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 console = "0.15"
 dialoguer = { version = "0.11", default-features = false }
+futures-util = { version = "0.3", features = ["sink"] }
 interprocess = "2"
 jaq-core = "3"
 jaq-json = { version = "2", features = ["serde"] }
@@ -22,18 +23,22 @@ percent-encoding = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 similar = "2"
+tempfile = "3"
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "http2", "rustls-no-provider", "gzip", "system-proxy"] }
+reqwest-websocket = "0.6"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 url = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+zip = { version = "~4.2.0", default-features = false, features = ["deflate-flate2"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+[dev-dependencies]
+tungstenite = "0.28"
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Threading"] }
-
-[dev-dependencies]
-tempfile = "3"
 
 # `cargo deb` builds target/debian/dova_<version>-1_amd64.deb (cargo install cargo-deb).
 [package.metadata.deb]

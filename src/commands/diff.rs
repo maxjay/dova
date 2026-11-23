@@ -2,6 +2,7 @@
 //! itself, so it works without a clone of the repo. And where in those
 //! changes a new review thread can go.
 
+use std::collections::{BTreeSet, HashMap};
 use std::time::Duration;
 
 use clap::Args;
@@ -170,29 +171,26 @@ enum Side {
     Binary,
 }
 
-fn side(ado: &AdoClient, pr: &PullRequest, blob: &str) -> Result<Side> {
-    Ok(match ado.blob(pr, blob)? {
-        Some(bytes) => decode(&bytes).map_or(Side::Binary, Side::Text),
+fn side(blob: &str, bytes: Option<&[u8]>) -> Side {
+    match bytes {
+        Some(bytes) => decode(bytes).map_or(Side::Binary, Side::Text),
         // A submodule: a commit of another repo, which git shows as this one line.
         None => Side::Text(format!("Subproject commit {}\n", blob.to_ascii_lowercase())),
-    })
+    }
 }
 
 /// What changed inside one file. `whole` keeps both sides' full text as well.
-fn content(ado: &AdoClient, pr: &PullRequest, change: &Change, context: usize, whole: bool) -> Result<Content> {
+fn content(change: &Change, blobs: &HashMap<String, Option<Vec<u8>>>, context: usize, whole: bool) -> Content {
     if named_binary(change.at()) {
-        return Ok(Content { binary: true, ..Content::default() });
+        return Content { binary: true, ..Content::default() };
     }
     // A file that only moved has nothing to compare, and is read once if its text is wanted.
     let moved_only = change.blob.is_some() && change.blob == change.old_blob;
-    let read = |blob: &Option<String>| blob.as_deref().map(|id| side(ado, pr, id)).transpose();
+    let read = |blob: &Option<String>| blob.as_deref().map(|id| side(id, blobs[id].as_deref()));
     let (old, new) = match (moved_only, whole) {
-        (true, false) => return Ok(Content::default()),
-        (true, true) => (read(&change.blob)?, None),
-        (false, _) => {
-            let (old, new) = par::join(|| read(&change.old_blob), || read(&change.blob));
-            (old?, new?)
-        }
+        (true, false) => return Content::default(),
+        (true, true) => (read(&change.blob), None),
+        (false, _) => (read(&change.old_blob), read(&change.blob)),
     };
     // A file that is binary on either side has no lines to compare on the other.
     let text = |side: Option<Side>| match side {
@@ -203,12 +201,12 @@ fn content(ado: &AdoClient, pr: &PullRequest, change: &Change, context: usize, w
     let (old, new) = match (text(old), text(new)) {
         (Ok(old), Ok(_)) if moved_only => (old.clone(), old),
         (Ok(old), Ok(new)) => (old, new),
-        (Err(binary), _) | (_, Err(binary)) => return Ok(binary),
+        (Err(binary), _) | (_, Err(binary)) => return binary,
     };
     let hunks = hunks(old.as_deref().unwrap_or(""), new.as_deref().unwrap_or(""), context);
     let count = |kind: &str| hunks.iter().flat_map(|h| &h.lines).filter(|l| l.kind == kind).count();
     let large = !whole && hunks.iter().map(|h| h.lines.len()).sum::<usize>() > LARGE;
-    Ok(Content {
+    Content {
         binary: false,
         added: count("added"),
         removed: count("removed"),
@@ -216,7 +214,7 @@ fn content(ado: &AdoClient, pr: &PullRequest, change: &Change, context: usize, w
         hunks: if large { Vec::new() } else { hunks },
         old: old.filter(|_| whole),
         new: new.filter(|_| whole),
-    })
+    }
 }
 
 /// "X isn't changed in PR #9", with what is, for a path that was asked for.
@@ -239,8 +237,7 @@ impl Diff {
         if self.web {
             return Ok(Output::none().web(true, &format!("{}?_a=files", pr.url)));
         }
-        let iteration = ado.latest_iteration(&pr)?;
-        let mut changes = ado.changes(&pr, iteration.id)?;
+        let (iteration, mut changes) = ado.review_files(&pr)?;
         if !self.files.is_empty() {
             let wanted: Vec<String> = self.files.iter().map(|path| repo_path(path)).collect();
             let touches =
@@ -252,13 +249,21 @@ impl Diff {
         }
 
         let whole = !self.files.is_empty();
-        let contents: Vec<Option<Content>> = match self.names {
-            true => changes.iter().map(|_| None).collect(),
-            false => changes
-                .chunks(AT_ONCE)
-                .flat_map(|some| par::map(some, |change| content(&ado, &pr, change, self.context, whole).map(Some)))
-                .collect::<Result<_>>()?,
-        };
+        let mut contents = Vec::with_capacity(changes.len());
+        for group in changes.chunks(AT_ONCE) {
+            if self.names {
+                contents.extend(group.iter().map(|_| None));
+                continue;
+            }
+            let ids: BTreeSet<_> = group
+                .iter()
+                .filter(|c| !named_binary(c.at()) && (whole || c.blob != c.old_blob))
+                .flat_map(|c| [c.old_blob.as_deref(), c.blob.as_deref()])
+                .flatten()
+                .collect();
+            let blobs = ado.review_blobs(&pr, &ids)?;
+            contents.extend(par::map(group, |c| Some(content(c, &blobs, self.context, whole))));
+        }
         let files: Vec<FileDiff> = changes
             .iter()
             .zip(contents)
@@ -396,8 +401,9 @@ pub fn anchor(ado: &AdoClient, pr: &PullRequest, at: &str, old: bool) -> Result<
     };
     let not_text = || Error::user(format!("{file} isn't text: it has no lines to comment on."));
     let blob = if old { &change.old_blob } else { &change.blob };
-    let text = match blob.as_deref().filter(|_| !named_binary(&file)).map(|id| side(ado, pr, id)).transpose()? {
-        Some(Side::Text(text)) => text,
+    let id = blob.as_deref().filter(|_| !named_binary(&file)).ok_or_else(not_text)?;
+    let text = match side(id, ado.blob(pr, id)?.as_deref()) {
+        Side::Text(text) => text,
         _ => return Err(not_text()),
     };
     let lines: Vec<&str> = text.lines().collect();

@@ -5,7 +5,7 @@ use serde::Serialize;
 
 use super::pr::{render_threads, summarize_threads, ThreadSummary};
 use super::work_item_table;
-use crate::ado::types::{PullRequest, Run, WorkItem, WorkItemRef};
+use crate::ado::types::{PullRequest, Run, WorkItemRef};
 use crate::app::App;
 use crate::cli::Output;
 use crate::error::{Error, Result};
@@ -34,7 +34,7 @@ pub fn branch_status(app: &App) -> Result<BranchStatus> {
     let (pr, branch_runs) = (pr?, branch_runs?);
 
     let Some(pr) = pr else {
-        let work_items = WorkItemRef::list(&linked, &ado.work_items(&linked)?);
+        let work_items = WorkItemRef::list(&linked, &ado.work_item_refs(&linked)?);
         return Ok(BranchStatus {
             branch: branch.to_string(),
             pr: None,
@@ -46,8 +46,8 @@ pub fn branch_status(app: &App) -> Result<BranchStatus> {
     // PR validation builds run on the merge commit, under refs/pull/<id>/merge, and gate the merge, so they come first.
     let merge_ref = format!("refs/pull/{}/merge", pr.id);
     let (items, threads, pr_runs) = par::join3(
-        || ado.pull_request_work_items(&pr),
-        || ado.placed_threads(&pr),
+        || ado.pull_request_work_item_refs(&pr),
+        || ado.review_threads(&pr),
         || ado.runs(project, Some(repo), &merge_ref, 3),
     );
     let mut runs: Vec<Run> = Vec::new();
@@ -58,7 +58,7 @@ pub fn branch_status(app: &App) -> Result<BranchStatus> {
     }
     Ok(BranchStatus {
         branch: branch.to_string(),
-        work_items: items?.iter().map(WorkItem::to_ref).collect(),
+        work_items: items?,
         runs,
         threads: summarize_threads(threads?),
         pr: Some(pr),

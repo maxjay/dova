@@ -120,6 +120,22 @@ fn org_path(url: &Url) -> Option<(String, Vec<String>)> {
     Some((org.to_string(), segments))
 }
 
+/// Work item REST targets in the same organization, including cross-project links.
+pub fn linked_work_item(org_url: &str, raw: &str) -> Option<u64> {
+    let (org, path) = org_path(&Url::parse(raw).ok()?)?;
+    let (own, _) = org_path(&Url::parse(org_url).ok()?)?;
+    let [.., api, wit, items, id] = path.as_slice() else { return None };
+    if org.eq_ignore_ascii_case(&own)
+        && api.eq_ignore_ascii_case("_apis")
+        && wit.eq_ignore_ascii_case("wit")
+        && items.eq_ignore_ascii_case("workitems")
+    {
+        parse_id(id)
+    } else {
+        None
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct RemoteRepo {
     pub org: String,

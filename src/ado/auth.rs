@@ -294,10 +294,11 @@ fn exchange(
     let refused = |error: Error| Dropped { error, again: false };
     let invalid = || refused(Error::user(format!("\"{}\" isn't a request dova can send.", req.url)));
     let method = reqwest::Method::from_bytes(req.method.as_str().as_bytes()).map_err(|_| invalid())?;
-    let accept = match (req.binary, req.text) {
-        (true, _) => "application/octet-stream",
-        (false, true) => "text/plain",
-        (false, false) => "application/json",
+    let accept = match (req.zip, req.binary, req.text) {
+        (true, _, _) => "application/zip",
+        (_, true, _) => "application/octet-stream",
+        (_, _, true) => "text/plain",
+        _ => "application/json",
     };
     let mut builder = client
         .request(method, req.url.as_str())

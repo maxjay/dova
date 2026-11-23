@@ -119,6 +119,10 @@ pub fn batch(items: Vec<Value>) -> Route {
             return ok(json!({ "comments": [] }));
         }
         let found = |id: &Value| items.iter().find(|item| item["id"] == *id).cloned().unwrap_or(Value::Null);
+        if let Some((_, id)) = req.path.rsplit_once("/_apis/wit/workitems/") {
+            let item = found(&json!(id.parse::<u64>().ok()?));
+            return if item.is_null() { None } else { ok(item) };
+        }
         ok(json!({ "value": req.body["ids"].as_array()?.iter().map(found).collect::<Vec<_>>() }))
     })
 }

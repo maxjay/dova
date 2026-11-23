@@ -41,16 +41,16 @@ pub struct WorkItem {
 }
 
 impl WorkItem {
-    pub fn to_ref(&self) -> WorkItemRef {
-        WorkItemRef { id: self.id, title: self.title.clone(), kind: self.kind.clone(), state: self.state.clone() }
+    pub fn into_ref(self) -> WorkItemRef {
+        WorkItemRef { id: self.id, title: self.title, kind: self.kind, state: self.state }
     }
 }
 
 impl WorkItemRef {
     /// One per id, in that order: what `known` says about it, or for an id it doesn't have, only the id.
-    pub fn list(ids: &[u64], known: &[WorkItem]) -> Vec<WorkItemRef> {
+    pub fn list(ids: &[u64], known: &[WorkItemRef]) -> Vec<WorkItemRef> {
         let unknown = |id| WorkItemRef { id, title: None, kind: None, state: None };
-        ids.iter().map(|id| known.iter().find(|w| w.id == *id).map_or_else(|| unknown(*id), WorkItem::to_ref)).collect()
+        ids.iter().map(|id| known.iter().find(|w| w.id == *id).cloned().unwrap_or_else(|| unknown(*id))).collect()
     }
 }
 
@@ -58,6 +58,11 @@ impl WorkItemRef {
 #[serde(rename_all = "camelCase")]
 pub struct PullRequest {
     pub id: u64,
+    /// Routing for Azure's project-scoped review provider, from the PR lookup.
+    #[serde(skip)]
+    pub project_id: Option<String>,
+    #[serde(skip)]
+    pub repo_id: Option<String>,
     pub title: String,
     /// active | completed | abandoned
     pub status: String,
@@ -69,6 +74,20 @@ pub struct PullRequest {
     pub project: String,
     pub repo: String,
     pub url: String,
+}
+
+/// A pull request as a list shows it: with its check, and how many review threads are still open.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListedPullRequest {
+    #[serde(flatten)]
+    pub pr: PullRequest,
+    /// Its latest validation run, or without one, its branch's latest run.
+    pub check: Option<Run>,
+    pub open_threads: u64,
+    /// Where you stand on it, in a list of the ones you were asked to review.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub review: Option<Review>,
 }
 
 /// Where the signed-in user stands on a pull request that asks them for a review.
@@ -127,7 +146,7 @@ pub struct Anchor {
 }
 
 /// One push to a pull request, and the two commits a diff of it is between.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Iteration {
     /// Counted from 1.
     pub id: u64,

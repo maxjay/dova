@@ -34,7 +34,7 @@ pub struct Cli {
 #[derive(Args, Debug, Default, Clone)]
 #[command(next_help_heading = "Everywhere")]
 pub struct Global {
-    /// Organization (default: the git remote's, or $DOVA_ORG)
+    /// Organization (defaults to $DOVA_ORG, the git remote, then the saved organization)
     #[arg(long, global = true)]
     pub org: Option<String>,
     /// Project (default: the git remote's, or $DOVA_PROJECT)
@@ -102,6 +102,9 @@ pub enum Command {
     Pipeline(pipeline::Pipeline),
     /// Any Azure DevOps REST call, signed in
     Api(misc::Api),
+    /// Manage your saved default organization
+    #[command(subcommand)]
+    Config(crate::config::Config),
     /// Your Azure sign-in — `az login`, once
     #[command(subcommand)]
     Auth(misc::Auth),
@@ -135,6 +138,7 @@ impl Command {
             Command::Pr(c) => c.run(app),
             Command::Pipeline(c) => c.run(app),
             Command::Api(c) => c.run(app),
+            Command::Config(c) => c.run(app),
             Command::Auth(c) => c.run(app),
             Command::Daemon(c) => c.run(app),
             Command::Instructions(c) => c.run(app),

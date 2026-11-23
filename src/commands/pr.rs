@@ -7,8 +7,8 @@ use serde_json::json;
 use super::diff::{anchor, Diff};
 use super::work_item_table;
 use crate::ado::client::{AdoClient, NewPullRequest, MOST};
-use crate::ado::types::{PullRequest, Review, Run, Thread, ThreadLocation, WorkItem, WorkItemRef};
-use crate::app::{App, ScopeHint};
+use crate::ado::types::{ListedPullRequest, PullRequest, Thread, ThreadLocation, WorkItemRef};
+use crate::app::App;
 use crate::cli::Output;
 use crate::error::{Error, Result};
 use crate::images::Illustrated;
@@ -32,8 +32,7 @@ pub fn find_pull_request<'a>(app: &'a App, id_or_url: Option<&str>) -> Result<(P
     let id = link.as_ref().map(|l| l.id).or_else(|| parse_id(target));
     let id = id.ok_or_else(|| Error::user(format!("\"{target}\" isn't a pull request id or link.")))?;
     // A link names its own organization; a bare id is in the one you're in.
-    let hint = link.map(|l| ScopeHint { org: Some(l.org), project: Some(l.project), repo: Some(l.repo) });
-    let ado = app.ado(&app.scope_for(&hint.unwrap_or_default())?.org_url);
+    let ado = app.ado(&app.org_url(link.as_ref().map(|l| l.org.as_str()))?);
     Ok((ado.pull_request(id)?, ado))
 }
 
@@ -154,45 +153,6 @@ pub struct List {
     pub web: bool,
 }
 
-/// A pull request as a list shows it: with its check, and how many review threads are still open.
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ListedPullRequest {
-    #[serde(flatten)]
-    pub pr: PullRequest,
-    /// Its latest validation run, or without one, its branch's latest run.
-    pub check: Option<Run>,
-    pub open_threads: usize,
-    /// Where you stand on it, in a list of the ones you were asked to review.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub review: Option<Review>,
-}
-
-/// How many pull requests are looked into at the same time. That bounds the
-/// threads; how many requests are out at once is the transport's to limit.
-const AT_ONCE: usize = 8;
-
-/// Each pull request's check and open threads, a few pull requests at a time.
-fn listed(ado: &AdoClient, prs: Vec<(PullRequest, Option<Review>)>) -> Result<Vec<ListedPullRequest>> {
-    let look = |pr: &PullRequest| -> Result<(Option<Run>, usize)> {
-        let merge_ref = format!("refs/pull/{}/merge", pr.id);
-        let (validation, branch, threads) = par::join3(
-            || ado.runs(&pr.project, Some(&pr.repo), &merge_ref, 1),
-            || ado.runs(&pr.project, Some(&pr.repo), &pr.source_branch, 1),
-            || ado.threads(pr),
-        );
-        let check = validation?.pop().or(branch?.pop());
-        Ok((check, threads?.iter().filter(|t| t.unresolved).count()))
-    };
-    let looked: Vec<_> =
-        prs.chunks(AT_ONCE).flat_map(|some| par::map(some, |(pr, _)| look(pr))).collect::<Result<_>>()?;
-    Ok(prs
-        .into_iter()
-        .zip(looked)
-        .map(|((pr, review), (check, open_threads))| ListedPullRequest { pr, check, open_threads, review })
-        .collect())
-}
-
 /// A reviewer's vote, colored by which way it went.
 fn voted(s: Style, vote: &str) -> String {
     match vote {
@@ -210,13 +170,7 @@ impl List {
             return Ok(Output::none().web(true, &my_pull_requests_url(&scope.org_url)));
         }
         let ado = app.ado(&scope.org_url);
-        let found = if self.review {
-            let asked = ado.pull_requests_to_review(&scope.project, &self.state)?;
-            asked.into_iter().map(|(pr, review)| (pr, Some(review))).collect()
-        } else {
-            ado.my_pull_requests(&scope.project, &self.state)?.into_iter().map(|pr| (pr, None)).collect()
-        };
-        let prs = listed(&ado, found)?;
+        let prs = ado.list_pull_requests(&scope.project, &self.state, self.review)?;
         let s = app.style;
         let text = if prs.is_empty() {
             let which = if self.state == "all" { String::new() } else { format!("{} ", self.state) };
@@ -323,9 +277,8 @@ pub struct PullRequestDetail {
 }
 
 pub fn pull_request_detail(pr: PullRequest, ado: &AdoClient) -> Result<PullRequestDetail> {
-    let (work_items, threads) = par::join(|| ado.pull_request_work_items(&pr), || ado.placed_threads(&pr));
-    let work_items = work_items?.iter().map(WorkItem::to_ref).collect();
-    Ok(PullRequestDetail { work_items, threads: summarize_threads(threads?), pr })
+    let (work_items, threads) = par::join(|| ado.pull_request_work_item_refs(&pr), || ado.review_threads(&pr));
+    Ok(PullRequestDetail { work_items: work_items?, threads: summarize_threads(threads?), pr })
 }
 
 pub fn render_pull_request(d: &PullRequestDetail, s: Style, full: bool) -> String {
@@ -682,27 +635,49 @@ mod tests {
         assert!(posted(&bed).get("description").is_none());
     }
 
-    /// Signed in as `me-1`, with whatever pull requests are given. PR 9 failed validation and has one thread
-    /// open of two; nothing else has a validation run or a thread, and every branch's own run succeeded.
+    fn run_on(id: u64, repo: &str, branch: &str, result: u64) -> Value {
+        json!({"run": {"id":id, "repository":{"id":repo}, "sourceBranch":branch, "status":2, "result":result,
+                       "queueTime":format!("2026-01-01T00:00:{id:02}Z")}})
+    }
+
+    fn list_page(req: &Recorded, runs: Value, next: Option<&str>) -> Value {
+        let props = &req.body["dataProviderContext"]["properties"];
+        let mut providers = json!({"ms.vss-build-web.runs-data-provider":{"runs":runs, "continuationToken":next}});
+        if let Some(artifacts) = props["artifactIds"].as_array() {
+            let counts: Vec<_> = artifacts
+                .iter()
+                .rev()
+                .map(|a| {
+                    let id = &a["artifactId"];
+                    let count = u64::from(id == "vstfs:///Git/PullRequestId/p%2Fr%2F9");
+                    json!({"pullRequestArtifactId":id, "activeCommentsCount":count})
+                })
+                .collect();
+            providers["ms.vss-code-web.pullrequests-artifact-stats-data-provider"] =
+                json!({"TFS.VersionControl.PullRequestListArtifactStatsProvider.artifactStats":counts});
+        }
+        json!({"dataProviders": providers})
+    }
+
     fn mine(prs: Value) -> Route {
-        Box::new(move |r: &Recorded| {
-            let run =
-                |id: u64, result: &str| json!({ "value": [{ "id": id, "status": "completed", "result": result }] });
-            let said = |status: &str| json!({ "id": 1, "status": status, "comments": [{ "id": 1, "content": "fix" }] });
+        Box::new(move |r| {
             if r.path.ends_with("/connectionData") {
                 ok(json!({ "authenticatedUser": { "id": "me-1" } }))
-            } else if r.path.ends_with("/builds") {
-                match r.query("branchName").unwrap().as_str() {
-                    "refs/pull/9/merge" => ok(run(2, "failed")),
-                    "refs/heads/feature/x" => ok(run(1, "succeeded")),
-                    _ => ok(json!({ "value": [] })),
-                }
-            } else if r.path.ends_with("/pullRequests/9/threads") {
-                ok(json!({ "value": [said("active"), said("fixed")] }))
-            } else if r.path.ends_with("/threads") {
-                ok(json!({ "value": [] }))
-            } else {
+            } else if r.path.ends_with("/pullrequests") {
                 ok(json!({ "value": prs }))
+            } else if r.path.ends_with("/HierarchyQuery/project/p") {
+                let props = &r.body["dataProviderContext"]["properties"];
+                let runs = if props["keywordFilter"] == "refs/heads/feature/x" {
+                    json!([
+                        run_on(1, "api-id", "refs/heads/feature/x", 2),
+                        run_on(3, "other", "refs/heads/feature/x", 8)
+                    ])
+                } else {
+                    json!([run_on(2, "r", "refs/pull/9/merge", 8)])
+                };
+                ok(list_page(r, runs, None))
+            } else {
+                None
             }
         })
     }
@@ -713,7 +688,10 @@ mod tests {
 
     #[test]
     fn lists_only_the_pull_requests_you_opened_each_with_its_check_and_open_threads() {
-        let draft = rest_pr(8, json!({ "isDraft": true, "repository": { "name": "api" } }));
+        let draft = rest_pr(
+            8,
+            json!({ "isDraft": true, "repository": { "id":"api-id", "name":"api", "project":{"id":"p","name":"MyProject"} } }),
+        );
         let bed = Bed::new(mine(json!([rest_pr(9, json!({})), draft])));
         let listed = cli(bed.app(), &["pr", "list", "--json"]).json();
         // A validation run wins; without one, the branch's own run is the check.
@@ -730,6 +708,40 @@ mod tests {
         let row = |id: &str| screen.lines().find(|line| line.contains(id)).unwrap().to_string();
         assert_eq!(row("#9"), "│ #9 │ PR 9  │ web  │ feature/x -> main │ active │ failed    │ 1            │");
         assert_eq!(row("#8"), "│ #8 │ PR 8  │ api  │ feature/x -> main │ draft  │ succeeded │ 0            │");
+    }
+
+    #[test]
+    fn pages_validation_runs_without_refetching_counts_or_using_another_repos_run() {
+        let search =
+            mine(json!([rest_pr(9, json!({"supportsIterations":true, "codeReviewId":45})), rest_pr(8, json!({}))]));
+        let bed = Bed::new(Box::new(move |r| {
+            if !r.path.ends_with("/HierarchyQuery/project/p") {
+                return search(r);
+            }
+            let props = &r.body["dataProviderContext"]["properties"];
+            assert_eq!(props["keywordFilter"], "refs/pull/9/merge,refs/pull/8/merge");
+            if props["continuationToken"].is_null() {
+                assert_eq!(props["artifactIds"][0]["discussionArtifactId"], "vstfs:///CodeReview/ReviewId/p%2F45");
+                assert_eq!(props["artifactIds"][1]["discussionArtifactId"], "vstfs:///CodeReview/CodeReviewId/p%2F8");
+                ok(list_page(r, json!([run_on(2, "r", "refs/pull/9/merge", 8)]), Some("next")))
+            } else {
+                assert_eq!(props["continuationToken"], "next");
+                assert_eq!(r.body["contributionIds"], json!(["ms.vss-build-web.runs-data-provider"]));
+                assert!(props.get("artifactIds").is_none());
+                ok(list_page(
+                    r,
+                    json!([
+                        run_on(5, "r", "refs/pull/8/merge", 2),
+                        run_on(7, "other", "refs/pull/8/merge", 8),
+                        run_on(1, "r", "refs/pull/9/merge", 2)
+                    ]),
+                    None,
+                ))
+            }
+        }));
+        let rows = cli(bed.app(), &["pr", "list", "--json"]).json();
+        assert_eq!((&rows[0]["check"]["id"], &rows[1]["check"]["id"]), (&json!(2), &json!(5)));
+        assert_eq!(bed.ado.requests().len(), 4); // Identity, search and two pages.
     }
 
     #[test]
@@ -754,8 +766,34 @@ mod tests {
 
     /// Signed in as `me-1`, who is in the team Payments. Each reviewer is answered with their own pull requests.
     fn asked(by_name: Value, through_the_team: Value) -> Route {
+        let other = mine(json!([]));
         Box::new(move |r: &Recorded| {
-            if r.path.ends_with("/connectionData") {
+            if r.path.ends_with("/HierarchyQuery/project/MyProject") {
+                assert_eq!(r.method, "POST");
+                let props = &r.body["dataProviderContext"]["properties"];
+                assert_eq!(props["queryIds"], json!(["AssignedToMe", "AssignedToMyTeams"]));
+                assert_eq!(props["sourcePage"]["routeValues"]["project"], "MyProject");
+                assert_eq!(props["top"], 100);
+                let mut prs = json!({});
+                let mut query_results = json!({});
+                for (section, list) in [("AssignedToMe", &by_name), ("AssignedToMyTeams", &through_the_team)] {
+                    let mut ids = Vec::new();
+                    for pr in list.as_array()? {
+                        let id = pr["pullRequestId"].as_u64()?;
+                        ids.push(id);
+                        prs[id.to_string()] = pr.clone();
+                    }
+                    query_results[section] = json!({"ids":ids});
+                }
+                ok(json!({"dataProviders": {
+                    "ms.vss-code-web.prs-list-data-provider": {
+                        "queries": [{"id":"AssignedToMe", "readonly":true, "status":1, "reviewerIds":["me-1"]},
+                                    {"id":"AssignedToMyTeams", "status":1, "myTeamsAsReviewer":true}],
+                        "queryResults":query_results, "pullRequests": prs
+                    },
+                    "ms.vss-dashboards-web.my-team-list-data-provider": [{"value":{"id":"TEAM-1","name":"Payments"}}]
+                }}))
+            } else if r.path.ends_with("/connectionData") {
                 ok(json!({ "authenticatedUser": { "id": "me-1" } }))
             } else if r.path.ends_with("/_apis/teams") {
                 ok(json!({ "value": [{ "id": "team-1", "name": "Payments" }] }))
@@ -763,10 +801,14 @@ mod tests {
                 match r.query("searchCriteria.reviewerId").as_deref() {
                     Some("me-1") => ok(json!({ "value": by_name })),
                     Some("team-1") => ok(json!({ "value": through_the_team })),
+                    None => {
+                        let prs: Vec<_> = by_name.as_array()?.iter().chain(through_the_team.as_array()?).collect();
+                        ok(json!({"value":prs}))
+                    }
                     _ => None,
                 }
             } else {
-                ok(json!({ "value": [] }))
+                other(r)
             }
         })
     }
@@ -776,7 +818,10 @@ mod tests {
         let team = json!({ "id": "team-1", "vote": 0, "isContainer": true });
         // Azure DevOps writes the same id in either case.
         let approved = rest_pr(9, json!({ "reviewers": [team, { "id": "ME-1", "vote": 10 }] }));
-        let theirs = rest_pr(12, json!({ "createdBy": { "id": "jo-2", "displayName": "Jo" }, "reviewers": [team] }));
+        let theirs = rest_pr(
+            12,
+            json!({ "createdBy": { "id": "jo-2", "displayName": "Jo" }, "reviewers": [{"id":"other-team","isContainer":true},team] }),
+        );
         let own = rest_pr(11, json!({ "createdBy": { "id": "me-1", "displayName": "Me" }, "reviewers": [team] }));
         let bed = Bed::new(asked(json!([approved]), json!([theirs, own, approved])));
 
@@ -789,19 +834,64 @@ mod tests {
             [(&json!(12), &stands("none", json!("Payments"))), (&json!(9), &stands("approved", json!(null)))]
         );
 
-        let lists: Vec<Recorded> =
-            bed.ado.requests().into_iter().filter(|r| r.path.ends_with("/pullrequests")).collect();
-        assert!(lists.iter().all(|r| r.path == "/MyProject/_apis/git/pullrequests"));
-        assert!(lists.iter().all(|r| r.query("searchCriteria.status").as_deref() == Some("active")));
-        assert!(lists.iter().all(|r| r.query("searchCriteria.creatorId").is_none()));
-        let teams = bed.ado.requests().into_iter().find(|r| r.path.ends_with("/_apis/teams")).unwrap();
-        assert_eq!((teams.path.as_str(), teams.query("$mine").as_deref()), ("/_apis/teams", Some("true")));
+        let calls = bed.ado.requests();
+        assert_eq!(calls.len(), 3); // PR 12 also needs the source-branch fallback.
+        assert_eq!(calls[0].path, "/_apis/Contribution/HierarchyQuery/project/MyProject");
+        assert_eq!(calls[1].body["contributionIds"].as_array().unwrap().len(), 2);
+        assert_eq!(calls[2].body["dataProviderContext"]["properties"]["keywordFilter"], "refs/heads/feature/x");
 
         let screen = cli(bed.app(), &["pr", "list", "--review"]).stdout;
         let row = |id: &str| screen.lines().find(|line| line.contains(id)).unwrap().to_string();
-        assert!(screen.contains("│ Author │ State  │ Check │ Open threads │ Your vote │"), "{screen}");
-        assert_eq!(row("#12"), "│ #12 │ PR 12 │ web  │ Jo     │ active │ none  │ 0            │ none      │");
-        assert_eq!(row("#9"), "│ #9  │ PR 9  │ web  │ Jane   │ active │ none  │ 0            │ approved  │");
+        assert!(screen.contains("│ Author │ State  │ Check  │ Open threads │ Your vote │"), "{screen}");
+        assert_eq!(row("#12"), "│ #12 │ PR 12 │ web  │ Jo     │ active │ none   │ 0            │ none      │");
+        assert_eq!(row("#9"), "│ #9  │ PR 9  │ web  │ Jane   │ active │ failed │ 1            │ approved  │");
+    }
+
+    #[test]
+    fn an_active_review_list_with_validation_takes_two_requests() {
+        let pr = rest_pr(9, json!({"createdBy":{"id":"me-1"}, "reviewers":[{"id":"ME-1","vote":10}]}));
+        // The portal can put a PR shared by both sections in just one of them.
+        let bed = Bed::new(asked(json!([]), json!([pr])));
+        let rows = cli(bed.app(), &["pr", "list", "--review", "--json"]).json();
+        assert_eq!(rows[0]["review"], json!({"vote":"approved","team":null}));
+        assert_eq!(bed.ado.requests().len(), 2);
+    }
+
+    #[test]
+    fn a_custom_portal_section_does_not_hide_a_team_review() {
+        let team_pr = rest_pr(12, json!({"createdBy":{"id":"jo"}, "reviewers":[{"id":"team-1","isContainer":true}]}));
+        let route = asked(json!([]), json!([team_pr]));
+        let bed = Bed::new(Box::new(move |r| {
+            let mut response = route(r)?;
+            if r.path.ends_with("/HierarchyQuery/project/MyProject") {
+                let mut body: Value = serde_json::from_str(&response.body).unwrap();
+                let list = &mut body["dataProviders"]["ms.vss-code-web.prs-list-data-provider"];
+                list["queries"][1]["authorIds"] = json!(["someone-else"]);
+                list["queryResults"]["AssignedToMyTeams"]["ids"] = json!([]);
+                response.body = body.to_string();
+            }
+            Some(response)
+        }));
+        let rows = cli(bed.app(), &["pr", "list", "--review", "--json"]).json();
+        assert_eq!(rows[0]["review"]["team"], "Payments");
+        assert_eq!(rows[0]["id"], 12);
+    }
+
+    #[test]
+    fn large_review_histories_use_the_reviewer_index_to_find_an_older_assignment() {
+        let pr = rest_pr(9, json!({"status":"completed","reviewers":[{"id":"me-1","vote":10}]}));
+        let route = asked(json!([pr]), json!([]));
+        let bed = Bed::new(Box::new(move |r| {
+            if r.path.ends_with("/pullrequests") && r.query("searchCriteria.reviewerId").is_none() {
+                assert_eq!(r.query("$top").as_deref(), Some("100"));
+                let unrelated: Vec<_> = (100..200).map(|id| rest_pr(id, json!({"status":"completed"}))).collect();
+                return ok(json!({"value":unrelated}));
+            }
+            route(r)
+        }));
+        let rows = cli(bed.app(), &["pr", "list", "--review", "--state", "completed", "--json"]).json();
+        assert_eq!(rows.as_array().unwrap().len(), 1);
+        assert_eq!(rows[0]["id"], 9);
     }
 
     #[test]
@@ -815,6 +905,7 @@ mod tests {
         let bed = Bed::new(mine(json!([rest_pr(9, json!({}))])));
         assert!(cli(bed.app(), &["pr", "list", "--json"]).json()[0].get("review").is_none());
         assert!(bed.ado.requests().iter().all(|r| !r.path.ends_with("/_apis/teams")));
+        assert_eq!(bed.ado.requests().len(), 3); // Identity, PR search and one enrichment request.
     }
 
     /// PR 9, pushed to twice. Thread 4 was written on lines 16-17 of the first push, which the second moved

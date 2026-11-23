@@ -77,7 +77,23 @@ pub fn methods() -> Vec<Method> {
             .collect(),
         options: options(command).map(camel).collect(),
     };
-    found.iter().map(method).collect()
+    let mut methods: Vec<_> = found.iter().map(method).collect();
+    for (name, description, args) in [
+        ("pr.open", "Open a live PR snapshot", vec!["id"]),
+        ("pr.read", "Refresh sections of an open PR", vec!["subscription", "sections"]),
+        ("pr.close", "Release a live PR subscription", vec!["subscription"]),
+        ("wi.open", "Open a live work item snapshot", vec!["id"]),
+        ("wi.read", "Refresh sections of an open work item", vec!["subscription", "sections"]),
+        ("wi.close", "Release a live work item subscription", vec!["subscription"]),
+    ] {
+        methods.push(Method {
+            name: name.into(),
+            description: description.into(),
+            args: args.into_iter().map(str::to_owned).collect(),
+            options: vec![],
+        });
+    }
+    methods
 }
 
 /// A protocol-level failure, or one of dova's own with its kind attached.
@@ -124,16 +140,16 @@ fn words(value: &Value) -> Vec<String> {
 }
 
 impl Invoker {
-    pub fn new(env: Env, transport: Arc<dyn Transport>) -> Invoker {
+    pub fn new(env: Env, defaults: ScopeHint, transport: Arc<dyn Transport>) -> Invoker {
         let text = |params: &Map<String, Value>, key: &str| params.get(key).and_then(Value::as_str).map(str::to_string);
         Invoker::with(Box::new(move |params| {
             App::new(app::Options {
                 env: env.clone(),
                 interactive: false,
                 flags: ScopeHint {
-                    org: text(params, "org"),
-                    project: text(params, "project"),
-                    repo: text(params, "repo"),
+                    org: text(params, "org").or_else(|| defaults.org.clone()),
+                    project: text(params, "project").or_else(|| defaults.project.clone()),
+                    repo: text(params, "repo").or_else(|| defaults.repo.clone()),
                 },
                 style: Style::PLAIN,
                 cwd: text(params, "cwd").map(PathBuf::from),
@@ -194,8 +210,14 @@ pub fn serve_lines(
     output: impl Write + Send,
     handle: impl Fn(&str, &Map<String, Value>, bool) -> Result<Value, RpcError> + Sync,
 ) {
+    read_lines(input, &line_writer(output), |method, params, notification, respond| {
+        respond(handle(method, params, notification));
+    });
+}
+
+fn line_writer(output: impl Write + Send) -> impl Fn(Value) + Sync + Send {
     let output = Mutex::new(output);
-    let reply = |message: Value| {
+    move |message: Value| {
         let mut line = message.to_string();
         line.push('\n');
         let mut output = output.lock().unwrap();
@@ -203,7 +225,15 @@ pub fn serve_lines(
         if output.write_all(line.as_bytes()).and_then(|()| output.flush()).is_err() {
             std::process::exit(0);
         }
-    };
+    }
+}
+
+type Respond<'a> = dyn Fn(Result<Value, RpcError>) + 'a;
+fn read_lines(
+    input: impl BufRead,
+    reply: &(impl Fn(Value) + Sync + ?Sized),
+    handle: impl Fn(&str, &Map<String, Value>, bool, &Respond) + Sync,
+) {
     std::thread::scope(|requests| {
         for line in input.lines().map_while(|line| line.ok()) {
             if line.trim().is_empty() {
@@ -213,23 +243,24 @@ pub fn serve_lines(
                 reply(json!({ "jsonrpc": "2.0", "id": null, "error": { "code": -32700, "message": "Parse error" } }));
                 continue;
             };
-            let (reply, handle) = (&reply, &handle);
+            let handle = &handle;
             requests.spawn(move || {
                 let id = request.get("id");
                 let method = request.get("method").and_then(Value::as_str).unwrap_or("");
                 let none = Map::new();
                 let params = request.get("params").and_then(Value::as_object).unwrap_or(&none);
-                let result = handle(method, params, id.is_none());
-                let Some(id) = id else { return };
-                reply(match result {
-                    Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
-                    Err(err) => {
-                        let mut error = json!({ "code": err.code, "message": err.message });
-                        if let Some(data) = err.data {
-                            error["data"] = data;
+                handle(method, params, id.is_none(), &|result| {
+                    let Some(id) = id else { return };
+                    reply(match result {
+                        Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
+                        Err(err) => {
+                            let mut error = json!({ "code": err.code, "message": err.message });
+                            if let Some(data) = err.data {
+                                error["data"] = data;
+                            }
+                            json!({ "jsonrpc": "2.0", "id": id, "error": error })
                         }
-                        json!({ "jsonrpc": "2.0", "id": id, "error": error })
-                    }
+                    });
                 });
             });
         }
@@ -238,12 +269,33 @@ pub fn serve_lines(
 
 /// The process's own stdin and stdout, with what `dova rpc` and `dova mcp` share: no prompts, one daemon connection.
 pub fn stdio_invoker(app: &App) -> Invoker {
-    Invoker::new(app.env.clone(), daemon::transport(&app.env, false))
+    Invoker::new(app.env.clone(), app.flags.clone(), daemon::transport(&app.env, false))
 }
 
 pub fn serve_stdio(app: &App) -> Result<Output> {
     let invoker = stdio_invoker(app);
-    serve_lines(std::io::stdin().lock(), std::io::stdout(), |method, params, _| invoker.invoke(method, params));
+    let send = Arc::new(line_writer(std::io::stdout()));
+    let session = crate::live::Session::new(send.clone())?;
+    use crate::ado::sections::Resource;
+    read_lines(std::io::stdin().lock(), send.as_ref(), |method, params, notification, respond| {
+        let (prefix, action) = method.split_once('.').unwrap_or(("", ""));
+        let resource = match prefix {
+            "pr" => Resource::Pr,
+            "wi" => Resource::Wi,
+            _ => return respond(invoker.invoke(method, params)),
+        };
+        match action {
+            "open" if notification => {}
+            "open" => {
+                if let Err(err) = session.open((invoker.app)(params), resource, params, |opened| respond(Ok(opened))) {
+                    respond(Err(err));
+                }
+            }
+            "read" => respond(session.read(resource, params)),
+            "close" => respond(session.close(resource, params)),
+            _ => respond(invoker.invoke(method, params)),
+        }
+    });
     Ok(Output::none())
 }
 
