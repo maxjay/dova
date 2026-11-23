@@ -39,7 +39,7 @@ pub fn link(app: &App, values: &[String]) -> Result<Linked> {
     let scope = app.scope()?;
     let branch = scope.need_branch()?;
     let all = unique(app.git.links(branch)?.into_iter().chain(ids.iter().copied()));
-    let known = app.ado(&scope.org_url).work_items(&all)?;
+    let known = app.ado(&scope.org_url).work_item_refs(&all)?;
     let missing: Vec<u64> = ids.iter().copied().filter(|id| !known.iter().any(|w| w.id == *id)).collect();
     if !missing.is_empty() {
         return Err(Error::not_found(format!("Not found: {}", hashes(&missing))));
@@ -65,7 +65,7 @@ pub fn unlink(app: &App, values: &[String], all: bool) -> Result<Linked> {
         );
     }
     app.git.set_links(branch, &kept)?;
-    let known = app.ado(&scope.org_url).work_items(&kept)?;
+    let known = app.ado(&scope.org_url).work_item_refs(&kept)?;
     Ok(Linked { branch: branch.to_string(), work_items: WorkItemRef::list(&kept, &known), removed })
 }
 
@@ -127,7 +127,7 @@ impl List {
         let dates = app.git.try_run(&["for-each-ref", format, "refs/heads/"])?.unwrap_or_default();
         let scope = app.scope()?;
         let every_id = unique(linked.iter().flat_map(|(_, ids)| ids.iter().copied()));
-        let known = app.ado(&scope.org_url).work_items(&every_id)?;
+        let known = app.ado(&scope.org_url).work_item_refs(&every_id)?;
 
         let last_commit = |branch: &str| {
             let date = dates.lines().filter_map(|line| line.split_once('\t')).find(|(name, _)| *name == branch);

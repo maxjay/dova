@@ -5,7 +5,7 @@ use serde::Serialize;
 
 use super::pr::{render_threads, summarize_threads, ThreadSummary};
 use super::work_item_table;
-use crate::ado::types::{PullRequest, Run, WorkItem, WorkItemRef};
+use crate::ado::types::{PullRequest, Run, WorkItemRef};
 use crate::app::App;
 use crate::cli::Output;
 use crate::error::{Error, Result};
@@ -34,7 +34,7 @@ pub fn branch_status(app: &App) -> Result<BranchStatus> {
     let (pr, branch_runs) = (pr?, branch_runs?);
 
     let Some(pr) = pr else {
-        let work_items = WorkItemRef::list(&linked, &ado.work_items(&linked)?);
+        let work_items = WorkItemRef::list(&linked, &ado.work_item_refs(&linked)?);
         return Ok(BranchStatus {
             branch: branch.to_string(),
             pr: None,
@@ -45,11 +45,12 @@ pub fn branch_status(app: &App) -> Result<BranchStatus> {
     };
     // PR validation builds run on the merge commit, under refs/pull/<id>/merge, and gate the merge, so they come first.
     let merge_ref = format!("refs/pull/{}/merge", pr.id);
-    let (items, threads, pr_runs) = par::join3(
-        || ado.pull_request_work_items(&pr),
-        || ado.placed_threads(&pr),
+    use crate::ado::sections::Section::{Discussion, WorkItems};
+    let (read, pr_runs) = par::join(
+        || ado.read_pr(&pr, &[Discussion, WorkItems].into()),
         || ado.runs(project, Some(repo), &merge_ref, 3),
     );
+    let read = read?;
     let mut runs: Vec<Run> = Vec::new();
     for run in pr_runs?.into_iter().chain(branch_runs) {
         if runs.len() < 3 && !runs.iter().any(|seen| seen.id == run.id) {
@@ -58,9 +59,9 @@ pub fn branch_status(app: &App) -> Result<BranchStatus> {
     }
     Ok(BranchStatus {
         branch: branch.to_string(),
-        work_items: items?.iter().map(WorkItem::to_ref).collect(),
+        work_items: read.work_items,
         runs,
-        threads: summarize_threads(threads?),
+        threads: summarize_threads(read.threads),
         pr: Some(pr),
     })
 }
@@ -169,11 +170,16 @@ mod tests {
                 ok(json!({ "value": [{ "id": id, "status": "completed", "result": "succeeded" }] }))
             } else if r.path.ends_with("/workitems") {
                 ok(json!({ "value": [{ "id": "30" }] }))
-            } else if r.path.ends_with("/threads") {
-                ok(json!({ "value": [
-                    { "id": 1, "status": "fixed", "comments": [{ "id": 1, "content": "ok" }] },
-                    { "id": 2, "status": "active", "comments": [{ "id": 1, "content": "fix", "author": { "displayName": "Ann" } }] },
-                ] }))
+            } else if r.path.contains("/HierarchyQuery/") {
+                crate::testing::review_page(
+                    2,
+                    "head",
+                    json!([]),
+                    json!([
+                        { "id": 1, "status": "fixed", "comments": [{ "id": 1, "content": "ok" }] },
+                        { "id": 2, "status": "active", "comments": [{ "id": 1, "content": "fix", "author": { "displayName": "Ann" } }] },
+                    ]),
+                )
             } else {
                 batch(vec![wi(30, json!({}))])(r)
             }
@@ -202,14 +208,14 @@ mod tests {
                 ok(json!({ "value": [if validation { run(4102, "failed") } else { run(4098, "succeeded") }] }))
             } else if r.path.ends_with("/workitems") {
                 ok(json!({ "value": [{ "id": "4821" }, { "id": "5219" }] }))
-            } else if r.path.ends_with("/threads") {
+            } else if r.path.contains("/HierarchyQuery/") {
                 let said = |id: u64, who: &str, text: &str| json!({ "id": id, "content": text, "author": { "displayName": who } });
                 let on_line_42 = json!({ "filePath": "/src/auth.ts", "rightFileStart": { "line": 42 } });
                 let review = [said(1, "SonarQube", "Reduce the complexity of this function."), said(2, "Jane Doe", "Can you also handle the null case here?")];
-                ok(json!({ "value": [
+                crate::testing::review_page(2,"head",json!([{"changeType":"edit","item":{"path":"/src/auth.ts"}}]), json!([
                     { "id": 7, "status": "fixed", "comments": [said(1, "Sam Lee", "Nice catch.")] },
                     { "id": 4, "status": "active", "threadContext": on_line_42, "comments": review },
-                ] }))
+                ]))
             } else {
                 let bug = |id: u64, title: &str, state: &str| wi(id, json!({ "System.Title": title, "System.WorkItemType": "Bug", "System.State": state }));
                 batch(vec![bug(4821, "Login redirects to the wrong page", "Active"), bug(5219, "Null check missing on empty session token", "New")])(r)

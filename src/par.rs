@@ -11,15 +11,6 @@ pub fn join<A: Send, B: Send>(a: impl FnOnce() -> A + Send, b: impl FnOnce() -> 
     })
 }
 
-pub fn join3<A: Send, B: Send, C: Send>(
-    a: impl FnOnce() -> A + Send,
-    b: impl FnOnce() -> B + Send,
-    c: impl FnOnce() -> C + Send,
-) -> (A, B, C) {
-    let (a, (b, c)) = join(a, || join(b, c));
-    (a, b, c)
-}
-
 /// `f` over every item at once, results in the items' order.
 pub fn map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
     match items {

@@ -114,7 +114,7 @@ impl Summarize {
         let base = if git.has_ref(&format!("origin/{base}"))? { format!("origin/{base}") } else { base };
         // The PR's work items; with no PR, the ones `dova link` recorded.
         let work_items = match &pr {
-            Some(pr) => ado.pull_request_work_items(pr)?,
+            Some(pr) => ado.work_items(&ado.pull_request_work_item_ids(pr)?)?,
             None => ado.work_items(&git.links(&branch)?)?,
         };
         let want_diff = self.full || !self.files.is_empty();

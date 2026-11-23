@@ -104,7 +104,7 @@ pub fn ok(body: Value) -> Option<Response> {
 
 /// A work item as the REST API returns it; `fields` are added to the usual ones.
 pub fn wi(id: u64, fields: Value) -> Value {
-    let mut item = json!({ "id": id, "fields": { "System.Title": format!("Item {id}"), "System.WorkItemType": "Task", "System.State": "Active", "System.TeamProject": "MyProject" } });
+    let mut item = json!({ "id": id, "rev": 1, "fields": { "System.Title": format!("Item {id}"), "System.WorkItemType": "Task", "System.State": "Active", "System.TeamProject": "MyProject" } });
     if let (Some(all), Value::Object(extra)) = (item["fields"].as_object_mut(), fields) {
         all.extend(extra);
     }
@@ -119,8 +119,19 @@ pub fn batch(items: Vec<Value>) -> Route {
             return ok(json!({ "comments": [] }));
         }
         let found = |id: &Value| items.iter().find(|item| item["id"] == *id).cloned().unwrap_or(Value::Null);
+        if let Some((_, id)) = req.path.rsplit_once("/_apis/wit/workitems/") {
+            let item = found(&json!(id.parse::<u64>().ok()?));
+            return if item.is_null() { None } else { ok(item) };
+        }
         ok(json!({ "value": req.body["ids"].as_array()?.iter().map(found).collect::<Vec<_>>() }))
     })
+}
+
+pub fn review_page(push: u64, head: &str, changes: Value, threads: Value) -> Option<Response> {
+    ok(json!({"dataProviders":{"ms.vss-code-web.pr-detail-data-provider":{
+        "latestIterationId":push, "iterations":[{"id":push,"commonRefCommit":{"commitId":"base"},"sourceRefCommit":{"commitId":head}}],
+        "latestChanges":{"changeEntries":changes},"discussionThreads":threads
+    }}}))
 }
 
 /// A pull request as the REST API returns it.

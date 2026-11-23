@@ -7,12 +7,11 @@ use serde_json::json;
 use super::diff::{anchor, Diff};
 use super::work_item_table;
 use crate::ado::client::{AdoClient, NewPullRequest, MOST};
-use crate::ado::types::{PullRequest, Review, Run, Thread, ThreadLocation, WorkItem, WorkItemRef};
-use crate::app::{App, ScopeHint};
+use crate::ado::types::{ListedPullRequest, PullRequest, Thread, ThreadLocation, WorkItemRef};
+use crate::app::App;
 use crate::cli::Output;
 use crate::error::{Error, Result};
 use crate::images::Illustrated;
-use crate::par;
 use crate::text::{table, truncate, Style};
 use crate::urls::{my_pull_requests_url, parse_id, parse_pull_request_link};
 
@@ -32,8 +31,7 @@ pub fn find_pull_request<'a>(app: &'a App, id_or_url: Option<&str>) -> Result<(P
     let id = link.as_ref().map(|l| l.id).or_else(|| parse_id(target));
     let id = id.ok_or_else(|| Error::user(format!("\"{target}\" isn't a pull request id or link.")))?;
     // A link names its own organization; a bare id is in the one you're in.
-    let hint = link.map(|l| ScopeHint { org: Some(l.org), project: Some(l.project), repo: Some(l.repo) });
-    let ado = app.ado(&app.scope_for(&hint.unwrap_or_default())?.org_url);
+    let ado = app.ado(&app.org_url(link.as_ref().map(|l| l.org.as_str()))?);
     Ok((ado.pull_request(id)?, ado))
 }
 
@@ -154,45 +152,6 @@ pub struct List {
     pub web: bool,
 }
 
-/// A pull request as a list shows it: with its check, and how many review threads are still open.
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ListedPullRequest {
-    #[serde(flatten)]
-    pub pr: PullRequest,
-    /// Its latest validation run, or without one, its branch's latest run.
-    pub check: Option<Run>,
-    pub open_threads: usize,
-    /// Where you stand on it, in a list of the ones you were asked to review.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub review: Option<Review>,
-}
-
-/// How many pull requests are looked into at the same time. That bounds the
-/// threads; how many requests are out at once is the transport's to limit.
-const AT_ONCE: usize = 8;
-
-/// Each pull request's check and open threads, a few pull requests at a time.
-fn listed(ado: &AdoClient, prs: Vec<(PullRequest, Option<Review>)>) -> Result<Vec<ListedPullRequest>> {
-    let look = |pr: &PullRequest| -> Result<(Option<Run>, usize)> {
-        let merge_ref = format!("refs/pull/{}/merge", pr.id);
-        let (validation, branch, threads) = par::join3(
-            || ado.runs(&pr.project, Some(&pr.repo), &merge_ref, 1),
-            || ado.runs(&pr.project, Some(&pr.repo), &pr.source_branch, 1),
-            || ado.threads(pr),
-        );
-        let check = validation?.pop().or(branch?.pop());
-        Ok((check, threads?.iter().filter(|t| t.unresolved).count()))
-    };
-    let looked: Vec<_> =
-        prs.chunks(AT_ONCE).flat_map(|some| par::map(some, |(pr, _)| look(pr))).collect::<Result<_>>()?;
-    Ok(prs
-        .into_iter()
-        .zip(looked)
-        .map(|((pr, review), (check, open_threads))| ListedPullRequest { pr, check, open_threads, review })
-        .collect())
-}
-
 /// A reviewer's vote, colored by which way it went.
 fn voted(s: Style, vote: &str) -> String {
     match vote {
@@ -210,13 +169,7 @@ impl List {
             return Ok(Output::none().web(true, &my_pull_requests_url(&scope.org_url)));
         }
         let ado = app.ado(&scope.org_url);
-        let found = if self.review {
-            let asked = ado.pull_requests_to_review(&scope.project, &self.state)?;
-            asked.into_iter().map(|(pr, review)| (pr, Some(review))).collect()
-        } else {
-            ado.my_pull_requests(&scope.project, &self.state)?.into_iter().map(|pr| (pr, None)).collect()
-        };
-        let prs = listed(&ado, found)?;
+        let prs = ado.list_pull_requests(&scope.project, &self.state, self.review)?;
         let s = app.style;
         let text = if prs.is_empty() {
             let which = if self.state == "all" { String::new() } else { format!("{} ", self.state) };
@@ -323,9 +276,9 @@ pub struct PullRequestDetail {
 }
 
 pub fn pull_request_detail(pr: PullRequest, ado: &AdoClient) -> Result<PullRequestDetail> {
-    let (work_items, threads) = par::join(|| ado.pull_request_work_items(&pr), || ado.placed_threads(&pr));
-    let work_items = work_items?.iter().map(WorkItem::to_ref).collect();
-    Ok(PullRequestDetail { work_items, threads: summarize_threads(threads?), pr })
+    use crate::ado::sections::Section::{Discussion, WorkItems};
+    let read = ado.read_pr(&pr, &[Discussion, WorkItems].into())?;
+    Ok(PullRequestDetail { work_items: read.work_items, threads: summarize_threads(read.threads), pr })
 }
 
 pub fn render_pull_request(d: &PullRequestDetail, s: Style, full: bool) -> String {
@@ -682,27 +635,40 @@ mod tests {
         assert!(posted(&bed).get("description").is_none());
     }
 
-    /// Signed in as `me-1`, with whatever pull requests are given. PR 9 failed validation and has one thread
-    /// open of two; nothing else has a validation run or a thread, and every branch's own run succeeded.
+    fn run_on(id: u64, repo: &str, branch: &str, result: u64) -> Value {
+        json!({"run": {"id":id, "repository":{"id":repo}, "sourceBranch":branch, "status":2, "result":result,
+                       "queueTime":format!("2026-01-01T00:00:{id:02}Z")}})
+    }
+
+    fn list_page(req: &Recorded, runs: Value) -> Value {
+        let props = &req.body["dataProviderContext"]["properties"];
+        let mut providers = json!({"ms.vss-build-web.runs-data-provider":{"runs":runs}});
+        if let Some(artifacts) = props["artifactIds"].as_array() {
+            let counts: Vec<_> = artifacts
+                .iter()
+                .rev()
+                .map(|a| {
+                    let id = &a["artifactId"];
+                    let count = u64::from(id == "vstfs:///Git/PullRequestId/p%2Fr%2F9");
+                    json!({"pullRequestArtifactId":id, "activeCommentsCount":count})
+                })
+                .collect();
+            providers["ms.vss-code-web.pullrequests-artifact-stats-data-provider"] =
+                json!({"TFS.VersionControl.PullRequestListArtifactStatsProvider.artifactStats":counts});
+        }
+        json!({"dataProviders": providers})
+    }
+
     fn mine(prs: Value) -> Route {
-        Box::new(move |r: &Recorded| {
-            let run =
-                |id: u64, result: &str| json!({ "value": [{ "id": id, "status": "completed", "result": result }] });
-            let said = |status: &str| json!({ "id": 1, "status": status, "comments": [{ "id": 1, "content": "fix" }] });
+        Box::new(move |r| {
             if r.path.ends_with("/connectionData") {
                 ok(json!({ "authenticatedUser": { "id": "me-1" } }))
-            } else if r.path.ends_with("/builds") {
-                match r.query("branchName").unwrap().as_str() {
-                    "refs/pull/9/merge" => ok(run(2, "failed")),
-                    "refs/heads/feature/x" => ok(run(1, "succeeded")),
-                    _ => ok(json!({ "value": [] })),
-                }
-            } else if r.path.ends_with("/pullRequests/9/threads") {
-                ok(json!({ "value": [said("active"), said("fixed")] }))
-            } else if r.path.ends_with("/threads") {
-                ok(json!({ "value": [] }))
-            } else {
+            } else if r.path.ends_with("/pullrequests") {
                 ok(json!({ "value": prs }))
+            } else if r.path.ends_with("/HierarchyQuery/project/p") {
+                ok(list_page(r, json!([run_on(2, "r", "refs/pull/9/merge", 8)])))
+            } else {
+                None
             }
         })
     }
@@ -713,13 +679,15 @@ mod tests {
 
     #[test]
     fn lists_only_the_pull_requests_you_opened_each_with_its_check_and_open_threads() {
-        let draft = rest_pr(8, json!({ "isDraft": true, "repository": { "name": "api" } }));
+        let draft = rest_pr(
+            8,
+            json!({ "isDraft": true, "repository": { "id":"api-id", "name":"api", "project":{"id":"p","name":"MyProject"} } }),
+        );
         let bed = Bed::new(mine(json!([rest_pr(9, json!({})), draft])));
         let listed = cli(bed.app(), &["pr", "list", "--json"]).json();
-        // A validation run wins; without one, the branch's own run is the check.
         let seen = |at: usize| (&listed[at]["id"], &listed[at]["check"]["result"], &listed[at]["openThreads"]);
         assert_eq!(seen(0), (&json!(9), &json!("failed"), &json!(1)));
-        assert_eq!(seen(1), (&json!(8), &json!("succeeded"), &json!(0)));
+        assert_eq!(seen(1), (&json!(8), &Value::Null, &json!(0)));
 
         let asked = asked_for_the_list(&bed);
         assert_eq!(asked.path, "/MyProject/_apis/git/pullrequests");
@@ -728,8 +696,36 @@ mod tests {
 
         let screen = cli(bed.app(), &["pr", "list"]).stdout;
         let row = |id: &str| screen.lines().find(|line| line.contains(id)).unwrap().to_string();
-        assert_eq!(row("#9"), "│ #9 │ PR 9  │ web  │ feature/x -> main │ active │ failed    │ 1            │");
-        assert_eq!(row("#8"), "│ #8 │ PR 8  │ api  │ feature/x -> main │ draft  │ succeeded │ 0            │");
+        assert_eq!(row("#9"), "│ #9 │ PR 9  │ web  │ feature/x -> main │ active │ failed │ 1            │");
+        assert_eq!(row("#8"), "│ #8 │ PR 8  │ api  │ feature/x -> main │ draft  │ none   │ 0            │");
+    }
+
+    #[test]
+    fn uses_the_first_validation_run_for_each_requested_ref() {
+        let search =
+            mine(json!([rest_pr(9, json!({"supportsIterations":true, "codeReviewId":45})), rest_pr(8, json!({}))]));
+        let bed = Bed::new(Box::new(move |r| {
+            if !r.path.ends_with("/HierarchyQuery/project/p") {
+                return search(r);
+            }
+            let props = &r.body["dataProviderContext"]["properties"];
+            assert_eq!(props["keywordFilter"], "refs/pull/9/merge,refs/pull/8/merge");
+            assert!(props["continuationToken"].is_null());
+            assert_eq!(props["artifactIds"][0]["discussionArtifactId"], "vstfs:///CodeReview/ReviewId/p%2F45");
+            assert_eq!(props["artifactIds"][1]["discussionArtifactId"], "vstfs:///CodeReview/CodeReviewId/p%2F8");
+            ok(list_page(
+                r,
+                json!([
+                    run_on(2, "r", "refs/pull/9/merge", 8),
+                    run_on(1, "r", "refs/pull/9/merge", 2),
+                    run_on(5, "r", "refs/pull/8/merge", 2),
+                    run_on(7, "other", "refs/pull/8/merge", 8)
+                ]),
+            ))
+        }));
+        let rows = cli(bed.app(), &["pr", "list", "--json"]).json();
+        assert_eq!((&rows[0]["check"]["id"], &rows[1]["check"]["id"]), (&json!(2), &json!(5)));
+        assert_eq!(bed.ado.requests().len(), 3); // Identity, search and one enrichment request.
     }
 
     #[test]
@@ -752,21 +748,37 @@ mod tests {
         assert!(bed.ado.requests().is_empty());
     }
 
-    /// Signed in as `me-1`, who is in the team Payments. Each reviewer is answered with their own pull requests.
+    /// Signed in as `me-1`, who is in the team Payments.
     fn asked(by_name: Value, through_the_team: Value) -> Route {
+        let other = mine(json!([]));
         Box::new(move |r: &Recorded| {
-            if r.path.ends_with("/connectionData") {
-                ok(json!({ "authenticatedUser": { "id": "me-1" } }))
-            } else if r.path.ends_with("/_apis/teams") {
-                ok(json!({ "value": [{ "id": "team-1", "name": "Payments" }] }))
-            } else if r.path.ends_with("/pullrequests") {
-                match r.query("searchCriteria.reviewerId").as_deref() {
-                    Some("me-1") => ok(json!({ "value": by_name })),
-                    Some("team-1") => ok(json!({ "value": through_the_team })),
-                    _ => None,
+            if r.path.ends_with("/HierarchyQuery/project/MyProject") {
+                assert_eq!(r.method, "POST");
+                let props = &r.body["dataProviderContext"]["properties"];
+                assert_eq!(props["queryIds"], json!(["AssignedToMe", "AssignedToMyTeams"]));
+                assert_eq!(props["sourcePage"]["routeValues"]["project"], "MyProject");
+                assert_eq!(props["top"], 100);
+                let mut prs = json!({});
+                let mut query_results = json!({});
+                for (section, list) in [("AssignedToMe", &by_name), ("AssignedToMyTeams", &through_the_team)] {
+                    let mut ids = Vec::new();
+                    for pr in list.as_array()? {
+                        let id = pr["pullRequestId"].as_u64()?;
+                        ids.push(id);
+                        prs[id.to_string()] = pr.clone();
+                    }
+                    query_results[section] = json!({"ids":ids});
                 }
+                ok(json!({"dataProviders": {
+                    "ms.vss-code-web.prs-list-data-provider": {
+                        "queries": [{"id":"AssignedToMe", "readonly":true, "status":1, "reviewerIds":["me-1"]},
+                                    {"id":"AssignedToMyTeams", "status":1, "myTeamsAsReviewer":true}],
+                        "queryResults":query_results, "pullRequests": prs
+                    },
+                    "ms.vss-dashboards-web.my-team-list-data-provider": [{"value":{"id":"TEAM-1","name":"Payments"}}]
+                }}))
             } else {
-                ok(json!({ "value": [] }))
+                other(r)
             }
         })
     }
@@ -776,7 +788,10 @@ mod tests {
         let team = json!({ "id": "team-1", "vote": 0, "isContainer": true });
         // Azure DevOps writes the same id in either case.
         let approved = rest_pr(9, json!({ "reviewers": [team, { "id": "ME-1", "vote": 10 }] }));
-        let theirs = rest_pr(12, json!({ "createdBy": { "id": "jo-2", "displayName": "Jo" }, "reviewers": [team] }));
+        let theirs = rest_pr(
+            12,
+            json!({ "createdBy": { "id": "jo-2", "displayName": "Jo" }, "reviewers": [{"id":"other-team","isContainer":true},team] }),
+        );
         let own = rest_pr(11, json!({ "createdBy": { "id": "me-1", "displayName": "Me" }, "reviewers": [team] }));
         let bed = Bed::new(asked(json!([approved]), json!([theirs, own, approved])));
 
@@ -789,57 +804,66 @@ mod tests {
             [(&json!(12), &stands("none", json!("Payments"))), (&json!(9), &stands("approved", json!(null)))]
         );
 
-        let lists: Vec<Recorded> =
-            bed.ado.requests().into_iter().filter(|r| r.path.ends_with("/pullrequests")).collect();
-        assert!(lists.iter().all(|r| r.path == "/MyProject/_apis/git/pullrequests"));
-        assert!(lists.iter().all(|r| r.query("searchCriteria.status").as_deref() == Some("active")));
-        assert!(lists.iter().all(|r| r.query("searchCriteria.creatorId").is_none()));
-        let teams = bed.ado.requests().into_iter().find(|r| r.path.ends_with("/_apis/teams")).unwrap();
-        assert_eq!((teams.path.as_str(), teams.query("$mine").as_deref()), ("/_apis/teams", Some("true")));
+        let calls = bed.ado.requests();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].path, "/_apis/Contribution/HierarchyQuery/project/MyProject");
+        assert_eq!(calls[1].body["contributionIds"].as_array().unwrap().len(), 2);
 
         let screen = cli(bed.app(), &["pr", "list", "--review"]).stdout;
         let row = |id: &str| screen.lines().find(|line| line.contains(id)).unwrap().to_string();
-        assert!(screen.contains("│ Author │ State  │ Check │ Open threads │ Your vote │"), "{screen}");
-        assert_eq!(row("#12"), "│ #12 │ PR 12 │ web  │ Jo     │ active │ none  │ 0            │ none      │");
-        assert_eq!(row("#9"), "│ #9  │ PR 9  │ web  │ Jane   │ active │ none  │ 0            │ approved  │");
+        assert!(screen.contains("│ Author │ State  │ Check  │ Open threads │ Your vote │"), "{screen}");
+        assert_eq!(row("#12"), "│ #12 │ PR 12 │ web  │ Jo     │ active │ none   │ 0            │ none      │");
+        assert_eq!(row("#9"), "│ #9  │ PR 9  │ web  │ Jane   │ active │ failed │ 1            │ approved  │");
+    }
+
+    #[test]
+    fn an_active_review_list_with_validation_takes_two_requests() {
+        let pr = rest_pr(9, json!({"createdBy":{"id":"me-1"}, "reviewers":[{"id":"ME-1","vote":10}]}));
+        // The portal can put a PR shared by both sections in just one of them.
+        let bed = Bed::new(asked(json!([]), json!([pr])));
+        let rows = cli(bed.app(), &["pr", "list", "--review", "--json"]).json();
+        assert_eq!(rows[0]["review"], json!({"vote":"approved","team":null}));
+        assert_eq!(bed.ado.requests().len(), 2);
     }
 
     #[test]
     fn says_when_nothing_asks_you_for_a_review_and_leaves_the_plain_list_as_it_was() {
         let bed = Bed::new(asked(json!([]), json!([])));
-        let res = cli(bed.app(), &["pr", "list", "--review", "--state", "all"]);
-        assert_eq!((res.code, res.stdout.as_str()), (0, "No pull requests in MyProject ask you for a review.\n"));
-        assert_eq!(cli(bed.app(), &["pr", "list", "--review", "--json"]).json(), json!([]));
+        let res = cli(bed.app(), &["pr", "list", "--review"]);
+        assert_eq!(
+            (res.code, res.stdout.as_str()),
+            (0, "No active pull requests in MyProject ask you for a review.\n")
+        );
 
         // Without the flag nothing about a review is asked for or printed.
         let bed = Bed::new(mine(json!([rest_pr(9, json!({}))])));
         assert!(cli(bed.app(), &["pr", "list", "--json"]).json()[0].get("review").is_none());
         assert!(bed.ado.requests().iter().all(|r| !r.path.ends_with("/_apis/teams")));
+        assert_eq!(bed.ado.requests().len(), 3); // Identity, PR search and one enrichment request.
     }
 
     /// PR 9, pushed to twice. Thread 4 was written on lines 16-17 of the first push, which the second moved
-    /// down by two; thread 5 is on a line of the old file. Without `pushes`, the pushes can't be listed.
-    fn commented(pushes: bool) -> Route {
+    /// down by two; thread 5 is on a line of the old file.
+    fn commented() -> Route {
         Box::new(move |r: &Recorded| {
             let on = |side: &str, first: u64, last: u64| json!({ "filePath": "/src/a.ts", format!("{side}FileStart"): { "line": first, "offset": 1 }, format!("{side}FileEnd"): { "line": last, "offset": 4 } });
             let thread = |id: u64, at: Value| json!({ "id": id, "status": "active", "threadContext": at, "comments": [{ "id": 1, "content": "why" }] });
-            let moved = if r.query("$iteration").as_deref() == Some("2") { 2 } else { 0 };
-            let written_first = thread(4, on("right", 16 + moved, 17 + moved));
-            if r.path.ends_with("/iterations") {
-                pushes.then(|| crate::testing::json_response(200, json!({ "value": [{ "id": 1 }, { "id": 2 }] })))
-            } else if r.path.ends_with("/threads/4") {
+            let written_first = thread(4, on("right", 18, 19));
+            if r.path.ends_with("/threads/4") {
+                assert_eq!(r.query("$iteration").as_deref(), Some("2"));
                 ok(written_first)
-            } else if r.path.ends_with("/threads") {
+            } else if r.path.contains("/HierarchyQuery/") {
                 // Thread 6's lines are gone, which Azure DevOps says as line 0; thread 7 is about a whole file.
                 let gone = thread(6, on("right", 0, 0));
                 let whole = thread(7, json!({ "filePath": "/src/a.ts" }));
                 // Thread 8 is on a file the second push deleted again, which Azure DevOps leaves where it was.
                 let mut left = thread(8, on("right", 2, 2));
                 left["threadContext"]["filePath"] = json!("/src/dropped.ts");
-                ok(json!({ "value": [written_first, thread(5, on("left", 3, 3)), gone, whole, left] }))
-            } else if r.path.ends_with("/iterations/2/changes") {
-                ok(
-                    json!({ "changeEntries": [{ "changeType": "edit", "item": { "path": "/src/a.ts", "objectId": "b", "originalObjectId": "a" } }] }),
+                crate::testing::review_page(
+                    2,
+                    "head",
+                    json!([{"changeType":"edit","item":{"path":"/src/a.ts","objectId":"b","originalObjectId":"a"}}]),
+                    json!([written_first, thread(5, on("left", 3, 3)), gone, whole, left]),
                 )
             } else if r.path.ends_with("/workitems") {
                 ok(json!({ "value": [] }))
@@ -851,17 +875,11 @@ mod tests {
 
     #[test]
     fn a_thread_is_placed_where_it_is_after_the_latest_push_on_the_side_it_is_on() {
-        let bed = Bed::new(commented(true));
+        let bed = Bed::new(commented());
         let view = cli(bed.app(), &["pr", "view", "9", "--json"]).json();
         let place = |line: u64, end: u64, side: &str| json!({ "file": "/src/a.ts", "line": line, "endLine": end, "side": side, "outdated": false });
         assert_eq!(view["threads"][0]["location"], place(18, 19, "new"));
         assert_eq!(view["threads"][1]["location"], place(3, 3, "old"));
-        let asked = bed.ado.requests().into_iter().find(|r| r.path.ends_with("/threads")).unwrap();
-        assert_eq!(
-            (asked.query("$iteration").as_deref(), asked.query("$baseIteration").as_deref()),
-            (Some("2"), Some("0"))
-        );
-
         // On no line: because its lines went, or because it never was on one.
         let nowhere = |side: Value, outdated: bool| json!({ "file": "/src/a.ts", "line": null, "endLine": null, "side": side, "outdated": outdated });
         assert_eq!(view["threads"][2]["location"], nowhere(json!("new"), true));
@@ -879,12 +897,15 @@ mod tests {
         );
         assert_eq!(cli(bed.app(), &["pr", "thread", "9", "4", "--json"]).json()["location"], place(18, 19, "new"));
 
-        // Where the pushes can't be listed, a thread is still read: where it was written.
-        let bed = Bed::new(commented(false));
-        assert_eq!(
-            cli(bed.app(), &["pr", "view", "9", "--json"]).json()["threads"][0]["location"],
-            place(16, 17, "new")
-        );
+        let bed = Bed::new(Box::new(|r| {
+            if r.path.contains("/HierarchyQuery/") {
+                return Some(crate::testing::json_response(403, json!({"message":"denied"})));
+            }
+            commented()(r)
+        }));
+        let failed = cli(bed.app(), &["pr", "view", "9"]);
+        assert!(failed.stderr.contains("denied"), "{}", failed.stderr);
+        assert!(bed.ado.requests().iter().all(|r| !r.path.ends_with("/threads") && !r.path.ends_with("/iterations")));
     }
 
     #[test]

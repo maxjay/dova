@@ -104,8 +104,10 @@ pub fn to_pull_request(raw: &Value, org_url: &str, project: &str, repo: &str) ->
     let repo = raw["repository"]["name"].as_str().unwrap_or(repo).to_string();
     PullRequest {
         id,
+        project_id: text(&raw["repository"]["project"]["id"]),
+        repo_id: text(&raw["repository"]["id"]),
         title: raw["title"].as_str().unwrap_or("").to_string(),
-        status: raw["status"].as_str().unwrap_or("unknown").to_string(),
+        status: enum_name(&raw["status"], &["notSet", "active", "abandoned", "completed"], "unknown").to_owned(),
         is_draft: raw["isDraft"].as_bool().unwrap_or(false),
         author: raw["createdBy"]["displayName"].as_str().unwrap_or("unknown").to_string(),
         description: raw["description"].as_str().unwrap_or("").to_string(),
@@ -122,10 +124,13 @@ pub fn same_identity(a: &Value, b: &str) -> bool {
     a.as_str().is_some_and(|a| a.eq_ignore_ascii_case(b))
 }
 
+pub fn reviewer<'a>(pr: &'a Value, id: &str) -> Option<&'a Value> {
+    items(&pr["reviewers"]).iter().find(|r| same_identity(&r["id"], id))
+}
+
 /// What `who` voted on a pull request, in the words Azure DevOps' own pages use.
 pub fn vote_of(raw: &Value, who: &str) -> String {
-    let theirs = items(&raw["reviewers"]).iter().find(|r| same_identity(&r["id"], who));
-    match theirs.and_then(|r| r["vote"].as_i64()).unwrap_or(0) {
+    match reviewer(raw, who).and_then(|r| r["vote"].as_i64()).unwrap_or(0) {
         10 => "approved",
         5 => "approved with suggestions",
         -5 => "waiting for author",
@@ -141,28 +146,38 @@ fn items(list: &Value) -> &[Value] {
 
 /// Threads people wrote in, not the ones made only of system notes ("X pushed 2 commits").
 pub fn is_discussion(raw: &Value) -> bool {
-    let written = |c: &Value| c["commentType"] != "system" && !c["content"].as_str().unwrap_or("").trim().is_empty();
+    let written = |c: &Value| comment_type(c) != "system" && !c["content"].as_str().unwrap_or("").trim().is_empty();
     raw["isDeleted"] != true && items(&raw["comments"]).iter().any(written)
+}
+
+/// REST names the enums that the web provider returns as numbers.
+fn enum_name<'a>(value: &'a Value, names: &[&'a str], default: &'a str) -> &'a str {
+    value.as_str().or_else(|| names.get(usize::try_from(value.as_u64()?).ok()?).copied()).unwrap_or(default)
+}
+
+fn comment_type(raw: &Value) -> &str {
+    enum_name(&raw["commentType"], &["unknown", "text", "codeChange", "system"], "text")
 }
 
 /// One file of a pull request's changes; None for anything that isn't a file.
 pub fn to_change(raw: &Value) -> Option<Change> {
     let item = &raw["item"];
-    if item["isFolder"] == true || item["gitObjectType"] == "tree" {
+    if item["isFolder"] == true || item["gitObjectType"] == "tree" || item["gitObjectType"] == 2 {
         return None;
     }
     let text = |value: &Value| value.as_str().map(str::to_string);
     let kinds = raw["changeType"].as_str().unwrap_or("");
+    let bits = raw["changeType"].as_u64().unwrap_or(0);
     let (path, blob) = (text(&item["path"]), text(&item["objectId"]));
     // Only a file that moved, or went, has its old path spelled out.
     let moved = text(&raw["originalPath"]);
-    Some(if kinds.contains("delete") {
+    Some(if kinds.contains("delete") || bits & 16 != 0 {
         let old_path = moved.or(path);
         Change { kind: "deleted", path: None, old_path, blob: None, old_blob: text(&item["originalObjectId"]).or(blob) }
-    } else if kinds.contains("add") {
+    } else if kinds.contains("add") || bits & 1 != 0 {
         Change { kind: "added", path, old_path: None, blob, old_blob: None }
     } else {
-        let kind = if kinds.contains("rename") { "renamed" } else { "edited" };
+        let kind = if kinds.contains("rename") || bits & 8 != 0 { "renamed" } else { "edited" };
         Change { kind, old_path: moved.or_else(|| path.clone()), path, blob, old_blob: text(&item["originalObjectId"]) }
     })
 }
@@ -174,7 +189,12 @@ pub fn to_thread(raw: &Value) -> Thread {
     // Line 0 is where Azure DevOps puts a thread whose lines a later push removed.
     let line = |end: &str| context[format!("{}File{end}", side?)]["line"].as_u64().filter(|line| *line > 0);
     let first = line("Start");
-    let status = raw["status"].as_str().unwrap_or("unknown").to_string();
+    let status = enum_name(
+        &raw["status"],
+        &["unknown", "active", "fixed", "wontFix", "closed", "byDesign", "pending"],
+        "unknown",
+    )
+    .to_string();
     Thread {
         id: raw["id"].as_u64().unwrap_or(0),
         unresolved: status == "active" || status == "pending",
@@ -194,7 +214,7 @@ pub fn to_thread(raw: &Value) -> Thread {
                 author_id: c["author"]["id"].as_str().map(str::to_string),
                 published_at: c["publishedDate"].as_str().map(to_the_second),
                 text: c["content"].as_str().unwrap_or("").to_string(),
-                kind: c["commentType"].as_str().unwrap_or("text").to_string(),
+                kind: comment_type(c).to_string(),
             })
             .collect(),
     }
@@ -215,11 +235,27 @@ pub fn to_work_item_comment(raw: &Value) -> Comment {
 pub fn to_run(raw: &Value, org_url: &str, project: &str) -> Run {
     let id = raw["id"].as_u64().unwrap_or(0);
     let numbered = || format!("#{}", raw["buildNumber"].as_str().map_or(id.to_string(), str::to_string));
+    let status = match raw["status"].as_u64() {
+        Some(0) => "none",
+        Some(1) => "inProgress",
+        Some(2) => "completed",
+        Some(4) => "cancelling",
+        Some(8) => "postponed",
+        Some(32) => "notStarted",
+        _ => raw["status"].as_str().unwrap_or("unknown"),
+    };
+    let result = match raw["result"].as_u64() {
+        Some(2) => Some("succeeded"),
+        Some(4) => Some("partiallySucceeded"),
+        Some(8) => Some("failed"),
+        Some(32) => Some("canceled"),
+        _ => raw["result"].as_str(),
+    };
     Run {
         id,
         name: raw["definition"]["name"].as_str().map_or_else(numbered, str::to_string),
-        status: raw["status"].as_str().unwrap_or("unknown").to_string(),
-        result: raw["result"].as_str().map(str::to_string),
+        status: status.to_owned(),
+        result: result.map(str::to_owned),
         queued_at: raw["queueTime"].as_str().map(to_the_second),
         source_branch: raw["sourceBranch"].as_str().map(str::to_string),
         url: urls::run_url(org_url, project, id),

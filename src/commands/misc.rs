@@ -41,7 +41,7 @@ impl Api {
             full if full.starts_with("https://") => (app.ado(""), full.to_string()),
             path => match path.strip_prefix('/') {
                 Some(org_relative) => {
-                    let ado = app.ado(&app.org_url()?);
+                    let ado = app.ado(&app.org_url(None)?);
                     let url = ado.url(org_relative, &[])?;
                     (ado, url)
                 }
@@ -88,10 +88,10 @@ impl Auth {
     pub fn run(&self, app: &App) -> Result<Output> {
         let status = app.transport.auth_status()?;
         let mut org = Value::Null;
-        if let (true, Ok(scope)) = (status.signed_in, app.scope()) {
-            org = match app.ado(&scope.org_url).me() {
-                Ok(account) => json!({ "url": scope.org_url, "ok": true, "as": account }),
-                Err(err) => json!({ "url": scope.org_url, "ok": false, "error": err.message }),
+        if let (true, Ok(url)) = (status.signed_in, app.org_url(None)) {
+            org = match app.ado(&url).me() {
+                Ok(account) => json!({ "url": url, "ok": true, "as": account }),
+                Err(err) => json!({ "url": url, "ok": false, "error": err.message }),
             };
         }
         let s = app.style;
