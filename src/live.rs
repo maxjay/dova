@@ -1,5 +1,5 @@
 use crate::ado::{
-    client::{review::Placement, AdoClient},
+    client::AdoClient,
     sections::{Resource, Sections},
     signalr::Hub,
     types::PullRequest,
@@ -37,7 +37,7 @@ struct Target {
 }
 
 enum Item {
-    Pr { pr: Box<PullRequest>, placement: Mutex<Placement> },
+    Pr(Box<PullRequest>),
     Wi { id: u64, project: Mutex<Option<String>> },
 }
 
@@ -57,7 +57,7 @@ impl Target {
                 if !pr.repo_id.as_ref().is_some_and(|s| config::valid_id(s)) {
                     return Err(Error::external("Missing PR repository GUID."));
                 }
-                (Item::Pr { pr: Box::new(pr), placement: Mutex::default() }, path)
+                (Item::Pr(Box::new(pr)), path)
             }
             Resource::Wi => (Item::Wi { id, project: Mutex::default() }, "/signalr".into()),
         };
@@ -80,7 +80,7 @@ impl Target {
 
     fn resource(&self) -> Resource {
         match self.item {
-            Item::Pr { .. } => Resource::Pr,
+            Item::Pr(_) => Resource::Pr,
             Item::Wi { .. } => Resource::Wi,
         }
     }
@@ -88,8 +88,10 @@ impl Target {
     fn read(&self, sections: &Sections) -> Result<Value> {
         let ado = AdoClient::new(self.transport.as_ref(), &self.org_url);
         match &self.item {
-            Item::Pr { pr, placement } => ado.read_sections(pr, sections, &mut placement.lock().unwrap()),
-            Item::Wi { id, project } => ado.ticket_sections(*id, sections, &mut project.lock().unwrap()),
+            Item::Pr(pr) => Ok(ado.read_pr(pr, sections)?.snapshot(sections)),
+            Item::Wi { id, project } => {
+                Ok(ado.read_ticket(*id, sections, &mut project.lock().unwrap())?.snapshot(&self.org_url, sections))
+            }
         }
     }
 
@@ -99,7 +101,7 @@ impl Target {
             .await
             .map_err(|_| Error::external("Could not load Azure credentials."))??;
         let (id, args) = match &self.item {
-            Item::Pr { pr, .. } => (pr.id, json!([pr.id, pr.repo_id])),
+            Item::Pr(pr) => (pr.id, json!([pr.id, pr.repo_id])),
             Item::Wi { id, .. } => (*id, json!([id])),
         };
         let connect = |args, bearer: String| async move {

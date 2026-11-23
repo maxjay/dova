@@ -289,10 +289,9 @@ mod tests {
                     Some(bytes_response(b"not a picture"))
                 } else if r.path.contains("/attachments/") {
                     None
-                } else if r.path.ends_with("/threads")
-                    || r.path.ends_with("/workitems")
-                    || r.path.ends_with("/iterations")
-                {
+                } else if r.path.contains("/HierarchyQuery/") {
+                    crate::testing::review_page(1, "head", json!([]), json!([]))
+                } else if r.path.ends_with("/workitems") {
                     ok(json!({ "value": [] }))
                 } else {
                     ok(rest_pr(9, json!({ "description": description })))

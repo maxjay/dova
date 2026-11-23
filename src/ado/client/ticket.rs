@@ -1,92 +1,102 @@
 use super::{AdoClient, COMMENTS};
 use crate::ado::map::to_work_item;
 use crate::ado::sections::{Section, Sections};
+use crate::ado::types::WorkItemRef;
 use crate::error::{Error, Result};
 use crate::{par, urls};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 
-impl AdoClient<'_> {
-    pub fn ticket(&self, id: u64, relations: bool) -> Result<Value> {
-        let expand = if relations { "relations" } else { "none" };
-        self.get(&format!("_apis/wit/workitems/{id}"), &[("$expand", expand)]).map_err(|err| {
-            if err.kind == crate::error::Kind::NotFound {
-                Error::not_found(format!("Work item #{id} was not found."))
-            } else {
-                err
+pub struct TicketRead {
+    pub item: Value,
+    pub relations: Vec<Value>,
+    pub linked: HashMap<u64, WorkItemRef>,
+    pub comments: Vec<Value>,
+}
+
+impl TicketRead {
+    pub fn snapshot(mut self, org: &str, sections: &Sections) -> Value {
+        let mut result = json!({});
+        if sections.contains(&Section::Details) {
+            let mut details = json!(to_work_item(&self.item, org));
+            details["revision"] = self.item["rev"].take();
+            details["fields"] = self.item["fields"].take();
+            result["details"] = details;
+        }
+        if sections.contains(&Section::Relations) {
+            for link in &mut self.relations {
+                if let Some(id) = link["workItemId"].as_u64() {
+                    link["workItem"] = json!(self.linked.get(&id));
+                }
             }
+            result["relations"] = Value::Array(self.relations);
+        }
+        if sections.contains(&Section::Comments) {
+            result["comments"] = json!(self.comments);
+        }
+        result
+    }
+}
+
+impl AdoClient<'_> {
+    pub fn read_ticket(&self, id: u64, sections: &Sections, project: &mut Option<String>) -> Result<TicketRead> {
+        use Section::*;
+        let links = sections.contains(&Relations);
+        let mut item = Value::Null;
+        let mut ids = Vec::new();
+        let mut relations: Vec<Value> = Vec::new();
+        if sections.contains(&Details) || links || project.is_none() {
+            let path = format!("_apis/wit/workitems/{id}");
+            let expand = if links { "relations" } else { "none" };
+            item = self.get(&path, &[("$expand", expand)]).map_err(|err| {
+                if err.kind == crate::error::Kind::NotFound {
+                    Error::not_found(format!("Work item #{id} was not found."))
+                } else {
+                    err
+                }
+            })?;
+            if item["id"].as_u64() != Some(id) || !item["rev"].is_u64() {
+                return Err(Error::external("Invalid work item returned by Azure DevOps."));
+            }
+            let name = item["fields"]["System.TeamProject"]
+                .as_str()
+                .ok_or_else(|| Error::external("Missing work item project."))?;
+            *project = Some(name.to_owned());
+            if links {
+                ids.extend(item["fields"]["System.Parent"].as_u64());
+                if let Some(raw) = item.get_mut("relations").filter(|v| !v.is_null()) {
+                    relations = serde_json::from_value(raw.take())
+                        .map_err(|_| Error::external("Invalid work item relations."))?;
+                }
+                for link in &mut relations {
+                    if matches!(link["rel"].as_str(), Some("Hyperlink" | "ArtifactLink" | "AttachedFile")) {
+                        continue;
+                    }
+                    if let Some(id) = link["url"].as_str().and_then(|url| urls::linked_work_item(&self.org_url, url)) {
+                        link["workItemId"] = json!(id);
+                        ids.push(id);
+                    }
+                }
+            }
+        }
+        let (linked, comments) = par::join(
+            || self.work_item_refs(&ids),
+            || match project.as_deref() {
+                Some(name) if sections.contains(&Comments) && item["fields"]["System.CommentCount"] != 0 => {
+                    self.ticket_comments(name, id)
+                }
+                _ => Ok(Vec::new()),
+            },
+        );
+        Ok(TicketRead {
+            item,
+            relations,
+            linked: linked?.into_iter().map(|w| (w.id, w)).collect(),
+            comments: comments?,
         })
     }
 
-    /// Comments require the current project. A work item can move between projects.
-    pub fn ticket_sections(&self, id: u64, sections: &Sections, project: &mut Option<String>) -> Result<Value> {
-        use Section::*;
-        let mut result = json!({});
-        let mut relations = Vec::new();
-        let mut comment_count = None;
-        if sections.contains(&Details) || sections.contains(&Relations) || project.is_none() {
-            let mut raw = self.ticket(id, sections.contains(&Relations))?;
-            let project_name = raw["fields"]["System.TeamProject"]
-                .as_str()
-                .ok_or_else(|| Error::external("Missing project on the Azure work item."))?;
-            if raw["id"].as_u64() != Some(id) || raw["rev"].as_u64().is_none() {
-                return Err(Error::external("Invalid work item returned by Azure DevOps."));
-            }
-            *project = Some(project_name.to_owned());
-            comment_count = raw["fields"]["System.CommentCount"].as_u64();
-            if sections.contains(&Details) {
-                let mut details = json!(to_work_item(&raw, &self.org_url));
-                details["revision"] = raw["rev"].take();
-                details["fields"] = raw["fields"].take();
-                result["details"] = details;
-            }
-            if let Some(value) = raw.get_mut("relations").filter(|v| !v.is_null()) {
-                relations = serde_json::from_value(value.take())
-                    .map_err(|_| Error::external("Invalid work item relations."))?;
-            }
-        }
-        let project = project.as_deref().ok_or_else(|| Error::external("Missing work item project."))?;
-        let (links, comments) = par::join(
-            || self.ticket_relations(relations),
-            || {
-                if sections.contains(&Comments) && comment_count != Some(0) {
-                    self.ticket_comments(project, id)
-                } else {
-                    Ok(Vec::new())
-                }
-            },
-        );
-        if sections.contains(&Relations) {
-            result["relations"] = json!(links?);
-        }
-        if sections.contains(&Comments) {
-            result["comments"] = json!(comments?);
-        }
-        Ok(result)
-    }
-
-    fn ticket_relations(&self, mut relations: Vec<Value>) -> Result<Vec<Value>> {
-        let ids: Vec<_> = relations
-            .iter()
-            .map(|r| {
-                if matches!(r["rel"].as_str(), Some("Hyperlink" | "ArtifactLink" | "AttachedFile")) {
-                    return None;
-                }
-                urls::linked_work_item(&self.org_url, r["url"].as_str()?)
-            })
-            .collect();
-        let tickets = self.work_item_refs(&ids.iter().flatten().copied().collect::<Vec<_>>())?;
-        let by_id: HashMap<_, _> = tickets.into_iter().map(|w| (w.id, w)).collect();
-        for (link, id) in relations.iter_mut().zip(ids) {
-            if let Some(id) = id {
-                link["workItemId"] = json!(id);
-                link["workItem"] = json!(by_id.get(&id));
-            }
-        }
-        Ok(relations)
-    }
-
-    pub(super) fn ticket_comments(&self, project: &str, id: u64) -> Result<Vec<Value>> {
+    fn ticket_comments(&self, project: &str, id: u64) -> Result<Vec<Value>> {
         let path = format!("{}/_apis/wit/workItems/{id}/comments", urls::enc(project));
         let mut comments = Vec::new();
         let mut token = String::new();
@@ -146,7 +156,8 @@ mod tests {
         }));
         let client = AdoClient::new(&ado, "https://dev.azure.com/acme");
         let mut project = None;
-        let snap = client.ticket_sections(3, &Resource::Wi.sections(), &mut project).unwrap();
+        let all = Resource::Wi.sections();
+        let snap = client.read_ticket(3, &all, &mut project).unwrap().snapshot(&client.org_url, &all);
         assert_eq!(snap["details"]["fields"]["Custom.Field"], "abc");
         assert_eq!(snap["details"]["revision"], 2);
         assert_eq!(snap["relations"][0]["workItem"]["state"], "Active");
@@ -154,7 +165,8 @@ mod tests {
         assert!(snap["relations"][2]["workItemId"].is_null());
         assert_eq!(snap["comments"][1]["reactions"][0]["count"], 1);
         let before = ado.requests().len();
-        let only = client.ticket_sections(3, &[Section::Comments].into(), &mut project).unwrap();
+        let comments = [Section::Comments].into();
+        let only = client.read_ticket(3, &comments, &mut project).unwrap().snapshot(&client.org_url, &comments);
         assert_eq!(only, json!({"comments":snap["comments"]}));
         assert_eq!(ado.requests().len() - before, 2);
     }

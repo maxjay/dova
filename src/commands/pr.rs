@@ -12,7 +12,6 @@ use crate::app::App;
 use crate::cli::Output;
 use crate::error::{Error, Result};
 use crate::images::Illustrated;
-use crate::par;
 use crate::text::{table, truncate, Style};
 use crate::urls::{my_pull_requests_url, parse_id, parse_pull_request_link};
 
@@ -277,8 +276,9 @@ pub struct PullRequestDetail {
 }
 
 pub fn pull_request_detail(pr: PullRequest, ado: &AdoClient) -> Result<PullRequestDetail> {
-    let (work_items, threads) = par::join(|| ado.pull_request_work_item_refs(&pr), || ado.review_threads(&pr));
-    Ok(PullRequestDetail { work_items: work_items?, threads: summarize_threads(threads?), pr })
+    use crate::ado::sections::Section::{Discussion, WorkItems};
+    let read = ado.read_pr(&pr, &[Discussion, WorkItems].into())?;
+    Ok(PullRequestDetail { work_items: read.work_items, threads: summarize_threads(read.threads), pr })
 }
 
 pub fn render_pull_request(d: &PullRequestDetail, s: Style, full: bool) -> String {
@@ -909,28 +909,27 @@ mod tests {
     }
 
     /// PR 9, pushed to twice. Thread 4 was written on lines 16-17 of the first push, which the second moved
-    /// down by two; thread 5 is on a line of the old file. Without `pushes`, the pushes can't be listed.
-    fn commented(pushes: bool) -> Route {
+    /// down by two; thread 5 is on a line of the old file.
+    fn commented() -> Route {
         Box::new(move |r: &Recorded| {
             let on = |side: &str, first: u64, last: u64| json!({ "filePath": "/src/a.ts", format!("{side}FileStart"): { "line": first, "offset": 1 }, format!("{side}FileEnd"): { "line": last, "offset": 4 } });
             let thread = |id: u64, at: Value| json!({ "id": id, "status": "active", "threadContext": at, "comments": [{ "id": 1, "content": "why" }] });
-            let moved = if r.query("$iteration").as_deref() == Some("2") { 2 } else { 0 };
-            let written_first = thread(4, on("right", 16 + moved, 17 + moved));
-            if r.path.ends_with("/iterations") {
-                pushes.then(|| crate::testing::json_response(200, json!({ "value": [{ "id": 1 }, { "id": 2 }] })))
-            } else if r.path.ends_with("/threads/4") {
+            let written_first = thread(4, on("right", 18, 19));
+            if r.path.ends_with("/threads/4") {
+                assert_eq!(r.query("$iteration").as_deref(), Some("2"));
                 ok(written_first)
-            } else if r.path.ends_with("/threads") {
+            } else if r.path.contains("/HierarchyQuery/") {
                 // Thread 6's lines are gone, which Azure DevOps says as line 0; thread 7 is about a whole file.
                 let gone = thread(6, on("right", 0, 0));
                 let whole = thread(7, json!({ "filePath": "/src/a.ts" }));
                 // Thread 8 is on a file the second push deleted again, which Azure DevOps leaves where it was.
                 let mut left = thread(8, on("right", 2, 2));
                 left["threadContext"]["filePath"] = json!("/src/dropped.ts");
-                ok(json!({ "value": [written_first, thread(5, on("left", 3, 3)), gone, whole, left] }))
-            } else if r.path.ends_with("/iterations/2/changes") {
-                ok(
-                    json!({ "changeEntries": [{ "changeType": "edit", "item": { "path": "/src/a.ts", "objectId": "b", "originalObjectId": "a" } }] }),
+                crate::testing::review_page(
+                    2,
+                    "head",
+                    json!([{"changeType":"edit","item":{"path":"/src/a.ts","objectId":"b","originalObjectId":"a"}}]),
+                    json!([written_first, thread(5, on("left", 3, 3)), gone, whole, left]),
                 )
             } else if r.path.ends_with("/workitems") {
                 ok(json!({ "value": [] }))
@@ -942,17 +941,11 @@ mod tests {
 
     #[test]
     fn a_thread_is_placed_where_it_is_after_the_latest_push_on_the_side_it_is_on() {
-        let bed = Bed::new(commented(true));
+        let bed = Bed::new(commented());
         let view = cli(bed.app(), &["pr", "view", "9", "--json"]).json();
         let place = |line: u64, end: u64, side: &str| json!({ "file": "/src/a.ts", "line": line, "endLine": end, "side": side, "outdated": false });
         assert_eq!(view["threads"][0]["location"], place(18, 19, "new"));
         assert_eq!(view["threads"][1]["location"], place(3, 3, "old"));
-        let asked = bed.ado.requests().into_iter().find(|r| r.path.ends_with("/threads")).unwrap();
-        assert_eq!(
-            (asked.query("$iteration").as_deref(), asked.query("$baseIteration").as_deref()),
-            (Some("2"), Some("0"))
-        );
-
         // On no line: because its lines went, or because it never was on one.
         let nowhere = |side: Value, outdated: bool| json!({ "file": "/src/a.ts", "line": null, "endLine": null, "side": side, "outdated": outdated });
         assert_eq!(view["threads"][2]["location"], nowhere(json!("new"), true));
@@ -970,12 +963,15 @@ mod tests {
         );
         assert_eq!(cli(bed.app(), &["pr", "thread", "9", "4", "--json"]).json()["location"], place(18, 19, "new"));
 
-        // Where the pushes can't be listed, a thread is still read: where it was written.
-        let bed = Bed::new(commented(false));
-        assert_eq!(
-            cli(bed.app(), &["pr", "view", "9", "--json"]).json()["threads"][0]["location"],
-            place(16, 17, "new")
-        );
+        let bed = Bed::new(Box::new(|r| {
+            if r.path.contains("/HierarchyQuery/") {
+                return Some(crate::testing::json_response(403, json!({"message":"denied"})));
+            }
+            commented()(r)
+        }));
+        let failed = cli(bed.app(), &["pr", "view", "9"]);
+        assert!(failed.stderr.contains("denied"), "{}", failed.stderr);
+        assert!(bed.ado.requests().iter().all(|r| !r.path.ends_with("/threads") && !r.path.ends_with("/iterations")));
     }
 
     #[test]

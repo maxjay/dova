@@ -73,7 +73,7 @@ impl AdoClient<'_> {
                 "sourcePage": {"url": my_pull_requests_url(&self.org_url), "routeValues": {"project": project}},
                 "queryIds": [DIRECT, TEAMS], "top": MOST
             });
-            let data = self.contribution_data(project, &[REVIEW_LIST, MY_PROJECT_TEAMS], &props, true)?;
+            let data = self.contribution_data(project, &[REVIEW_LIST, MY_PROJECT_TEAMS], &props)?;
             if let Some(rows) = active_reviews(&data, project) {
                 return Ok(rows);
             }
@@ -147,11 +147,11 @@ impl AdoClient<'_> {
         });
         let mut data = PrListData::default();
         let mut result = if artifacts.is_empty() {
-            self.contribution_data(project_id, &[RUNS], &props, false)?
+            self.contribution_data(project_id, &[RUNS], &props)?
         } else {
             let mut first = props.clone();
             first["artifactIds"] = json!(artifacts);
-            let page = self.contribution_data(project_id, &[STATS, RUNS], &first, false)?;
+            let page = self.contribution_data(project_id, &[STATS, RUNS], &first)?;
             for stat in page[STATS][ARTIFACT_STATS].as_array().ok_or_else(|| missing("thread counts"))? {
                 let artifact = stat["pullRequestArtifactId"].as_str().ok_or_else(|| missing("PR artifact ID"))?;
                 let count = stat["activeCommentsCount"].as_u64().ok_or_else(|| missing("open thread count"))?;
@@ -181,7 +181,7 @@ impl AdoClient<'_> {
                 return Err(Error::external("Azure DevOps repeated the pipeline runs page."));
             }
             props["continuationToken"] = next.clone();
-            result = self.contribution_data(project_id, &[RUNS], &props, false)?;
+            result = self.contribution_data(project_id, &[RUNS], &props)?;
         }
     }
 }

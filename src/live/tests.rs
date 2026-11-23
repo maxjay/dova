@@ -88,7 +88,7 @@ fn replies_before_queued_changes_and_reconciles_after_a_disconnect() {
         transport: ado,
         org_url: "https://dev.azure.com/acme".into(),
         org: "acme".into(),
-        item: Item::Pr { pr: Box::new(pr), placement: Mutex::default() },
+        item: Item::Pr(Box::new(pr)),
         hub_url: base,
         host: "host".into(),
     });

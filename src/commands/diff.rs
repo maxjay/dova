@@ -373,7 +373,7 @@ fn parse_at(at: &str) -> Result<(String, u64, u64)> {
 /// the file has to be one it changes, and the lines have to be in it.
 pub fn anchor(ado: &AdoClient, pr: &PullRequest, at: &str, old: bool) -> Result<Anchor> {
     let (file, line, end_line) = parse_at(at)?;
-    let changes = ado.changes(pr, ado.latest_iteration(pr)?.id)?;
+    let changes = ado.review_files(pr)?.1;
     // What a renamed file was can be named by either of its paths.
     let on = |c: &&Change| match old {
         true => c.old_path.is_some() && (c.old_path.as_ref() == Some(&file) || c.path.as_ref() == Some(&file)),
@@ -426,33 +426,69 @@ mod tests {
     use super::*;
     use crate::testing::{bytes_response, cli, json_response, ok, rest_pr, Bed, Recorded, Route};
 
+    fn blobs(r: &Recorded, content: impl Fn(&str) -> Option<Vec<u8>>) -> Option<crate::ado::Response> {
+        use std::io::{Cursor, Write};
+        if let Some((_, id)) = r.path.split_once("/blobs/") {
+            return Some(match content(id) {
+                Some(bytes) => bytes_response(&bytes),
+                None => json_response(400, json!({"message":"TF401035: object does not exist"})),
+            });
+        }
+        let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        for id in r.body.as_array().unwrap().iter().map(|id| id.as_str().unwrap()) {
+            if let Some(bytes) = content(id) {
+                zip.start_file(id, zip::write::SimpleFileOptions::default()).unwrap();
+                zip.write_all(&bytes).unwrap();
+            }
+        }
+        Some(bytes_response(&zip.finish().unwrap().into_inner()))
+    }
+
     /// PR 9, pushed to twice. Its second push edits a file, adds one, renames one untouched, deletes one and adds a picture.
     fn changed() -> Route {
         Box::new(|r: &Recorded| {
-            let blob = |text: &str| Some(bytes_response(text.as_bytes()));
-            if r.path.ends_with("/iterations") {
-                let push = |id: u64, head: &str| json!({ "id": id, "sourceRefCommit": { "commitId": head }, "commonRefCommit": { "commitId": "base" } });
-                ok(json!({ "value": [push(1, "first"), push(2, "second")] }))
-            } else if r.path.ends_with("/iterations/2/changes") {
+            if r.path.contains("/HierarchyQuery/") {
                 let entry = |kind: &str, item: Value, was: Value| json!({ "changeType": kind, "item": item, "originalPath": was });
-                ok(json!({ "changeEntries": [
-                    entry("edit", json!({ "path": "/src/numbers.txt", "objectId": "new-numbers", "originalObjectId": "old-numbers" }), json!(null)),
-                    entry("add", json!({ "path": "/src/new.ts", "objectId": "new-ts" }), json!(null)),
-                    entry("rename", json!({ "path": "/docs/to.md", "objectId": "same", "originalObjectId": "same" }), json!("/docs/from.md")),
-                    entry("delete", json!({ "path": null, "originalObjectId": "doomed" }), json!("/docs/doomed.md")),
-                    entry("add", json!({ "path": "/shot.png", "objectId": "picture" }), json!(null)),
-                    entry("add", json!({ "path": "/src", "isFolder": true }), json!(null)),
-                ] }))
-            } else if r.path.ends_with("/blobs/old-numbers") {
-                blob("one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\n")
-            } else if r.path.ends_with("/blobs/new-numbers") {
-                blob("one\nTWO\nthree\nfour\nfive\nsix\nseven\neight\nnine")
-            } else if r.path.ends_with("/blobs/new-ts") {
-                blob("export const shiny = true;\n")
-            } else if r.path.ends_with("/blobs/same") {
-                blob("as it was\n")
-            } else if r.path.ends_with("/blobs/doomed") {
-                blob("going away\n")
+                crate::testing::review_page(
+                    2,
+                    "second",
+                    json!([
+                        entry(
+                            "edit",
+                            json!({ "path": "/src/numbers.txt", "objectId": "new-numbers", "originalObjectId": "old-numbers" }),
+                            json!(null)
+                        ),
+                        entry("add", json!({ "path": "/src/new.ts", "objectId": "new-ts" }), json!(null)),
+                        entry(
+                            "rename",
+                            json!({ "path": "/docs/to.md", "objectId": "same", "originalObjectId": "same" }),
+                            json!("/docs/from.md")
+                        ),
+                        entry(
+                            "delete",
+                            json!({ "path": null, "originalObjectId": "doomed" }),
+                            json!("/docs/doomed.md")
+                        ),
+                        entry("add", json!({ "path": "/shot.png", "objectId": "picture" }), json!(null)),
+                        entry("add", json!({ "path": "/src", "isFolder": true }), json!(null)),
+                    ]),
+                    json!([]),
+                )
+            } else if r.path.contains("/blobs") {
+                blobs(r, |id| {
+                    Some(
+                        match id {
+                            "old-numbers" => "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\n",
+                            "new-numbers" => "one\nTWO\nthree\nfour\nfive\nsix\nseven\neight\nnine",
+                            "new-ts" => "export const shiny = true;\n",
+                            "same" => "as it was\n",
+                            "doomed" => "going away\n",
+                            _ => return None,
+                        }
+                        .as_bytes()
+                        .to_vec(),
+                    )
+                })
             } else if r.method == "POST" {
                 let said = json!([{ "id": 1, "content": "x" }]);
                 ok(json!({ "id": 31, "status": "active", "threadContext": r.body["threadContext"], "comments": said }))
@@ -527,13 +563,9 @@ mod tests {
         assert_eq!((&file(4)["binary"], &file(4)["hunks"]), (&json!(true), &json!([])));
 
         // What only moved is not read, and a picture is not read to learn it is one.
-        let read: Vec<String> =
-            bed.ado.requests().into_iter().filter(|r| r.path.contains("/blobs/")).map(|r| r.path).collect();
-        assert_eq!(read.len(), 4, "{read:?}");
-        assert!(read.iter().all(|path| path.starts_with("/MyProject/_apis/git/repositories/web/blobs/")));
-        assert!(read.iter().all(|path| !path.ends_with("/same") && !path.ends_with("/picture")));
-        let asked = bed.ado.requests().into_iter().find(|r| r.path.ends_with("/changes")).unwrap();
-        assert_eq!(asked.query("$compareTo").as_deref(), Some("0"));
+        let archives: Vec<_> = bed.ado.requests().into_iter().filter(|r| r.path.ends_with("/blobs")).collect();
+        assert_eq!(archives.len(), 1);
+        assert_eq!(archives[0].body, json!(["doomed", "new-numbers", "new-ts", "old-numbers"]));
     }
 
     #[test]
@@ -561,7 +593,7 @@ mod tests {
         let bed = Bed::new(changed());
         let res = cli(bed.app(), &["pr", "diff", "9", "--names"]);
         assert!(res.stdout.starts_with("edited   /src/numbers.txt\nadded    /src/new.ts\nrenamed  /docs/from.md -> /docs/to.md\ndeleted  /docs/doomed.md\n"), "{}", res.stdout);
-        assert!(bed.ado.requests().iter().all(|r| !r.path.contains("/blobs/")));
+        assert!(bed.ado.requests().iter().all(|r| !r.path.contains("/blobs")));
         let named = cli(bed.app(), &["pr", "diff", "9", "--names", "--json"]).json();
         assert_eq!(named["files"][0], json!({ "path": "/src/numbers.txt", "oldPath": null, "change": "edited" }));
 
@@ -579,7 +611,7 @@ mod tests {
             (&file(1)["old"], &file(1)["new"], &file(1)["hunks"]),
             (&json!("as it was\n"), &json!("as it was\n"), &json!([]))
         );
-        assert_eq!(bed.ado.requests().iter().filter(|r| r.path.ends_with("/blobs/same")).count(), 1);
+        assert!(bed.ado.requests().iter().any(|r| r.path.ends_with("/blobs") && r.body == json!(["new-ts", "same"])));
 
         let res = cli(bed.app(), &["pr", "diff", "9", "--files", "README.md"]);
         assert_eq!(res.code, 2);
@@ -593,41 +625,39 @@ mod tests {
     /// PR 9 again, with the files that aren't plain UTF-8 with Unix line endings.
     fn awkward() -> Route {
         Box::new(|r: &Recorded| {
-            let blob = |bytes: &[u8]| Some(bytes_response(bytes));
             let utf16 = |text: &str| text.encode_utf16().flat_map(u16::to_le_bytes).collect::<Vec<u8>>();
             let many = (0..10_001).map(|n| format!("pinned {n}\n")).collect::<String>();
-            if r.path.ends_with("/iterations") {
-                ok(
-                    json!({ "value": [{ "id": 1, "sourceRefCommit": { "commitId": "head" }, "commonRefCommit": { "commitId": "base" } }] }),
-                )
-            } else if r.path.ends_with("/changes") {
+            if r.path.contains("/HierarchyQuery/") {
                 let edit = |path: &str| json!({ "changeType": "edit", "item": { "path": path, "objectId": format!("new{path}"), "originalObjectId": format!("old{path}") } });
-                ok(
-                    json!({ "changeEntries": [edit("/wide.txt"), edit("/latin.txt"), edit("/dos.txt"), edit("/data"), edit("/vendor/lib"), edit("/generated.lock")] }),
+                crate::testing::review_page(
+                    1,
+                    "head",
+                    json!([
+                        edit("/wide.txt"),
+                        edit("/latin.txt"),
+                        edit("/dos.txt"),
+                        edit("/data"),
+                        edit("/vendor/lib"),
+                        edit("/generated.lock")
+                    ]),
+                    json!([]),
                 )
-            } else if r.path.ends_with("/blobs/old/wide.txt") {
-                blob(&utf16("\u{feff}alpha\r\nbeta\r\n"))
-            } else if r.path.ends_with("/blobs/new/wide.txt") {
-                blob(&utf16("\u{feff}alpha\r\nBETA \u{1F642}\r\n"))
-            } else if r.path.ends_with("/blobs/old/latin.txt") {
-                blob(b"caf\xE9\n")
-            } else if r.path.ends_with("/blobs/new/latin.txt") {
-                blob(b"caf\xE9s\n")
-            } else if r.path.ends_with("/blobs/old/dos.txt") {
-                blob(b"one\r\ntwo\r\n")
-            } else if r.path.ends_with("/blobs/new/dos.txt") {
-                blob(b"one\ntwo\n")
-            } else if r.path.ends_with("/blobs/old/data") {
-                blob(b"plain once\n")
-            } else if r.path.ends_with("/blobs/new/data") {
-                blob(b"\x89PNG\x00\x00")
-            } else if r.path.contains("/blobs/") && r.path.ends_with("/vendor/lib") {
-                // A submodule's commit is in another repo, and Azure DevOps says so like this.
-                Some(json_response(400, json!({ "message": "TF401035: The object 'abc' does not exist." })))
-            } else if r.path.ends_with("/blobs/old/generated.lock") {
-                blob(many.as_bytes())
-            } else if r.path.ends_with("/blobs/new/generated.lock") {
-                blob(b"")
+            } else if r.path.contains("/blobs") {
+                blobs(r, |id| {
+                    Some(match id {
+                        "old/wide.txt" => utf16("\u{feff}alpha\r\nbeta\r\n"),
+                        "new/wide.txt" => utf16("\u{feff}alpha\r\nBETA \u{1F642}\r\n"),
+                        "old/latin.txt" => b"caf\xE9\n".to_vec(),
+                        "new/latin.txt" => b"caf\xE9s\n".to_vec(),
+                        "old/dos.txt" => b"one\r\ntwo\r\n".to_vec(),
+                        "new/dos.txt" => b"one\ntwo\n".to_vec(),
+                        "old/data" => b"plain once\n".to_vec(),
+                        "new/data" => b"\x89PNG\x00\x00".to_vec(),
+                        "old/generated.lock" => many.as_bytes().to_vec(),
+                        "new/generated.lock" => Vec::new(),
+                        _ => return None,
+                    })
+                })
             } else if r.method == "POST" {
                 ok(
                     json!({ "id": 31, "status": "active", "threadContext": r.body["threadContext"], "comments": [{ "id": 1, "content": "x" }] }),
@@ -686,7 +716,8 @@ mod tests {
         // A comment's end is counted the way Azure DevOps counts a line: in UTF-16 units, without the line break.
         let bed = Bed::new(awkward());
         assert_eq!(cli(bed.app(), &["pr", "comment", "9", "x", "--at", "wide.txt:2"]).code, 0);
-        let posted = bed.ado.requests().into_iter().find(|r| r.method == "POST").unwrap();
+        let posted =
+            bed.ado.requests().into_iter().find(|r| r.method == "POST" && r.path.ends_with("/threads")).unwrap();
         assert_eq!(posted.body["threadContext"]["rightFileEnd"], json!({ "line": 2, "offset": 8 }));
         let res = cli(bed.app(), &["pr", "comment", "9", "x", "--at", "data:1"]);
         assert!(res.code == 1 && res.stderr.contains("/data isn't text"), "{}", res.stderr);
@@ -695,7 +726,11 @@ mod tests {
     #[test]
     fn a_comment_goes_on_whole_lines_of_either_side_of_a_changed_file() {
         let posted = |bed: &Bed| {
-            bed.ado.requests().into_iter().find(|r| r.method == "POST").map(|r| r.body["threadContext"].clone())
+            bed.ado
+                .requests()
+                .into_iter()
+                .find(|r| r.method == "POST" && r.path.ends_with("/threads"))
+                .map(|r| r.body["threadContext"].clone())
         };
 
         let bed = Bed::new(changed());

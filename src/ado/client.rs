@@ -4,15 +4,15 @@ use serde_json::{json, Value};
 use url::Url;
 
 use super::map::{
-    body_field, is_discussion, to_change, to_pull_request, to_run, to_thread, to_timeline_record, to_work_item,
-    to_work_item_comment, POINTS, WORK_ITEM_FIELDS,
+    body_field, to_change, to_pull_request, to_run, to_thread, to_timeline_record, to_work_item, to_work_item_comment,
+    POINTS, WORK_ITEM_FIELDS,
 };
 use super::types::{
     Anchor, Change, Comment, Iteration, PullRequest, Run, TeamAreas, Thread, TimelineRecord, WorkItem, WorkItemRef,
 };
 use super::{Method, Request, Response, Transport};
 mod pr_list;
-pub mod review;
+mod review;
 mod ticket;
 use crate::error::{Error, Kind, Result};
 use crate::par;
@@ -169,11 +169,6 @@ impl<'a> AdoClient<'a> {
         Ok(POINTS.iter().find(has).copied())
     }
 
-    /// A work item's discussion, oldest first.
-    pub fn work_item_comments(&self, project: &str, id: u64) -> Result<Vec<Comment>> {
-        Ok(self.ticket_comments(project, id)?.iter().map(to_work_item_comment).collect())
-    }
-
     /// Adds to a work item's discussion; `html` is shown as it is.
     pub fn add_work_item_comment(&self, project: &str, id: u64, html: &str) -> Result<Comment> {
         let path = format!("{}/_apis/wit/workItems/{id}/comments", enc(project));
@@ -328,28 +323,6 @@ impl<'a> AdoClient<'a> {
         self.work_item_refs(&self.pull_request_work_item_ids(pr)?)
     }
 
-    /// A pull request's threads, each where it was written: enough to count
-    /// and read them. [`Self::placed_threads`] says where they are now.
-    pub fn threads(&self, pr: &PullRequest) -> Result<Vec<Thread>> {
-        let res = self.get(&pr_path(pr, "threads"), &[])?;
-        Ok(list(&res["value"]).iter().filter(|t| is_discussion(t)).map(to_thread).collect())
-    }
-
-    /// A pull request's threads, each on the lines it is on in the latest
-    /// push. Asked plainly, Azure DevOps gives the lines a thread was written
-    /// on, which later pushes move, remove, or stop changing the file of.
-    pub fn placed_threads(&self, pr: &PullRequest) -> Result<Vec<Thread>> {
-        let Some(latest) = self.latest_push(pr) else { return self.threads(pr) };
-        let (threads, changes) =
-            par::join(|| self.get(&pr_path(pr, "threads"), &tracked_to(&latest)), || self.changes(pr, latest.0));
-        let mut threads: Vec<Thread> =
-            list(&threads?["value"]).iter().filter(|t| is_discussion(t)).map(to_thread).collect();
-        if let Ok(changes) = changes {
-            threads.iter_mut().for_each(|thread| settle(thread, &changes));
-        }
-        Ok(threads)
-    }
-
     /// One thread as it was written.
     pub fn thread(&self, pr: &PullRequest, id: u64) -> Result<Thread> {
         self.thread_at(pr, id, &[])
@@ -357,13 +330,10 @@ impl<'a> AdoClient<'a> {
 
     /// One thread, on the lines it is on in the latest push.
     pub fn placed_thread(&self, pr: &PullRequest, id: u64) -> Result<Thread> {
-        let Some(latest) = self.latest_push(pr) else { return self.thread(pr, id) };
-        let (thread, changes) =
-            par::join(|| self.thread_at(pr, id, &tracked_to(&latest)), || self.changes(pr, latest.0));
-        let mut thread = thread?;
-        if let Ok(changes) = changes {
-            settle(&mut thread, &changes);
-        }
+        let (iteration, files) = self.review_files(pr)?;
+        let id_str = iteration.id.to_string();
+        let mut thread = self.thread_at(pr, id, &[("$iteration", &id_str), ("$baseIteration", "0")])?;
+        settle(&mut thread, &files);
         Ok(thread)
     }
 
@@ -374,15 +344,6 @@ impl<'a> AdoClient<'a> {
             false => err,
         };
         Ok(to_thread(&self.get(&pr_path(pr, &format!("threads/{id}")), query).map_err(missing)?))
-    }
-
-    /// The number of a pull request's latest push, as a number and as it goes
-    /// in a query. None when its pushes can't be listed: its threads can
-    /// still be read, where they were written.
-    fn latest_push(&self, pr: &PullRequest) -> Option<(u64, String)> {
-        let res = self.get(&pr_path(pr, "iterations"), &[]).ok()?;
-        let latest = list(&res["value"]).last()?["id"].as_u64()?;
-        Some((latest, latest.to_string()))
     }
 
     /// A new thread: about the whole pull request, or `at` some lines of a file it changes.
@@ -402,24 +363,6 @@ impl<'a> AdoClient<'a> {
     }
 
     /* what a pull request changes */
-
-    /// A pull request's latest push.
-    pub fn latest_iteration(&self, pr: &PullRequest) -> Result<Iteration> {
-        let res = self.get(&pr_path(pr, "iterations"), &[])?;
-        let latest = list(&res["value"]).last();
-        let latest = latest.ok_or_else(|| Error::external(format!("PR #{} has nothing pushed to it.", pr.id)))?;
-        let commit = |name: &str| latest[name]["commitId"].as_str().unwrap_or("").to_string();
-        Ok(Iteration {
-            id: latest["id"].as_u64().unwrap_or(1),
-            base: commit("commonRefCommit"),
-            head: commit("sourceRefCommit"),
-        })
-    }
-
-    /// Every file a push of a pull request changes, against where its branch left the target.
-    pub fn changes(&self, pr: &PullRequest, iteration: u64) -> Result<Vec<Change>> {
-        self.changes_from(pr, iteration, 0)
-    }
 
     fn changes_from(&self, pr: &PullRequest, iteration: u64, mut skip: u64) -> Result<Vec<Change>> {
         let path = pr_path(pr, &format!("iterations/{iteration}/changes"));
@@ -585,39 +528,15 @@ impl<'a> AdoClient<'a> {
         self.call(Method::Get, path, query, None)
     }
 
-    /// Optional portal reads return null when the caller can use REST instead.
-    fn contribution_data(
-        &self,
-        project: &str,
-        providers: &[&str],
-        properties: &Value,
-        optional: bool,
-    ) -> Result<Value> {
+    fn contribution_data(&self, project: &str, providers: &[&str], properties: &Value) -> Result<Value> {
         let path = format!("_apis/Contribution/HierarchyQuery/project/{}", enc(project));
         let body = json!({"contributionIds": providers, "dataProviderContext": {"properties": properties}});
-        let req = Request {
-            method: Method::Post,
-            body: Some(body.to_string()),
-            content_type: Some(JSON.into()),
-            ..Request::get(self.url(&path, &[("api-version", "5.0-preview.1")])?)
-        };
-        let response = self.http.send(&req)?;
-        if optional && matches!(response.status, 400 | 403 | 404 | 405 | 500 | 501) {
-            return Ok(Value::Null);
+        let mut page = self.call(Method::Post, &path, &[("api-version", "5.0-preview.1")], Some((&body, JSON)))?;
+        if let Some((provider, _)) = page["dataProviderExceptions"].as_object().and_then(|errors| errors.iter().next())
+        {
+            return Err(Error::external(format!("Azure DevOps could not read {provider}.")));
         }
-        check_status(&response, &req)?;
-        let mut page: Value = match serde_json::from_str(&response.body) {
-            Ok(page) => page,
-            Err(_) if optional => return Ok(Value::Null),
-            Err(_) => return Err(Error::external("Azure DevOps returned invalid contribution data.")),
-        };
-        let mut data = page.get_mut("dataProviders").map(Value::take).unwrap_or(Value::Null);
-        if let (Some(failed), Some(results)) = (page["dataProviderExceptions"].as_object(), data.as_object_mut()) {
-            for id in failed.keys() {
-                results.remove(id);
-            }
-        }
-        Ok(data)
+        Ok(page["dataProviders"].take())
     }
 
     /// A GET whose 404 means the thing asked for doesn't exist, said in those words.
@@ -648,11 +567,6 @@ impl<'a> AdoClient<'a> {
         check_status(&res, req)?;
         Ok(res)
     }
-}
-
-/// The query that has Azure DevOps move threads to where they are in a push, compared with the target.
-fn tracked_to(push: &(u64, String)) -> [(&str, &str); 2] {
-    [("$iteration", push.1.as_str()), ("$baseIteration", "0")]
 }
 
 /// A thread on a file the pull request doesn't change, as it is now, is on
@@ -796,11 +710,15 @@ mod tests {
     #[test]
     fn maps_a_pull_request_and_drops_system_only_threads() {
         let route: Route = Box::new(|r: &Recorded| {
-            let threads = json!({ "value": [
+            let threads = json!([
                 { "id": 1, "status": "active", "comments": [{ "id": 1, "content": "Fix this", "commentType": "text" }] },
                 { "id": 2, "comments": [{ "id": 1, "content": "Jane pushed", "commentType": "system" }] },
-            ] });
-            Some(json_response(200, if r.path.ends_with("/threads") { threads } else { rest_pr(7, json!({})) }))
+            ]);
+            if r.path.contains("/HierarchyQuery/") {
+                crate::testing::review_page(1, "head", json!([]), threads)
+            } else {
+                crate::testing::ok(rest_pr(7, json!({})))
+            }
         });
         let ado = fake_ado(route);
         let client = AdoClient::new(&ado, ORG);
@@ -810,7 +728,7 @@ mod tests {
             (7, "feature/x", "main", "web")
         );
         assert_eq!(pr.url, "https://dev.azure.com/contoso/MyProject/_git/web/pullrequest/7");
-        let threads = client.threads(&pr).unwrap();
+        let threads = client.read_pr(&pr, &[crate::ado::sections::Section::Discussion].into()).unwrap().threads;
         assert_eq!(threads.iter().map(|t| (t.id, t.unresolved)).collect::<Vec<_>>(), [(1, true)]);
     }
 

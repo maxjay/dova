@@ -9,7 +9,7 @@ use super::link::link;
 use super::pr::{find_pull_request, pull_request_detail, render_pull_request};
 use super::work_item_table;
 use crate::ado::client::{AdoClient, NewWorkItem};
-use crate::ado::map::{body_field, to_work_item};
+use crate::ado::map::{body_field, to_work_item, to_work_item_comment};
 use crate::ado::types::{Comment, WorkItem, WorkItemRef};
 use crate::app::App;
 use crate::cli::Output;
@@ -41,33 +41,18 @@ fn locate<'a>(app: &'a App, id_or_url: &str) -> Result<(u64, AdoClient<'a>)> {
 
 pub fn work_item_detail(app: &App, id_or_url: &str) -> Result<Detail> {
     let (id, ado) = locate(app, id_or_url)?;
-    let raw = ado.ticket(id, true)?;
-    let item = to_work_item(&raw, &ado.org_url);
-    let mut family: Vec<_> = item.parent_id.into_iter().collect();
-    for link in raw["relations"].as_array().into_iter().flatten() {
-        if link["rel"] == "System.LinkTypes.Hierarchy-Forward" {
-            family.extend(link["url"].as_str().and_then(|url| crate::urls::linked_work_item(&ado.org_url, url)));
-        }
-    }
-    let (family, comments) = par::join(
-        || ado.work_item_refs(&family),
-        || {
-            if raw["fields"]["System.CommentCount"] == 0 {
-                return Ok(Vec::new());
-            }
-            item.project.as_deref().map_or(Ok(Vec::new()), |project| ado.work_item_comments(project, id))
-        },
-    );
-    let mut parent = None;
-    let mut children = Vec::new();
-    for relative in family? {
-        if Some(relative.id) == item.parent_id {
-            parent = Some(relative);
-        } else {
-            children.push(relative);
-        }
-    }
-    Ok(Detail { parent, children, comments: comments?, item })
+    let read = ado.read_ticket(id, &crate::ado::sections::Resource::Wi.sections(), &mut None)?;
+    let item = to_work_item(&read.item, &ado.org_url);
+    let parent = item.parent_id.and_then(|id| read.linked.get(&id)).cloned();
+    let children = read
+        .relations
+        .iter()
+        .filter(|link| link["rel"] == "System.LinkTypes.Hierarchy-Forward")
+        .filter_map(|link| read.linked.get(&link["workItemId"].as_u64()?))
+        .cloned()
+        .collect();
+    let comments = read.comments.iter().map(to_work_item_comment).collect();
+    Ok(Detail { item, parent, children, comments })
 }
 
 /// 5 for 5.0, 2.5 for 2.5.
@@ -805,7 +790,9 @@ mod tests {
                 ok(json!({ "value": [null] }))
             } else if r.path.ends_with("/pullrequests/7") {
                 ok(rest_pr(7, json!({})))
-            } else if r.path.ends_with("/threads") || r.path.ends_with("/workitems") {
+            } else if r.path.contains("/HierarchyQuery/") {
+                crate::testing::review_page(1, "head", json!([]), json!([]))
+            } else if r.path.ends_with("/workitems") {
                 ok(json!({ "value": [] }))
             } else {
                 None

@@ -1,12 +1,12 @@
-use super::{check_status, settle, AdoClient, Iteration, Method, PullRequest, Request, Result, JSON};
+use super::{settle, AdoClient, Iteration, Method, PullRequest, Request, Result, JSON};
 use crate::ado::map::{is_discussion, to_change, to_pull_request, to_thread};
 use crate::ado::sections::{Section, Sections};
-use crate::ado::types::{Change, Thread};
+use crate::ado::types::{Change, Thread, WorkItemRef};
 use crate::error::Error;
 use crate::urls::enc;
 use base64::Engine;
 use serde_json::{json, Value};
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 use std::io::{Cursor, Read};
 
 const PROVIDER: &str = "ms.vss-code-web.pr-detail-data-provider";
@@ -15,10 +15,33 @@ const LATEST_CHANGES: u16 = 256;
 const DISCUSSIONS: u16 = 8;
 const THREAD_CONTEXTS: u16 = 512;
 
-struct Review {
-    iteration: Iteration,
-    files: Vec<Change>,
-    threads: Vec<Thread>,
+#[derive(Default)]
+pub struct PrRead {
+    fields: Value,
+    files: Option<(Iteration, Vec<Change>)>,
+    pub threads: Vec<Thread>,
+    pub work_items: Vec<WorkItemRef>,
+}
+
+impl PrRead {
+    pub fn snapshot(mut self, sections: &Sections) -> Value {
+        if let Some((iteration, files)) = self.files {
+            self.fields["files"] = json!({"iteration":iteration, "entries": files.iter().map(|f| json!({
+                "path":f.at(), "oldPath":f.old_path, "change":f.kind, "oldBlob":f.old_blob, "newBlob":f.blob
+            })).collect::<Vec<_>>()});
+        }
+        if sections.contains(&Section::Discussion) {
+            self.fields["discussion"] = json!(self.threads);
+        }
+        if sections.contains(&Section::WorkItems) {
+            self.fields["workItems"] = json!(self.work_items);
+        }
+        self.fields
+    }
+}
+
+fn incomplete() -> Error {
+    Error::external("Azure DevOps omitted requested PR data.")
 }
 
 impl AdoClient<'_> {
@@ -42,61 +65,29 @@ impl AdoClient<'_> {
             zip: true,
             ..Request::get(self.url(&path, &[])?)
         };
-        let response = match self.http.send(&req) {
+        let response = match self.send(&req) {
             Ok(response) => response,
-            Err(err) if err.kind == crate::error::Kind::External => return Ok(HashMap::new()),
+            Err(err) if err.message.contains("TF401035") => return Ok(HashMap::new()),
             Err(err) => return Err(err),
         };
-        if matches!(response.status, 400 | 403 | 404 | 405 | 413 | 500 | 501) {
-            return Ok(HashMap::new());
-        }
-        check_status(&response, &req)?;
-        let bytes = base64::engine::general_purpose::STANDARD.decode(response.body).ok();
-        Ok(bytes.and_then(|bytes| unpack(bytes, ids)).unwrap_or_default())
+        let invalid = || Error::external("Azure DevOps returned an invalid Git blob archive.");
+        let bytes = base64::engine::general_purpose::STANDARD.decode(response.body).map_err(|_| invalid())?;
+        unpack(bytes, ids).ok_or_else(invalid)
     }
 
     pub fn review_files(&self, pr: &PullRequest) -> Result<(Iteration, Vec<Change>)> {
-        if let Some(review) = self.review(pr, false)? {
-            return Ok((review.iteration, review.files));
-        }
-        let iteration = self.latest_iteration(pr)?;
-        let files = self.changes(pr, iteration.id)?;
-        Ok((iteration, files))
+        self.read_pr(pr, &[Section::Files].into())?.files.ok_or_else(incomplete)
     }
 
-    pub fn review_threads(&self, pr: &PullRequest) -> Result<Vec<Thread>> {
-        match self.review(pr, true)? {
-            Some(review) => Ok(review.threads),
-            None => self.placed_threads(pr),
-        }
-    }
-
-    fn review(&self, pr: &PullRequest, discussions: bool) -> Result<Option<Review>> {
-        let mask = ITERATIONS | LATEST_CHANGES | if discussions { DISCUSSIONS | THREAD_CONTEXTS } else { 0 };
-        let Some(data) = self.provider_data(pr, mask)? else { return Ok(None) };
-        let Some(mut review) = self.complete_review(pr, &data, discussions)? else { return Ok(None) };
-        for thread in &mut review.threads {
-            settle(thread, &review.files);
-        }
-        Ok(Some(review))
-    }
-
-    fn complete_review(&self, pr: &PullRequest, data: &Value, discussions: bool) -> Result<Option<Review>> {
-        let Some((mut review, skip)) = parse(data, discussions) else { return Ok(None) };
-        if skip > 0 {
-            review.files.extend(self.changes_from(pr, review.iteration.id, skip)?);
-        }
-        Ok(Some(review))
-    }
-
-    fn provider_data(&self, pr: &PullRequest, mask: u16) -> Result<Option<Value>> {
-        let (Some(project), Some(repo)) = (&pr.project_id, &pr.repo_id) else { return Ok(None) };
+    fn provider_data(&self, pr: &PullRequest, mask: u16) -> Result<Value> {
+        let project = pr.project_id.as_deref().ok_or_else(incomplete)?;
+        let repo = pr.repo_id.as_deref().ok_or_else(incomplete)?;
         let props = json!({
             "pullRequestId": pr.id, "repositoryId": repo, "types": mask,
             "sourcePage": {"url": format!("{}?_a=files", pr.url)}
         });
-        let mut data = self.contribution_data(project, &[PROVIDER], &props, true)?;
-        Ok(data.get_mut(PROVIDER).filter(|v| v.is_object()).map(Value::take))
+        let mut data = self.contribution_data(project, &[PROVIDER], &props)?;
+        data.get_mut(PROVIDER).filter(|v| v.is_object()).map(Value::take).ok_or_else(incomplete)
     }
 }
 
@@ -118,66 +109,45 @@ fn unpack(bytes: Vec<u8>, ids: &BTreeSet<&str>) -> Option<HashMap<String, Option
     Some(blobs)
 }
 
-fn parse(data: &Value, discussions: bool) -> Option<(Review, u64)> {
-    let id = data["latestIterationId"].as_u64().filter(|i| *i > 0)?;
-    let raw = data["iterations"].as_array()?.iter().find(|i| i["id"].as_u64() == Some(id))?;
-    let iteration = Iteration {
-        id,
-        base: raw["commonRefCommit"]["commitId"].as_str()?.to_owned(),
-        head: raw["sourceRefCommit"]["commitId"].as_str()?.to_owned(),
-    };
-    let page = &data["latestChanges"];
-    let mut files = Vec::new();
-    for entry in page["changeEntries"].as_array()? {
-        let kind = &entry["changeType"];
-        if !kind.is_string() && !kind.is_u64() {
-            return None;
-        }
-        if let Some(file) = to_change(entry) {
-            if file.at().is_empty() || (file.kind != "deleted" && file.path.is_none()) {
-                return None;
-            }
-            files.push(file);
-        }
-    }
-    let threads = if discussions { discussion(data)? } else { Vec::new() };
-    let skip = match &page["nextSkip"] {
-        Value::Null => 0,
-        n => n.as_u64()?,
-    };
-    Some((Review { iteration, files, threads }, skip))
-}
-
-fn discussion(data: &Value) -> Option<Vec<Thread>> {
-    let mut threads = Vec::new();
-    for raw in data["discussionThreads"].as_array()? {
-        raw["id"].as_u64()?;
-        // Deleted threads can omit their comments.
-        if raw["isDeleted"] != true {
-            raw["comments"].as_array()?;
-        }
-        if is_discussion(raw) {
-            threads.push(to_thread(raw));
-        }
-    }
-    Some(threads)
-}
-
-/// File paths from the last iteration read by this subscription.
-#[derive(Default)]
-pub struct Placement {
-    iteration: Option<u64>,
-    paths: HashSet<String>,
-}
-
 impl AdoClient<'_> {
-    pub fn read_sections(&self, pr: &PullRequest, sections: &Sections, placement: &mut Placement) -> Result<Value> {
+    fn review_changes(
+        &self,
+        pr: &PullRequest,
+        data: &Value,
+        want_files: bool,
+        threads: &[Thread],
+    ) -> Result<(Iteration, Vec<Change>)> {
+        let id = data["latestIterationId"].as_u64().ok_or_else(incomplete)?;
+        let raw = data["iterations"]
+            .as_array()
+            .and_then(|items| items.iter().find(|i| i["id"] == id))
+            .ok_or_else(incomplete)?;
+        let iteration = Iteration {
+            id,
+            base: raw["commonRefCommit"]["commitId"].as_str().ok_or_else(incomplete)?.to_owned(),
+            head: raw["sourceRefCommit"]["commitId"].as_str().ok_or_else(incomplete)?.to_owned(),
+        };
+        let page = &data["latestChanges"];
+        let mut files: Vec<_> =
+            page["changeEntries"].as_array().ok_or_else(incomplete)?.iter().filter_map(to_change).collect();
+        if let Some(skip) = page["nextSkip"].as_u64().filter(|n| *n > 0) {
+            let missing_path = |thread: &Thread| {
+                thread.location.as_ref().is_some_and(|at| !files.iter().any(|file| file.at() == at.file))
+            };
+            if want_files || threads.iter().any(missing_path) {
+                files.extend(self.changes_from(pr, id, skip)?);
+            }
+        }
+        Ok((iteration, files))
+    }
+
+    pub fn read_pr(&self, pr: &PullRequest, sections: &Sections) -> Result<PrRead> {
         use Section::*;
         let mut mask = 0;
         for s in sections {
             mask |= match s {
                 Details | Reviewers => 1,
-                Discussion => DISCUSSIONS | THREAD_CONTEXTS,
+                Discussion => DISCUSSIONS | THREAD_CONTEXTS | ITERATIONS | LATEST_CHANGES,
                 Checks => 66,
                 Statuses => 128,
                 Labels => 32,
@@ -186,19 +156,20 @@ impl AdoClient<'_> {
                 Relations | Comments => return Err(Error::user("Invalid PR section.")),
             };
         }
-        let bad = || Error::external("Azure DevOps did not return the requested PR sections.");
-        let provider = || if mask == 0 { Ok(Value::Null) } else { self.provider_data(pr, mask)?.ok_or_else(bad) };
+
+        let provider = || if mask == 0 { Ok(Value::Null) } else { self.provider_data(pr, mask) };
         let (data, items) = if sections.contains(&WorkItems) {
             let (data, items) = crate::par::join(provider, || self.pull_request_work_item_refs(pr));
             (data?, items?)
         } else {
             (provider()?, Vec::new())
         };
-        let mut out = json!({});
+        let mut read = PrRead { work_items: items, ..PrRead::default() };
+        let out = &mut read.fields;
         if sections.contains(&Details) || sections.contains(&Reviewers) {
             let raw = &data["pullRequest"];
             if raw["pullRequestId"].as_u64() != Some(pr.id) {
-                return Err(bad());
+                return Err(incomplete());
             }
             if sections.contains(&Details) {
                 let mut detail = json!(to_pull_request(raw, &self.org_url, &pr.project, &pr.repo));
@@ -214,13 +185,13 @@ impl AdoClient<'_> {
                 out["details"] = detail;
             }
             if sections.contains(&Reviewers) {
-                out["reviewers"] = json!(raw["reviewers"].as_array().ok_or_else(bad)?.iter().map(|r| json!({
+                out["reviewers"] = json!(raw["reviewers"].as_array().ok_or_else(incomplete)?.iter().map(|r| json!({
                     "id":r["id"], "name":r["displayName"], "vote":r["vote"], "required":r["isRequired"].as_bool().unwrap_or(false)
                 })).collect::<Vec<_>>());
             }
         }
         if sections.contains(&Checks) {
-            out["checks"] = json!(data["policies"].as_array().ok_or_else(bad)?.iter().map(|p| json!({
+            out["checks"] = json!(data["policies"].as_array().ok_or_else(incomplete)?.iter().map(|p| json!({
                 "id":p["evaluationId"], "name":p["displayName"], "description":p["displayText"],
                 "status":p["status"], "blocking":p["isBlocking"], "buildId":p["buildId"], "buildOutputPreview":p["buildOutputPreview"]
             })).collect::<Vec<_>>());
@@ -228,7 +199,7 @@ impl AdoClient<'_> {
         if sections.contains(&Statuses) {
             out["statuses"] = json!(data["statuses"]
                 .as_array()
-                .ok_or_else(bad)?
+                .ok_or_else(incomplete)?
                 .iter()
                 .map(|s| json!({
                     "id":s["id"], "context":s["context"], "state":s["state"], "description":s["description"],
@@ -237,51 +208,28 @@ impl AdoClient<'_> {
                 .collect::<Vec<_>>());
         }
         if sections.contains(&Labels) {
-            out["labels"] = json!(data["labels"].as_array().ok_or_else(bad)?);
+            out["labels"] = json!(data["labels"].as_array().ok_or_else(incomplete)?);
         }
-        if sections.contains(&WorkItems) {
-            out["workItems"] = json!(items);
+        if sections.contains(&Discussion) {
+            read.threads = data["discussionThreads"]
+                .as_array()
+                .ok_or_else(incomplete)?
+                .iter()
+                .filter(|t| is_discussion(t))
+                .map(to_thread)
+                .collect();
         }
-        let needs_files = sections.contains(&Files);
-        let needs_threads = sections.contains(&Discussion);
-        let latest = data["latestIterationId"].as_u64();
-        if needs_files || (needs_threads && (latest.is_none() || placement.iteration != latest)) {
-            // A discussion-only read can race a push. Re-read both sides together.
-            let refreshed;
-            let source = if needs_files {
-                &data
-            } else {
-                refreshed = self
-                    .provider_data(pr, ITERATIONS | LATEST_CHANGES | DISCUSSIONS | THREAD_CONTEXTS)?
-                    .ok_or_else(bad)?;
-                &refreshed
-            };
-            let review = self.complete_review(pr, source, needs_threads)?.ok_or_else(bad)?;
-            placement.iteration = Some(review.iteration.id);
-            placement.paths = review.files.iter().map(|f| f.at().to_owned()).collect();
-            if needs_files {
-                out["files"] = json!({"iteration":review.iteration, "entries": review.files.iter().map(|f| json!({
-                    "path":f.at(), "oldPath":f.old_path, "change":f.kind, "oldBlob":f.old_blob, "newBlob":f.blob
-                })).collect::<Vec<_>>()});
+        let want_files = sections.contains(&Files);
+        if want_files || read.threads.iter().any(|t| t.location.is_some()) {
+            let (iteration, files) = self.review_changes(pr, &data, want_files, &read.threads)?;
+            for thread in &mut read.threads {
+                settle(thread, &files);
             }
-            if needs_threads {
-                out["discussion"] = placement.threads(review.threads);
-            }
-        } else if needs_threads {
-            out["discussion"] = placement.threads(discussion(&data).ok_or_else(bad)?);
-        }
-        Ok(out)
-    }
-}
-
-impl Placement {
-    fn threads(&self, mut threads: Vec<Thread>) -> Value {
-        for t in &mut threads {
-            if let Some(loc) = t.location.as_mut().filter(|l| !self.paths.contains(&l.file)) {
-                (loc.line, loc.end_line, loc.outdated) = (None, None, true);
+            if want_files {
+                read.files = Some((iteration, files));
             }
         }
-        json!(threads)
+        Ok(read)
     }
 }
 
