@@ -176,12 +176,12 @@ impl Session {
     fn open_target(&self, target: Arc<Target>, reply: impl FnOnce(Value)) -> Result<()> {
         let (hub, snapshot) = self.runtime.block_on(target.synchronized(&self.http))?;
         let id = format!("s{}", self.next.fetch_add(1, Ordering::Relaxed));
-        let watched = target.clone();
-        let subscription = id.clone();
-        let send = self.send.clone();
+        // Each RPC request runs on its own thread, so a close can arrive as soon as the reply is
+        // written. Holding the table until the listener is in it makes that close wait for it.
+        let mut entries = self.entries.lock().unwrap();
         reply(json!({"subscription":id, "snapshot":snapshot}));
-        let listener = self.runtime.spawn(async move { watched.listen(hub, subscription, send).await });
-        self.entries.lock().unwrap().insert(id, listener);
+        let listener = self.runtime.spawn(target.listen(hub, id.clone(), self.send.clone()));
+        entries.insert(id, listener);
         Ok(())
     }
 

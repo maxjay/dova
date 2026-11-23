@@ -22,6 +22,7 @@ pub struct Hub {
     id: u64,
 }
 
+#[allow(clippy::too_many_arguments)]
 impl Hub {
     pub async fn connect(
         http: &Client,
