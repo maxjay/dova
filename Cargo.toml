@@ -13,7 +13,7 @@ base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 console = "0.15"
 dialoguer = { version = "0.11", default-features = false }
-futures-util = { version = "0.3", features = ["sink"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 interprocess = "2"
 jaq-core = "3"
 jaq-json = { version = "2", features = ["serde"] }
@@ -28,7 +28,7 @@ reqwest = { version = "0.13", default-features = false, features = ["blocking", 
 reqwest-websocket = "0.6"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 url = "2"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "time"] }
 zip = { version = "~4.2.0", default-features = false, features = ["deflate-flate2"] }
 
 [target.'cfg(unix)'.dependencies]

@@ -9,13 +9,13 @@ use crate::app::App;
 use crate::error::{Error, Result};
 use crate::rpc::RpcError;
 use crate::{config, urls};
+use reqwest::Client;
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::{
     runtime::{Builder, Runtime},
-    sync::oneshot,
     task::JoinHandle,
 };
 
@@ -96,7 +96,7 @@ impl Target {
             .map_err(|_| Error::external("Could not read live Azure data."))?
     }
 
-    async fn subscribe(self: &Arc<Self>) -> Result<Hub> {
+    async fn subscribe(self: &Arc<Self>, http: &Client) -> Result<Hub> {
         let target = self.clone();
         let bearer = tokio::task::spawn_blocking(move || target.transport.token(&target.org))
             .await
@@ -105,19 +105,13 @@ impl Target {
             Item::Pr(pr) => (pr.id, json!([pr.id, pr.repo_id])),
             Item::Wi { id, .. } => (*id, json!([id])),
         };
-        Hub::connect(&self.hub_url, &self.host, self.resource(), id, args, &bearer).await
+        Hub::connect(http, self.transport.as_ref(), &self.hub_url, &self.host, self.resource(), id, args, &bearer).await
     }
 
-    /// Buffer changed sections while the snapshot is loading.
-    async fn synchronized(self: &Arc<Self>) -> Result<(Hub, Value)> {
-        let mut hub = self.subscribe().await?;
-        let mut snapshot = Box::pin(self.load(self.resource().sections()));
-        loop {
-            tokio::select! {
-                result = &mut snapshot => return Ok((hub, result?)),
-                event = hub.next() => hub.pending.extend(event?),
-            }
-        }
+    async fn synchronized(self: &Arc<Self>, http: &Client) -> Result<(Hub, Value)> {
+        let hub = self.subscribe(http).await?;
+        let snapshot = self.load(self.resource().sections()).await?;
+        Ok((hub, snapshot))
     }
 
     async fn listen(self: Arc<Self>, mut hub: Hub, id: String, send: SendMessage) {
@@ -149,12 +143,19 @@ pub struct Session {
     next: AtomicU64,
     entries: Mutex<HashMap<String, JoinHandle<()>>>,
     runtime: Runtime,
+    http: Client,
 }
 
 impl Session {
     pub fn new(send: SendMessage) -> Result<Self> {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let http = Client::builder()
+            .http1_only()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|_| Error::external("Could not initialize the live connection."))?;
         let runtime = Builder::new_multi_thread().worker_threads(1).enable_all().build()?;
-        Ok(Self { send, next: AtomicU64::new(1), entries: Mutex::default(), runtime })
+        Ok(Self { send, next: AtomicU64::new(1), entries: Mutex::default(), runtime, http })
     }
 
     pub fn open(
@@ -173,20 +174,14 @@ impl Session {
     }
 
     fn open_target(&self, target: Arc<Target>, reply: impl FnOnce(Value)) -> Result<()> {
-        let (hub, snapshot) = self.runtime.block_on(target.synchronized())?;
+        let (hub, snapshot) = self.runtime.block_on(target.synchronized(&self.http))?;
         let id = format!("s{}", self.next.fetch_add(1, Ordering::Relaxed));
-        let (start, ready) = oneshot::channel();
         let watched = target.clone();
         let subscription = id.clone();
         let send = self.send.clone();
-        let listener = self.runtime.spawn(async move {
-            if ready.await.is_ok() {
-                watched.listen(hub, subscription, send).await;
-            }
-        });
-        self.entries.lock().unwrap().insert(id.clone(), listener);
         reply(json!({"subscription":id, "snapshot":snapshot}));
-        let _ = start.send(());
+        let listener = self.runtime.spawn(async move { watched.listen(hub, subscription, send).await });
+        self.entries.lock().unwrap().insert(id, listener);
         Ok(())
     }
 

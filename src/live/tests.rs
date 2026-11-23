@@ -1,54 +1,22 @@
 use super::*;
 use crate::testing::{fake_ado, ok, rest_pr};
-use std::{
-    io::{BufRead, BufReader, Write},
-    net::TcpListener,
-    sync::mpsc,
-    thread,
-    time::Duration,
-};
+use std::{net::TcpListener, sync::mpsc, thread, time::Duration};
 use tungstenite::Message;
 
 const LIMIT: Duration = Duration::from_secs(8);
 
-fn control(listener: &TcpListener, verb: &str, result: Value) {
-    let (mut socket, _) = listener.accept().unwrap();
-    socket.set_read_timeout(Some(LIMIT)).unwrap();
-    let mut headers = String::new();
-    let mut reader = BufReader::new(&socket);
-    loop {
-        let mut line = String::new();
-        assert_ne!(reader.read_line(&mut line).unwrap(), 0);
-        if line == "\r\n" {
-            break;
-        }
-        headers += &line;
-    }
-    assert!(headers.starts_with(&format!("GET /{verb}?")));
-    assert!(headers.to_ascii_lowercase().contains("authorization: bearer test-token"));
-    let data = result.to_string();
-    write!(
-        socket,
-        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{data}",
-        data.len()
-    )
-    .unwrap();
-}
-
 #[test]
 fn replies_before_queued_changes_and_stops_after_a_disconnect() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let base = format!("http://{}", listener.local_addr().unwrap());
+    let base = format!("http://{}/acme", listener.local_addr().unwrap());
     let (release, commands) = mpsc::channel::<()>();
     let socket = thread::spawn(move || {
-        control(&listener, "negotiate", json!({"ConnectionToken":"test"}));
         let (conn, _) = listener.accept().unwrap();
         conn.set_read_timeout(Some(LIMIT)).unwrap();
         let mut ws = tungstenite::accept(conn).unwrap();
         let text = |v: Value| Message::text(v.to_string());
         let callback = |m| json!({"M":[{"H":"pullrequestdetailhub","M":m,"A":[]}]});
         ws.send(text(json!({"S":1}))).unwrap();
-        control(&listener, "start", json!({"Response":"started"}));
         let sub: Value = serde_json::from_str(ws.read().unwrap().to_text().unwrap()).unwrap();
         assert_eq!(sub["A"], json!([9, "repo"]));
         ws.send(text(callback("onDiscussionsUpdated"))).unwrap();
@@ -59,6 +27,12 @@ fn replies_before_queued_changes_and_stops_after_a_disconnect() {
         ws.send(text(json!({"D":1}))).unwrap();
     });
     let ado = Arc::new(fake_ado(Box::new(|r| {
+        if r.path.ends_with("/negotiate") {
+            return ok(json!({"ConnectionToken":"test"}));
+        }
+        if r.path.ends_with("/start") {
+            return ok(json!({"Response":"started"}));
+        }
         if r.path.ends_with("/workitems") {
             return ok(json!({"value":[]}));
         }

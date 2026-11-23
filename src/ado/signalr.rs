@@ -1,4 +1,7 @@
-use super::sections::{Resource, Section, Section::*, Sections};
+use super::{
+    sections::{Resource, Section, Section::*, Sections},
+    Request, Transport,
+};
 use crate::error::{Error, Result};
 use futures_util::{SinkExt, StreamExt};
 use reqwest::Client;
@@ -21,6 +24,8 @@ pub struct Hub {
 
 impl Hub {
     pub async fn connect(
+        http: &Client,
+        transport: &dyn Transport,
         base: &str,
         host: &str,
         resource: Resource,
@@ -28,18 +33,21 @@ impl Hub {
         args: Value,
         bearer: &str,
     ) -> Result<Self> {
-        timeout(HANDSHAKE, Self::handshake(base, host, resource, id, args, bearer))
+        timeout(HANDSHAKE, Self::handshake(http, transport, base, host, resource, id, args, bearer))
             .await
             .map_err(|_| Error::external("Timed out subscribing to Azure DevOps updates."))?
     }
 
-    async fn handshake(base: &str, host: &str, resource: Resource, id: u64, args: Value, bearer: &str) -> Result<Self> {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-        let http = Client::builder()
-            .http1_only()
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .map_err(|_| Error::external("Could not initialize the live connection."))?;
+    async fn handshake(
+        http: &Client,
+        transport: &dyn Transport,
+        base: &str,
+        host: &str,
+        resource: Resource,
+        id: u64,
+        args: Value,
+        bearer: &str,
+    ) -> Result<Self> {
         let mut params = vec![
             ("contextToken", host.to_owned()),
             ("clientProtocol", "1.5".into()),
@@ -49,24 +57,18 @@ impl Hub {
             Url::parse_with_params(&format!("{base}/{action}"), params)
                 .map_err(|_| Error::user("Invalid live hub address."))
         };
-        let control = |url| async {
-            let response = http
-                .get(url)
-                .bearer_auth(bearer)
-                .header("X-TFS-FedAuthRedirect", "Suppress")
-                .send()
-                .await
-                .map_err(|_| Error::external("Could not reach the Azure live hub."))?;
-            if matches!(response.status().as_u16(), 401 | 203) {
+        let control = |url: Url| {
+            let response = transport.send(&Request::get(url.to_string()))?;
+            if matches!(response.status, 401 | 203) {
                 return Err(Error::prereq("Azure refused the live hub credentials."));
             }
-            if !response.status().is_success() {
-                return Err(Error::external(format!("Azure live hub returned HTTP {}.", response.status().as_u16())));
+            if !(200..300).contains(&response.status) {
+                return Err(Error::external(format!("Azure live hub returned HTTP {}.", response.status)));
             }
-            let bytes = response.bytes().await.map_err(|_| Error::external("Incomplete Azure live hub response."))?;
-            serde_json::from_slice::<Value>(&bytes).map_err(|_| Error::external("Invalid Azure live hub response."))
+            serde_json::from_str::<Value>(&response.body)
+                .map_err(|_| Error::external("Invalid Azure live hub response."))
         };
-        let negotiation = control(endpoint("negotiate", &params)?).await?;
+        let negotiation = control(endpoint("negotiate", &params)?)?;
         let connection = negotiation["ConnectionToken"]
             .as_str()
             .ok_or_else(|| Error::external("Azure did not negotiate a live hub connection."))?;
@@ -90,7 +92,7 @@ impl Hub {
             idle_timeout: Duration::from_secs_f64((idle * 2.0).clamp(30.0, 180.0)),
         };
         let init = hub.frame().await?;
-        if init["S"] != 1 || control(endpoint("start", &params)?).await?["Response"] != "started" {
+        if init["S"] != 1 || control(endpoint("start", &params)?)?["Response"] != "started" {
             return Err(Error::external("Azure did not start the live hub connection."));
         }
         let method = match resource {
