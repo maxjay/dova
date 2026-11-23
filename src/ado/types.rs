@@ -76,16 +76,14 @@ pub struct PullRequest {
     pub url: String,
 }
 
-/// A pull request as a list shows it: with its check, and how many review threads are still open.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListedPullRequest {
     #[serde(flatten)]
     pub pr: PullRequest,
-    /// Its latest validation run, or without one, its branch's latest run.
+    /// Latest PR validation run, falling back to the source branch.
     pub check: Option<Run>,
     pub open_threads: u64,
-    /// Where you stand on it, in a list of the ones you were asked to review.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub review: Option<Review>,
 }

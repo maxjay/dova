@@ -60,7 +60,6 @@ pub struct Request {
     /// The answer may not be text (a file's contents): hand it back as base64 of its bytes.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub binary: bool,
-    /// Request a ZIP archive of Git blobs. The response bytes travel like any binary response.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub zip: bool,
 }

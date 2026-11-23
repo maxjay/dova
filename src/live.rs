@@ -1,4 +1,3 @@
-//! Session-owned live views. Subscribe before the snapshot and resync on reconnect.
 use crate::ado::{
     client::{review::Placement, AdoClient},
     sections::{Resource, Sections},
@@ -11,13 +10,14 @@ use crate::error::{Error, Result};
 use crate::rpc::RpcError;
 use crate::{config, urls};
 use serde_json::{json, Map, Value};
-use std::collections::HashMap;
+use std::collections::{hash_map::Entry, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::{
     runtime::{Builder, Runtime},
     sync::oneshot,
+    task::JoinHandle,
     time::sleep,
 };
 
@@ -122,8 +122,7 @@ impl Target {
         }
     }
 
-    /// Keep reading while the snapshot loads. Only the union of dirty sections
-    /// needs buffering, even when a review receives many comments.
+    /// Buffer changed sections while the snapshot is loading.
     async fn synchronized(self: &Arc<Self>) -> Result<(Hub, Value)> {
         let mut hub = self.subscribe().await?;
         let target = self.clone();
@@ -135,43 +134,30 @@ impl Target {
             }
         }
     }
-}
 
-struct Subscription {
-    id: String,
-    target: Arc<Target>,
-    send: SendMessage,
-    active: Mutex<bool>,
-}
-
-impl Subscription {
-    fn event(&self, method: &str, mut params: Value) {
-        let active = self.active.lock().unwrap();
-        if *active {
-            params["subscription"] = json!(self.id);
-            let name = format!("{}.{method}", self.target.resource().prefix());
-            (self.send)(json!({"jsonrpc":"2.0","method":name,"params":params}));
-        }
-    }
-
-    async fn listen(&self, mut hub: Hub) {
+    async fn listen(self: Arc<Self>, mut hub: Hub, id: String, send: SendMessage) {
+        let event = |method: &str, mut params: Value| {
+            params["subscription"] = json!(id);
+            let name = format!("{}.{method}", self.resource().prefix());
+            send(json!({"jsonrpc":"2.0","method":name,"params":params}));
+        };
         loop {
             if !hub.pending.is_empty() {
-                self.event("changed", json!({"sections":std::mem::take(&mut hub.pending)}));
+                event("changed", json!({"sections":std::mem::take(&mut hub.pending)}));
             }
             match hub.next().await {
                 Ok(sections) => {
                     hub.pending = sections;
                     continue;
                 }
-                Err(_) => self.event("disconnected", json!({})),
+                Err(_) => event("disconnected", json!({})),
             }
             drop(hub);
             let mut delay = 1;
             loop {
                 sleep(Duration::from_secs(delay)).await;
-                if let Ok((new_hub, snapshot)) = self.target.synchronized().await {
-                    self.event("resynced", json!({"snapshot":snapshot}));
+                if let Ok((new_hub, snapshot)) = self.synchronized().await {
+                    event("resynced", json!({"snapshot":snapshot}));
                     hub = new_hub;
                     break;
                 }
@@ -181,20 +167,15 @@ impl Subscription {
     }
 }
 
-struct Entry {
-    sub: Arc<Subscription>,
-    _cancel: oneshot::Sender<()>,
-}
-impl Drop for Entry {
-    fn drop(&mut self) {
-        *self.sub.active.lock().unwrap() = false;
-    }
+struct Subscription {
+    target: Arc<Target>,
+    listener: JoinHandle<()>,
 }
 
 pub struct Session {
     send: SendMessage,
     next: AtomicU64,
-    entries: Mutex<HashMap<String, Entry>>,
+    entries: Mutex<HashMap<String, Subscription>>,
     runtime: Runtime,
 }
 
@@ -222,14 +203,18 @@ impl Session {
     fn open_target(&self, target: Arc<Target>, reply: impl FnOnce(Value)) -> Result<()> {
         let (hub, snapshot) = self.runtime.block_on(target.synchronized())?;
         let id = format!("s{}", self.next.fetch_add(1, Ordering::Relaxed));
-        let sub = Arc::new(Subscription { id: id.clone(), target, send: self.send.clone(), active: Mutex::new(true) });
-        let (stop, cancel) = oneshot::channel();
-        self.entries.lock().unwrap().insert(id.clone(), Entry { sub: sub.clone(), _cancel: stop });
-        // Flush the snapshot before publishing changes buffered during the read.
-        reply(json!({"subscription":id, "snapshot":snapshot}));
-        self.runtime.spawn(async move {
-            tokio::select! { biased; _ = cancel => {}, _ = sub.listen(hub) => {} }
+        let (start, ready) = oneshot::channel();
+        let watched = target.clone();
+        let subscription = id.clone();
+        let send = self.send.clone();
+        let listener = self.runtime.spawn(async move {
+            if ready.await.is_ok() {
+                watched.listen(hub, subscription, send).await;
+            }
         });
+        self.entries.lock().unwrap().insert(id.clone(), Subscription { target, listener });
+        reply(json!({"subscription":id, "snapshot":snapshot}));
+        let _ = start.send(());
         Ok(())
     }
 
@@ -240,24 +225,26 @@ impl Session {
         if sections.is_empty() || !sections.is_subset(&resource.sections()) {
             return Err(RpcError::new(-32602, "Request one or more sections belonging to this resource."));
         }
-        let sub = self
+        let target = self
             .entries
             .lock()
             .unwrap()
             .get(id)
-            .filter(|e| e.sub.target.resource() == resource)
-            .map(|e| e.sub.clone())
+            .filter(|sub| sub.target.resource() == resource)
+            .map(|sub| sub.target.clone())
             .ok_or_else(unknown)?;
-        Ok(sub.target.read(&sections)?)
+        Ok(target.read(&sections)?)
     }
 
     pub fn close(&self, resource: Resource, params: &Params) -> Result<Value, RpcError> {
         let id = subscription_id(params)?;
-        let mut entries = self.entries.lock().unwrap();
-        if !entries.get(id).is_some_and(|e| e.sub.target.resource() == resource) {
-            return Err(unknown());
-        }
-        entries.remove(id);
+        let listener = match self.entries.lock().unwrap().entry(id.to_owned()) {
+            Entry::Occupied(entry) if entry.get().target.resource() == resource => entry.remove().listener,
+            _ => return Err(unknown()),
+        };
+        listener.abort();
+        // Finish any in-flight notification before acknowledging close.
+        let _ = self.runtime.block_on(listener);
         Ok(Value::Null)
     }
 }
@@ -268,6 +255,7 @@ fn subscription_id(params: &Params) -> Result<&str, RpcError> {
         .and_then(Value::as_str)
         .ok_or_else(|| RpcError::new(-32602, "Expected a subscription ID."))
 }
+
 fn unknown() -> RpcError {
     RpcError::new(-32602, "Unknown subscription for this resource in this session.")
 }

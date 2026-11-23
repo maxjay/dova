@@ -1,6 +1,3 @@
-//! The outbound Azure DevOps live hubs. Tokens stay in this adapter;
-//! network errors are reported without handshake URLs or connection tokens.
-
 use super::sections::{Resource, Section, Section::*, Sections};
 use crate::error::{Error, Result};
 use futures_util::{SinkExt, StreamExt};

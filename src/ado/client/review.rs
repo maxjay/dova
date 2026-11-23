@@ -1,7 +1,3 @@
-//! The Azure Repos PR page can return current thread positions, iteration
-//! and changed files together. Keep the private wire format here. If the
-//! provider is unavailable or its shape changes, use the REST reads.
-
 use super::{check_status, settle, AdoClient, Iteration, Method, PullRequest, Request, Result, JSON};
 use crate::ado::map::{is_discussion, to_change, to_pull_request, to_thread};
 use crate::ado::sections::{Section, Sections};
@@ -26,8 +22,6 @@ struct Review {
 }
 
 impl AdoClient<'_> {
-    /// Fetch the distinct old and new blobs together. A submodule or a server
-    /// without the ZIP endpoint can still be read by the single-blob path.
     pub fn review_blobs(&self, pr: &PullRequest, ids: &BTreeSet<&str>) -> Result<HashMap<String, Option<Vec<u8>>>> {
         let mut blobs = if ids.len() > 1 { self.blob_archive(pr, ids)? } else { HashMap::new() };
         let missing: Vec<_> = ids.iter().copied().filter(|id| !blobs.contains_key(*id)).collect();
@@ -169,8 +163,7 @@ fn discussion(data: &Value) -> Option<Vec<Thread>> {
     Some(threads)
 }
 
-/// Latest file membership for positioning discussions without fetching the file list
-/// again on every comment. This lives for exactly one subscription.
+/// File paths from the last iteration read by this subscription.
 #[derive(Default)]
 pub struct Placement {
     iteration: Option<u64>,

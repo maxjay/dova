@@ -1,6 +1,3 @@
-//! The user's default Azure DevOps organization. Resolve its ID on setup,
-//! then read the name and ID together from a local file.
-
 use std::fs;
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};

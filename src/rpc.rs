@@ -1,19 +1,5 @@
-//! `dova rpc`: every dova command as a JSON-RPC 2.0 method, one JSON
-//! message per line on stdin/stdout — for tools that want Azure DevOps
-//! through dova rather than through az.
-//!
-//!   → {"jsonrpc":"2.0","id":1,"method":"wi.view","params":{"idOrUrl":"4821"}}
-//!   ← {"jsonrpc":"2.0","id":1,"result":{"id":4821,"title":…}}
-//!
-//! A method is a command path joined with dots (`status`, `pr.create`,
-//! `pipeline.log`). Params are its arguments and flags by camelCased name,
-//! plus `cwd` (which repo to act in) and `org`/`project`/`repo`. Results
-//! are exactly what `--json` prints. `rpc.methods` lists them. Requests
-//! run concurrently; nothing prompts, and text that the CLI would read
-//! from stdin is passed as a param instead.
-//!
-//! There is no second list of commands here: a call is turned into the
-//! command line it stands for and goes through the same parser.
+//! Newline-delimited JSON-RPC over stdio. CLI methods use the command parser.
+//! Live PR and work item methods share a subscription session per process.
 
 use std::io::{BufRead, Write};
 use std::path::PathBuf;

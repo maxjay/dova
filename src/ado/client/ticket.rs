@@ -18,8 +18,7 @@ impl AdoClient<'_> {
         })
     }
 
-    /// Azure returns the project on the item itself. Keep it for comments-only
-    /// reads, and replace it on each item read (an item can move projects).
+    /// Comments require the current project. A work item can move between projects.
     pub fn ticket_sections(&self, id: u64, sections: &Sections, project: &mut Option<String>) -> Result<Value> {
         use Section::*;
         let mut result = json!({});

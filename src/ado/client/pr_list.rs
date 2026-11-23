@@ -1,5 +1,3 @@
-//! Project PR search and the review counts and pipeline checks shown on each row.
-
 use super::{AdoClient, MOST};
 use crate::ado::map::{reviewer, same_identity, to_pull_request, to_run, vote_of};
 use crate::ado::types::{ListedPullRequest, PullRequest, Review, Run};
@@ -269,7 +267,7 @@ impl PrListData {
     }
 }
 
-// Azure queue times are UTC with optional fractional seconds. Keep that precision until the winner is known.
+// Azure queue times are UTC with optional fractional seconds.
 fn queued(raw: &Value) -> (&str, Option<u64>) {
     (raw["queueTime"].as_str().unwrap_or("").trim_end_matches('Z'), raw["id"].as_u64())
 }
