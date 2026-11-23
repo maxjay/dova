@@ -171,22 +171,18 @@ enum Side {
     Binary,
 }
 
-fn side(blob: &str, bytes: Option<&[u8]>) -> Side {
-    match bytes {
-        Some(bytes) => decode(bytes).map_or(Side::Binary, Side::Text),
-        // A submodule: a commit of another repo, which git shows as this one line.
-        None => Side::Text(format!("Subproject commit {}\n", blob.to_ascii_lowercase())),
-    }
+fn side(bytes: &[u8]) -> Side {
+    decode(bytes).map_or(Side::Binary, Side::Text)
 }
 
 /// What changed inside one file. `whole` keeps both sides' full text as well.
-fn content(change: &Change, blobs: &HashMap<String, Option<Vec<u8>>>, context: usize, whole: bool) -> Content {
+fn content(change: &Change, blobs: &HashMap<String, Vec<u8>>, context: usize, whole: bool) -> Content {
     if named_binary(change.at()) {
         return Content { binary: true, ..Content::default() };
     }
     // A file that only moved has nothing to compare, and is read once if its text is wanted.
     let moved_only = change.blob.is_some() && change.blob == change.old_blob;
-    let read = |blob: &Option<String>| blob.as_deref().map(|id| side(id, blobs[id].as_deref()));
+    let read = |blob: &Option<String>| blob.as_deref().map(|id| side(&blobs[id]));
     let (old, new) = match (moved_only, whole) {
         (true, false) => return Content::default(),
         (true, true) => (read(&change.blob), None),
@@ -402,7 +398,7 @@ pub fn anchor(ado: &AdoClient, pr: &PullRequest, at: &str, old: bool) -> Result<
     let not_text = || Error::user(format!("{file} isn't text: it has no lines to comment on."));
     let blob = if old { &change.old_blob } else { &change.blob };
     let id = blob.as_deref().filter(|_| !named_binary(&file)).ok_or_else(not_text)?;
-    let text = match side(id, ado.blob(pr, id)?.as_deref()) {
+    let text = match side(&ado.blob(pr, id)?) {
         Side::Text(text) => text,
         _ => return Err(not_text()),
     };
@@ -424,22 +420,17 @@ mod tests {
     use serde_json::{json, Value};
 
     use super::*;
-    use crate::testing::{bytes_response, cli, json_response, ok, rest_pr, Bed, Recorded, Route};
+    use crate::testing::{bytes_response, cli, ok, rest_pr, Bed, Recorded, Route};
 
-    fn blobs(r: &Recorded, content: impl Fn(&str) -> Option<Vec<u8>>) -> Option<crate::ado::Response> {
+    fn blobs(r: &Recorded, content: impl Fn(&str) -> Vec<u8>) -> Option<crate::ado::Response> {
         use std::io::{Cursor, Write};
         if let Some((_, id)) = r.path.split_once("/blobs/") {
-            return Some(match content(id) {
-                Some(bytes) => bytes_response(&bytes),
-                None => json_response(400, json!({"message":"TF401035: object does not exist"})),
-            });
+            return Some(bytes_response(&content(id)));
         }
         let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
         for id in r.body.as_array().unwrap().iter().map(|id| id.as_str().unwrap()) {
-            if let Some(bytes) = content(id) {
-                zip.start_file(id, zip::write::SimpleFileOptions::default()).unwrap();
-                zip.write_all(&bytes).unwrap();
-            }
+            zip.start_file(id, zip::write::SimpleFileOptions::default()).unwrap();
+            zip.write_all(&content(id)).unwrap();
         }
         Some(bytes_response(&zip.finish().unwrap().into_inner()))
     }
@@ -476,18 +467,16 @@ mod tests {
                 )
             } else if r.path.contains("/blobs") {
                 blobs(r, |id| {
-                    Some(
-                        match id {
-                            "old-numbers" => "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\n",
-                            "new-numbers" => "one\nTWO\nthree\nfour\nfive\nsix\nseven\neight\nnine",
-                            "new-ts" => "export const shiny = true;\n",
-                            "same" => "as it was\n",
-                            "doomed" => "going away\n",
-                            _ => return None,
-                        }
-                        .as_bytes()
-                        .to_vec(),
-                    )
+                    match id {
+                        "old-numbers" => "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\n",
+                        "new-numbers" => "one\nTWO\nthree\nfour\nfive\nsix\nseven\neight\nnine",
+                        "new-ts" => "export const shiny = true;\n",
+                        "same" => "as it was\n",
+                        "doomed" => "going away\n",
+                        _ => panic!("unexpected blob {id}"),
+                    }
+                    .as_bytes()
+                    .to_vec()
                 })
             } else if r.method == "POST" {
                 let said = json!([{ "id": 1, "content": "x" }]);
@@ -637,26 +626,23 @@ mod tests {
                         edit("/latin.txt"),
                         edit("/dos.txt"),
                         edit("/data"),
-                        edit("/vendor/lib"),
                         edit("/generated.lock")
                     ]),
                     json!([]),
                 )
             } else if r.path.contains("/blobs") {
-                blobs(r, |id| {
-                    Some(match id {
-                        "old/wide.txt" => utf16("\u{feff}alpha\r\nbeta\r\n"),
-                        "new/wide.txt" => utf16("\u{feff}alpha\r\nBETA \u{1F642}\r\n"),
-                        "old/latin.txt" => b"caf\xE9\n".to_vec(),
-                        "new/latin.txt" => b"caf\xE9s\n".to_vec(),
-                        "old/dos.txt" => b"one\r\ntwo\r\n".to_vec(),
-                        "new/dos.txt" => b"one\ntwo\n".to_vec(),
-                        "old/data" => b"plain once\n".to_vec(),
-                        "new/data" => b"\x89PNG\x00\x00".to_vec(),
-                        "old/generated.lock" => many.as_bytes().to_vec(),
-                        "new/generated.lock" => Vec::new(),
-                        _ => return None,
-                    })
+                blobs(r, |id| match id {
+                    "old/wide.txt" => utf16("\u{feff}alpha\r\nbeta\r\n"),
+                    "new/wide.txt" => utf16("\u{feff}alpha\r\nBETA \u{1F642}\r\n"),
+                    "old/latin.txt" => b"caf\xE9\n".to_vec(),
+                    "new/latin.txt" => b"caf\xE9s\n".to_vec(),
+                    "old/dos.txt" => b"one\r\ntwo\r\n".to_vec(),
+                    "new/dos.txt" => b"one\ntwo\n".to_vec(),
+                    "old/data" => b"plain once\n".to_vec(),
+                    "new/data" => b"\x89PNG\x00\x00".to_vec(),
+                    "old/generated.lock" => many.as_bytes().to_vec(),
+                    "new/generated.lock" => Vec::new(),
+                    _ => panic!("unexpected blob {id}"),
                 })
             } else if r.method == "POST" {
                 ok(
@@ -688,11 +674,9 @@ mod tests {
         assert_eq!(changed(2), ["removed one", "removed two", "added one", "added two"]);
         // Binary on one side is binary.
         assert_eq!((&file(3)["binary"], &file(3)["hunks"]), (&json!(true), &json!([])));
-        // A submodule reads as git shows it, and doesn't stop the rest.
-        assert_eq!(changed(4), ["removed Subproject commit old/vendor/lib", "added Subproject commit new/vendor/lib"]);
         // A file that changes more lines than anyone asked to see is counted, not sent.
         assert_eq!(
-            (&file(5)["large"], &file(5)["added"], &file(5)["removed"], &file(5)["hunks"]),
+            (&file(4)["large"], &file(4)["added"], &file(4)["removed"], &file(4)["hunks"]),
             (&json!(true), &json!(0), &json!(10_001), &json!([]))
         );
         assert!(file(0).get("large").is_none());

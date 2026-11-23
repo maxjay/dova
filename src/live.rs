@@ -10,15 +10,13 @@ use crate::error::{Error, Result};
 use crate::rpc::RpcError;
 use crate::{config, urls};
 use serde_json::{json, Map, Value};
-use std::collections::{hash_map::Entry, HashMap};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 use tokio::{
     runtime::{Builder, Runtime},
     sync::oneshot,
     task::JoinHandle,
-    time::sleep,
 };
 
 type Params = Map<String, Value>;
@@ -66,14 +64,10 @@ impl Target {
             .filter(|s| config::valid_name(s))
             .ok_or_else(|| Error::user("Invalid organization for a live view."))?
             .to_owned();
-        let host = match config::saved_org(&app.env)?.filter(|saved| saved.name.eq_ignore_ascii_case(&org)) {
-            Some(saved) => saved.id,
-            None => ado.connection_data()?["instanceId"]
-                .as_str()
-                .filter(|s| config::valid_id(s))
-                .ok_or_else(|| Error::external("Azure did not return the organization GUID."))?
-                .to_owned(),
-        };
+        let host = config::saved_org(&app.env)?
+            .filter(|saved| saved.name.eq_ignore_ascii_case(&org))
+            .ok_or_else(|| Error::user("Organization is not configured."))?
+            .id;
         let hub_url = format!("{org_url}{hub_path}");
         Ok(Self { transport: app.transport, org_url, org, item, hub_url, host })
     }
@@ -88,11 +82,18 @@ impl Target {
     fn read(&self, sections: &Sections) -> Result<Value> {
         let ado = AdoClient::new(self.transport.as_ref(), &self.org_url);
         match &self.item {
-            Item::Pr(pr) => Ok(ado.read_pr(pr, sections)?.snapshot(sections)),
+            Item::Pr(pr) => Ok(ado.read_pr(pr, sections)?.snapshot),
             Item::Wi { id, project } => {
                 Ok(ado.read_ticket(*id, sections, &mut project.lock().unwrap())?.snapshot(&self.org_url, sections))
             }
         }
+    }
+
+    async fn load(self: &Arc<Self>, sections: Sections) -> Result<Value> {
+        let target = self.clone();
+        tokio::task::spawn_blocking(move || target.read(&sections))
+            .await
+            .map_err(|_| Error::external("Could not read live Azure data."))?
     }
 
     async fn subscribe(self: &Arc<Self>) -> Result<Hub> {
@@ -104,34 +105,16 @@ impl Target {
             Item::Pr(pr) => (pr.id, json!([pr.id, pr.repo_id])),
             Item::Wi { id, .. } => (*id, json!([id])),
         };
-        let connect = |args, bearer: String| async move {
-            Hub::connect(&self.hub_url, &self.host, self.resource(), id, args, &bearer).await
-        };
-        match connect(args.clone(), bearer).await {
-            Err(err) if err.kind == crate::error::Kind::Prereq => {
-                // A saved org can belong to a different Entra tenant than az's
-                // default. The REST transport handles the tenant challenge.
-                let target = self.clone();
-                let token = tokio::task::spawn_blocking(move || {
-                    AdoClient::new(target.transport.as_ref(), &target.org_url).connection_data()?;
-                    target.transport.token(&target.org)
-                })
-                .await
-                .map_err(|_| Error::external("Could not refresh Azure credentials."))??;
-                connect(args, token).await
-            }
-            result => result,
-        }
+        Hub::connect(&self.hub_url, &self.host, self.resource(), id, args, &bearer).await
     }
 
     /// Buffer changed sections while the snapshot is loading.
     async fn synchronized(self: &Arc<Self>) -> Result<(Hub, Value)> {
         let mut hub = self.subscribe().await?;
-        let target = self.clone();
-        let mut snapshot = tokio::task::spawn_blocking(move || target.read(&target.resource().sections()));
+        let mut snapshot = Box::pin(self.load(self.resource().sections()));
         loop {
             tokio::select! {
-                result = &mut snapshot => return Ok((hub, result.map_err(|_| Error::external("Could not read the live snapshot."))??)),
+                result = &mut snapshot => return Ok((hub, result?)),
                 event = hub.next() => hub.pending.extend(event?),
             }
         }
@@ -144,40 +127,27 @@ impl Target {
             send(json!({"jsonrpc":"2.0","method":name,"params":params}));
         };
         loop {
-            if !hub.pending.is_empty() {
-                event("changed", json!({"sections":std::mem::take(&mut hub.pending)}));
-            }
-            match hub.next().await {
-                Ok(sections) => {
-                    hub.pending = sections;
-                    continue;
+            let sections = if hub.pending.is_empty() {
+                match hub.next().await {
+                    Ok(sections) => sections,
+                    Err(_) => break,
                 }
-                Err(_) => event("disconnected", json!({})),
-            }
-            drop(hub);
-            let mut delay = 1;
-            loop {
-                sleep(Duration::from_secs(delay)).await;
-                if let Ok((new_hub, snapshot)) = self.synchronized().await {
-                    event("resynced", json!({"snapshot":snapshot}));
-                    hub = new_hub;
-                    break;
-                }
-                delay = (delay * 2).min(30);
+            } else {
+                std::mem::take(&mut hub.pending)
+            };
+            match self.load(sections).await {
+                Ok(changes) => event("changed", json!({"changes":changes})),
+                Err(_) => break,
             }
         }
+        event("disconnected", json!({}));
     }
-}
-
-struct Subscription {
-    target: Arc<Target>,
-    listener: JoinHandle<()>,
 }
 
 pub struct Session {
     send: SendMessage,
     next: AtomicU64,
-    entries: Mutex<HashMap<String, Subscription>>,
+    entries: Mutex<HashMap<String, JoinHandle<()>>>,
     runtime: Runtime,
 }
 
@@ -214,50 +184,26 @@ impl Session {
                 watched.listen(hub, subscription, send).await;
             }
         });
-        self.entries.lock().unwrap().insert(id.clone(), Subscription { target, listener });
+        self.entries.lock().unwrap().insert(id.clone(), listener);
         reply(json!({"subscription":id, "snapshot":snapshot}));
         let _ = start.send(());
         Ok(())
     }
 
-    pub fn read(&self, resource: Resource, params: &Params) -> Result<Value, RpcError> {
-        let id = subscription_id(params)?;
-        let sections: Sections = serde_json::from_value(params.get("sections").cloned().unwrap_or(Value::Null))
-            .map_err(|_| RpcError::new(-32602, "Expected a list of section names."))?;
-        if sections.is_empty() || !sections.is_subset(&resource.sections()) {
-            return Err(RpcError::new(-32602, "Request one or more sections belonging to this resource."));
-        }
-        let target = self
+    pub fn close(&self, params: &Params) -> Result<Value, RpcError> {
+        let id = params
+            .get("subscription")
+            .and_then(Value::as_str)
+            .ok_or_else(|| RpcError::new(-32602, "Expected a subscription ID."))?;
+        let listener = self
             .entries
             .lock()
             .unwrap()
-            .get(id)
-            .filter(|sub| sub.target.resource() == resource)
-            .map(|sub| sub.target.clone())
-            .ok_or_else(unknown)?;
-        Ok(target.read(&sections)?)
-    }
-
-    pub fn close(&self, resource: Resource, params: &Params) -> Result<Value, RpcError> {
-        let id = subscription_id(params)?;
-        let listener = match self.entries.lock().unwrap().entry(id.to_owned()) {
-            Entry::Occupied(entry) if entry.get().target.resource() == resource => entry.remove().listener,
-            _ => return Err(unknown()),
-        };
+            .remove(id)
+            .ok_or_else(|| RpcError::new(-32602, "Unknown subscription in this session."))?;
         listener.abort();
         // Finish any in-flight notification before acknowledging close.
         let _ = self.runtime.block_on(listener);
         Ok(Value::Null)
     }
-}
-
-fn subscription_id(params: &Params) -> Result<&str, RpcError> {
-    params
-        .get("subscription")
-        .and_then(Value::as_str)
-        .ok_or_else(|| RpcError::new(-32602, "Expected a subscription ID."))
-}
-
-fn unknown() -> RpcError {
-    RpcError::new(-32602, "Unknown subscription for this resource in this session.")
 }

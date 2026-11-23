@@ -17,27 +17,10 @@ const THREAD_CONTEXTS: u16 = 512;
 
 #[derive(Default)]
 pub struct PrRead {
-    fields: Value,
+    pub snapshot: Value,
     files: Option<(Iteration, Vec<Change>)>,
     pub threads: Vec<Thread>,
     pub work_items: Vec<WorkItemRef>,
-}
-
-impl PrRead {
-    pub fn snapshot(mut self, sections: &Sections) -> Value {
-        if let Some((iteration, files)) = self.files {
-            self.fields["files"] = json!({"iteration":iteration, "entries": files.iter().map(|f| json!({
-                "path":f.at(), "oldPath":f.old_path, "change":f.kind, "oldBlob":f.old_blob, "newBlob":f.blob
-            })).collect::<Vec<_>>()});
-        }
-        if sections.contains(&Section::Discussion) {
-            self.fields["discussion"] = json!(self.threads);
-        }
-        if sections.contains(&Section::WorkItems) {
-            self.fields["workItems"] = json!(self.work_items);
-        }
-        self.fields
-    }
 }
 
 fn incomplete() -> Error {
@@ -45,17 +28,10 @@ fn incomplete() -> Error {
 }
 
 impl AdoClient<'_> {
-    pub fn review_blobs(&self, pr: &PullRequest, ids: &BTreeSet<&str>) -> Result<HashMap<String, Option<Vec<u8>>>> {
-        let mut blobs = if ids.len() > 1 { self.blob_archive(pr, ids)? } else { HashMap::new() };
-        let missing: Vec<_> = ids.iter().copied().filter(|id| !blobs.contains_key(*id)).collect();
-        let fetched = crate::par::map(&missing, |id| self.blob(pr, id));
-        for (id, bytes) in missing.into_iter().zip(fetched) {
-            blobs.insert(id.to_owned(), bytes?);
+    pub fn review_blobs(&self, pr: &PullRequest, ids: &BTreeSet<&str>) -> Result<HashMap<String, Vec<u8>>> {
+        if ids.is_empty() {
+            return Ok(HashMap::new());
         }
-        Ok(blobs)
-    }
-
-    fn blob_archive(&self, pr: &PullRequest, ids: &BTreeSet<&str>) -> Result<HashMap<String, Option<Vec<u8>>>> {
         let path = format!("{}/_apis/git/repositories/{}/blobs", enc(&pr.project), enc(&pr.repo));
         let req = Request {
             method: Method::Post,
@@ -65,14 +41,18 @@ impl AdoClient<'_> {
             zip: true,
             ..Request::get(self.url(&path, &[])?)
         };
-        let response = match self.send(&req) {
-            Ok(response) => response,
-            Err(err) if err.message.contains("TF401035") => return Ok(HashMap::new()),
-            Err(err) => return Err(err),
-        };
+        let response = self.send(&req)?;
         let invalid = || Error::external("Azure DevOps returned an invalid Git blob archive.");
         let bytes = base64::engine::general_purpose::STANDARD.decode(response.body).map_err(|_| invalid())?;
-        unpack(bytes, ids).ok_or_else(invalid)
+        let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|_| invalid())?;
+        let mut blobs = HashMap::new();
+        for id in ids {
+            let mut file = zip.by_name(&id.to_ascii_lowercase()).map_err(|_| invalid())?;
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes).map_err(|_| invalid())?;
+            blobs.insert((*id).to_owned(), bytes);
+        }
+        Ok(blobs)
     }
 
     pub fn review_files(&self, pr: &PullRequest) -> Result<(Iteration, Vec<Change>)> {
@@ -89,27 +69,7 @@ impl AdoClient<'_> {
         let mut data = self.contribution_data(project, &[PROVIDER], &props)?;
         data.get_mut(PROVIDER).filter(|v| v.is_object()).map(Value::take).ok_or_else(incomplete)
     }
-}
 
-fn unpack(bytes: Vec<u8>, ids: &BTreeSet<&str>) -> Option<HashMap<String, Option<Vec<u8>>>> {
-    // Fall back to individual blobs when a batch would expand beyond this budget.
-    let mut remaining = 64 * 1024 * 1024_u64;
-    let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).ok()?;
-    let mut blobs = HashMap::new();
-    for id in ids {
-        let Ok(file) = zip.by_name(&id.to_ascii_lowercase()) else { continue };
-        if file.size() > remaining {
-            continue;
-        }
-        let mut bytes = Vec::new();
-        file.take(remaining + 1).read_to_end(&mut bytes).ok()?;
-        remaining = remaining.checked_sub(bytes.len() as u64)?;
-        blobs.insert((*id).to_owned(), Some(bytes));
-    }
-    Some(blobs)
-}
-
-impl AdoClient<'_> {
     fn review_changes(
         &self,
         pr: &PullRequest,
@@ -165,7 +125,7 @@ impl AdoClient<'_> {
             (provider()?, Vec::new())
         };
         let mut read = PrRead { work_items: items, ..PrRead::default() };
-        let out = &mut read.fields;
+        let out = &mut read.snapshot;
         if sections.contains(&Details) || sections.contains(&Reviewers) {
             let raw = &data["pullRequest"];
             if raw["pullRequestId"].as_u64() != Some(pr.id) {
@@ -218,6 +178,10 @@ impl AdoClient<'_> {
                 .filter(|t| is_discussion(t))
                 .map(to_thread)
                 .collect();
+            out["discussion"] = json!(&read.threads);
+        }
+        if sections.contains(&WorkItems) {
+            out["workItems"] = json!(&read.work_items);
         }
         let want_files = sections.contains(&Files);
         if want_files || read.threads.iter().any(|t| t.location.is_some()) {
@@ -226,6 +190,9 @@ impl AdoClient<'_> {
                 settle(thread, &files);
             }
             if want_files {
+                out["files"] = json!({"iteration":iteration, "entries": files.iter().map(|f| json!({
+                    "path":f.at(), "oldPath":f.old_path, "change":f.kind, "oldBlob":f.old_blob, "newBlob":f.blob
+                })).collect::<Vec<_>>()});
                 read.files = Some((iteration, files));
             }
         }
@@ -291,7 +258,7 @@ mod tests {
     }
 
     #[test]
-    fn diff_loads_duplicate_blobs_once_and_can_read_an_entry_missing_from_the_zip() {
+    fn diff_loads_duplicate_blobs_once_in_one_archive() {
         let bed = Bed::new(Box::new(|r| {
             if r.path.ends_with("/pullrequests/9") {
                 return ok(rest_pr(9, json!({})));
@@ -310,10 +277,11 @@ mod tests {
                 let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
                 zip.start_file("a", zip::write::SimpleFileOptions::default()).unwrap();
                 zip.write_all(b"old").unwrap();
+                zip.start_file("b", zip::write::SimpleFileOptions::default()).unwrap();
+                zip.write_all(b"new").unwrap();
                 return Some(bytes_response(&zip.finish().unwrap().into_inner()));
             }
-            assert!(r.path.ends_with("/blobs/b"), "{}", r.path);
-            Some(bytes_response(b"new"))
+            None
         }));
         let diff = cli(bed.app(), &["pr", "diff", "9", "--files", "first", "second", "--json"]).json();
         for file in diff["files"].as_array().unwrap() {
@@ -321,6 +289,5 @@ mod tests {
             assert_eq!(file["new"], "new");
         }
         assert_eq!(bed.ado.requests().iter().filter(|r| r.path.ends_with("/blobs")).count(), 1);
-        assert_eq!(bed.ado.requests().iter().filter(|r| r.path.ends_with("/blobs/b")).count(), 1);
     }
 }

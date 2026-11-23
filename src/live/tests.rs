@@ -5,6 +5,7 @@ use std::{
     net::TcpListener,
     sync::mpsc,
     thread,
+    time::Duration,
 };
 use tungstenite::Message;
 
@@ -35,49 +36,40 @@ fn control(listener: &TcpListener, verb: &str, result: Value) {
 }
 
 #[test]
-fn replies_before_queued_changes_and_reconciles_after_a_disconnect() {
+fn replies_before_queued_changes_and_stops_after_a_disconnect() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     let (release, commands) = mpsc::channel::<()>();
     let socket = thread::spawn(move || {
-        for attempt in 0..2 {
-            control(&listener, "negotiate", json!({"ConnectionToken":"test"}));
-            let (conn, _) = listener.accept().unwrap();
-            conn.set_read_timeout(Some(LIMIT)).unwrap();
-            let mut ws = tungstenite::accept(conn).unwrap();
-            let text = |v: Value| Message::text(v.to_string());
-            let callback = |m| json!({"M":[{"H":"pullrequestdetailhub","M":m,"A":[]}]});
-            ws.send(text(json!({"S":1}))).unwrap();
-            control(&listener, "start", json!({"Response":"started"}));
-            let sub: Value = serde_json::from_str(ws.read().unwrap().to_text().unwrap()).unwrap();
-            assert_eq!(sub["A"], json!([9, "repo"]));
-            ws.send(text(callback("onDiscussionsUpdated"))).unwrap();
-            ws.send(text(json!({"I":"0"}))).unwrap();
-            if attempt == 0 {
-                commands.recv_timeout(LIMIT).unwrap();
-                ws.send(text(json!({"M":[{"H":"PullRequestDetailHub","M":"OnLabelsUpdated","A":[]}]}))).unwrap();
-                commands.recv_timeout(LIMIT).unwrap();
-                ws.send(text(json!({"D":1}))).unwrap();
-            } else {
-                assert!(ws.read().is_err() || !ws.can_read(), "listener must release the socket on close");
-            }
-        }
+        control(&listener, "negotiate", json!({"ConnectionToken":"test"}));
+        let (conn, _) = listener.accept().unwrap();
+        conn.set_read_timeout(Some(LIMIT)).unwrap();
+        let mut ws = tungstenite::accept(conn).unwrap();
+        let text = |v: Value| Message::text(v.to_string());
+        let callback = |m| json!({"M":[{"H":"pullrequestdetailhub","M":m,"A":[]}]});
+        ws.send(text(json!({"S":1}))).unwrap();
+        control(&listener, "start", json!({"Response":"started"}));
+        let sub: Value = serde_json::from_str(ws.read().unwrap().to_text().unwrap()).unwrap();
+        assert_eq!(sub["A"], json!([9, "repo"]));
+        ws.send(text(callback("onDiscussionsUpdated"))).unwrap();
+        ws.send(text(json!({"I":"0"}))).unwrap();
+        commands.recv_timeout(LIMIT).unwrap();
+        ws.send(text(json!({"M":[{"H":"PullRequestDetailHub","M":"OnLabelsUpdated","A":[]}]}))).unwrap();
+        commands.recv_timeout(LIMIT).unwrap();
+        ws.send(text(json!({"D":1}))).unwrap();
     });
-    let restores = Arc::new(AtomicU64::new(0));
-    let count = restores.clone();
-    let ado = Arc::new(fake_ado(Box::new(move |r| {
+    let ado = Arc::new(fake_ado(Box::new(|r| {
         if r.path.ends_with("/workitems") {
             return ok(json!({"value":[]}));
         }
         let mask = &r.body["dataProviderContext"]["properties"]["types"];
-        let data = if mask == 1019 {
-            let n = count.fetch_add(1, Ordering::SeqCst);
-            json!({"pullRequest":rest_pr(9,json!({"title":format!("snapshot {n}"),"reviewers":[]})),
+        let data = match mask.as_u64().unwrap() {
+            1019 => json!({"pullRequest":rest_pr(9,json!({"title":"snapshot","reviewers":[]})),
                 "discussionThreads":[],"latestIterationId":2,"iterations":[{"id":2,"commonRefCommit":{"commitId":"base"},"sourceRefCommit":{"commitId":"head"}}],
-                "latestChanges":{"changeEntries":[]},"labels":[],"policies":[],"statuses":[]})
-        } else {
-            assert_eq!(mask, 32);
-            json!({"labels":[{"name":"updated"}]})
+                "latestChanges":{"changeEntries":[]},"labels":[],"policies":[],"statuses":[]}),
+            792 => json!({"discussionThreads":[]}),
+            32 => json!({"labels":[{"name":"updated"}]}),
+            mask => panic!("unexpected mask {mask}"),
         };
         ok(json!({"dataProviders":{"ms.vss-code-web.pr-detail-data-provider":data}}))
     })));
@@ -98,24 +90,14 @@ fn replies_before_queued_changes_and_reconciles_after_a_disconnect() {
     session.open_target(target, |reply| replies.send(reply).unwrap()).unwrap();
     let next = || client.recv_timeout(LIMIT).unwrap();
     let opened = next();
-    assert_eq!(opened["snapshot"]["details"]["title"], "snapshot 0");
-    let params = json!({"subscription":opened["subscription"],"sections":["labels"]});
-    assert_eq!(next()["params"]["sections"], json!(["discussion"]));
+    assert_eq!(opened["snapshot"]["details"]["title"], "snapshot");
+    let params = json!({"subscription":opened["subscription"]});
+    assert_eq!(next()["params"]["changes"], json!({"discussion":[]}));
     release.send(()).unwrap();
-    assert_eq!(next()["params"]["sections"], json!(["labels"]));
-    assert_eq!(
-        session.read(Resource::Pr, params.as_object().unwrap()).unwrap(),
-        json!({"labels":[{"name":"updated"}]})
-    );
-    assert!(session.close(Resource::Wi, params.as_object().unwrap()).is_err());
+    assert_eq!(next()["params"]["changes"], json!({"labels":[{"name":"updated"}]}));
     release.send(()).unwrap();
     assert_eq!(next()["method"], "pr.disconnected");
-    let resync = next();
-    assert_eq!(resync["method"], "pr.resynced");
-    assert_eq!(resync["params"]["snapshot"]["details"]["title"], "snapshot 1");
-    assert_eq!(next()["params"]["sections"], json!(["discussion"]));
-    session.close(Resource::Pr, params.as_object().unwrap()).unwrap();
-    assert!(session.read(Resource::Pr, params.as_object().unwrap()).is_err());
+    session.close(params.as_object().unwrap()).unwrap();
     socket.join().unwrap();
     assert!(client.try_recv().is_err());
 }

@@ -375,20 +375,15 @@ impl<'a> AdoClient<'a> {
         }
     }
 
-    /// A file's contents by their id, byte for byte. None when the repo holds
-    /// no such thing: the id is a submodule's commit, which lives in another repo.
-    pub fn blob(&self, pr: &PullRequest, id: &str) -> Result<Option<Vec<u8>>> {
+    /// A file's contents by their id, byte for byte.
+    pub fn blob(&self, pr: &PullRequest, id: &str) -> Result<Vec<u8>> {
         use base64::Engine;
         let path = format!("{}/_apis/git/repositories/{}/blobs/{id}", enc(&pr.project), enc(&pr.repo));
         let url = self.url(&path, &[("$format", "octetstream")])?;
-        match self.send(&Request { binary: true, ..Request::get(url) }) {
-            Ok(res) => base64::engine::general_purpose::STANDARD
-                .decode(res.body)
-                .map(Some)
-                .map_err(|_| Error::external("Azure DevOps' answer isn't the file that was asked for.")),
-            Err(err) if err.message.contains("TF401035") => Ok(None),
-            Err(err) => Err(err),
-        }
+        let response = self.send(&Request { binary: true, ..Request::get(url) })?;
+        base64::engine::general_purpose::STANDARD
+            .decode(response.body)
+            .map_err(|_| Error::external("Azure DevOps' answer isn't the file that was asked for."))
     }
 
     /// Nested under the thread's last comment, so it lands in the actual conversation.

@@ -66,10 +66,8 @@ pub fn methods() -> Vec<Method> {
     let mut methods: Vec<_> = found.iter().map(method).collect();
     for (name, description, args) in [
         ("pr.open", "Open a live PR snapshot", vec!["id"]),
-        ("pr.read", "Refresh sections of an open PR", vec!["subscription", "sections"]),
         ("pr.close", "Release a live PR subscription", vec!["subscription"]),
         ("wi.open", "Open a live work item snapshot", vec!["id"]),
-        ("wi.read", "Refresh sections of an open work item", vec!["subscription", "sections"]),
         ("wi.close", "Release a live work item subscription", vec!["subscription"]),
     ] {
         methods.push(Method {
@@ -277,8 +275,7 @@ pub fn serve_stdio(app: &App) -> Result<Output> {
                     respond(Err(err));
                 }
             }
-            "read" => respond(session.read(resource, params)),
-            "close" => respond(session.close(resource, params)),
+            "close" => respond(session.close(params)),
             _ => respond(invoker.invoke(method, params)),
         }
     });
